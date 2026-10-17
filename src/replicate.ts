@@ -66,15 +66,19 @@ export async function replicate(o: ReplicateOpts): Promise<Replicate[]> {
   const dir = replicatesDir(o.stateDir, id)
   mkdirSync(dir, { recursive: true })
 
+  const stopFile = o.stopFile ?? process.env.FACTORY_STOP_FILE ?? join(o.stateDir, 'STOP')
   if (o.rescore) {
+    const guard = startGuard(CAPS.maxCostUsd, stopFile) // no model call; only the emergency stop
     const out: Replicate[] = []
-    const signal = new AbortController().signal
-    for (const f of readdirSync(dir).filter((f) => f.endsWith('.json')).sort()) {
-      const r: Replicate = readJson(join(dir, f))
-      Object.assign(r, await evaluate(join(o.stateDir, 'work', `${id}-rep`, f.slice(0, -5)), r.sha, scored, probes, signal), { probesSha256, rescoredAt: new Date().toISOString() })
-      writeFileSync(join(dir, f), JSON.stringify(r, null, 2))
-      out.push(r)
-    }
+    try {
+      for (const f of readdirSync(dir).filter((f) => f.endsWith('.json')).sort()) {
+        guard.check()
+        const r: Replicate = readJson(join(dir, f))
+        Object.assign(r, await evaluate(join(o.stateDir, 'work', `${id}-rep`, f.slice(0, -5)), r.sha, scored, probes, guard.signal), { probesSha256, rescoredAt: new Date().toISOString() })
+        writeFileSync(join(dir, f), JSON.stringify(r, null, 2))
+        out.push(r)
+      }
+    } finally { guard.dispose() }
     return out
   }
 
@@ -85,7 +89,7 @@ export async function replicate(o: ReplicateOpts): Promise<Replicate[]> {
   const before: Ledger | null = existsSync(costFile) ? readJson(costFile) : null
   const drafted = existsSync(draftFile) ? (readJson(draftFile) as Ledger).totalUsd : 0
   // One cap per change: its drafts and every replicate command so far count against it.
-  const guard = startGuard(capUsd, o.stopFile ?? process.env.FACTORY_STOP_FILE ?? join(o.stateDir, 'STOP'),
+  const guard = startGuard(capUsd, stopFile,
     { spentUsd: drafted + (before?.totalUsd ?? 0), lapFile: join(o.stateDir, 'lap-ledger.json') })
   const model = guard.model(o.model)
   const saveCost = () => writeFileSync(costFile, JSON.stringify(mergeLedger(before, guard.ledger), null, 2)) // after every call: a stop keeps the spend

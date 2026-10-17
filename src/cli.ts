@@ -149,6 +149,7 @@ export async function main(argv: string[], model: Model = claudeModel): Promise<
         if (v['spec-from']) {
           if (v.base) throw new Error('--spec-from takes no --base')
           const src = loadApproved(sd, v['spec-from'])
+          if (src.base.baseSha) throw new Error(`--spec-from ${v['spec-from']}: it extends an app; only new-app specs can be reused`)
           // Same request, or (--spec) a control spec drafted by hand from a changed request.
           if (!v.spec && src.base.requestSha256 !== requestSha256) throw new Error(`--spec-from ${v['spec-from']}: drafted from another request`)
           reuse = { body: v.spec ? readFileSync(v.spec, 'utf8') : specBody(src.spec), iface: specIface(src.spec) }
