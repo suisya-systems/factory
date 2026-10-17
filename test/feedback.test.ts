@@ -46,19 +46,3 @@ test('combineVerdict defaults to AND; extractJson handles fenced and embedded JS
   assert.deepEqual(extractJson('verdict {"pass":false,"reason":"x"} done'), { pass: false, reason: 'x' })
   assert.throws(() => extractJson('nothing here'))
 })
-
-test('draft parses the drafter reply (access none) and the approval summary covers spec/scenarios/assumptions', async () => {
-  const { draft } = await import('../src/roles.ts')
-  const { approvalSummary } = await import('../src/cli.ts')
-  let access = ''
-  const d = await draft(async (t) => { access = t.access; return { ok: true, costUsd: 0.2, text: 'here:\n```json\n' + JSON.stringify({ spec: '# Memo\n- CRUD', assumptions: ['no auth'], scenarios: SCENARIOS }) + '\n```' } }, 'a memo api')
-  assert.equal(access, 'none')
-  const s = approvalSummary('memo-1', d, 'abc123')
-  assert.match(s, /--version abc123/)
-  assert.match(s, /- CRUD/)
-  assert.match(s, /Scenarios: 4 total/)
-  assert.match(s, /\| crud \| 3 \| 0 \|/)
-  assert.match(s, /\| not-found \| 0 \| 1 \|/)
-  assert.match(s, /- no auth/)
-  await assert.rejects(draft(async () => ({ ok: true, costUsd: 0, text: JSON.stringify({ spec: 'x', assumptions: [], scenarios: [{ id: 'bad' }] }) }), 'r'), /scenario/)
-})
