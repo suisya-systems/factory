@@ -58,15 +58,26 @@ const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
 // each tree's matches, then open shadow roots, so "<id>.<n>" names the same element for actions and checks), their
 // text (an input's value; textContent for non-HTML elements such as SVG).
 const SNAPSHOT = `(() => {
-  const out = {}, els = []; let n = 0, size = 0
+  const out = Object.create(null), els = []; let n = 0, size = 0 // no prototype: a test id "__proto__" is a key like any other
   const walk = (root) => { const all = root.querySelectorAll('*'); for (const e of all) if (e.hasAttribute('data-testid')) els.push(e); for (const e of all) if (e.shadowRoot) walk(e.shadowRoot) }
   walk(document)
+  const box = (r) => r.width > 0 && r.height > 0
+  const visible = (e) => { // Playwright's isElementVisible: display:contents is visible through its children
+    const s = getComputedStyle(e)
+    if (s.display === 'contents') {
+      for (let c = e.firstChild; c; c = c.nextSibling) {
+        if (c.nodeType === 1 && visible(c)) return true
+        if (c.nodeType === 3) { const g = document.createRange(); g.selectNodeContents(c); if ([...g.getClientRects()].some(box)) return true }
+      }
+      return false
+    }
+    return e.checkVisibility() && s.visibility === 'visible' && box(e.getBoundingClientRect())
+  }
   for (const e of els) {
-    const r = e.getBoundingClientRect()
-    if (!e.checkVisibility() || !r.width || !r.height || getComputedStyle(e).visibility !== 'visible') continue
+    if (!visible(e)) continue
     const id = e.getAttribute('data-testid'), t = (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.tagName) ? e.value : e.innerText ?? e.textContent).replace(/\\s+/g, ' ').trim()
     if (++n > ${UI_LIMITS.elements} || (size += id.length + t.length) > ${UI_LIMITS.chars}) return null
-    if (!Object.hasOwn(out, id)) out[id] = []
+    if (!out[id]) out[id] = []
     out[id].push(t)
   }
   return JSON.stringify(out)
