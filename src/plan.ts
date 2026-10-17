@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Model } from './adapter.ts'
 import { approve, checkId, hash, loadApproved, vaultDir } from './vault.ts'
-import { ask } from './roles.ts'
+import { ask, checkWithin, specIface } from './roles.ts'
 import { exportTree, removeTree, sandboxGit } from './sandbox.ts'
 import { isObj, runScenarios } from './scenario.ts'
 
@@ -144,6 +144,9 @@ export async function runPlan(sd: string, plan: string, o: PlanOpts, factory: (a
   const dir = planDir(sd, plan)
   const retries = o.retries ?? 1
   if (!(Number.isInteger(retries) && retries >= 0 && retries <= MAX_RETRIES)) throw new Error(`--retries must be an integer from 0 to ${MAX_RETRIES}, got ${o.retries}`)
+  // Same checks as `run`, before anything is drafted: an invalid limit is never replaced by the default.
+  if (o.maxCostUsd !== undefined && !(Number.isFinite(o.maxCostUsd) && o.maxCostUsd > 0)) throw new Error(`max cost must be a positive number, got ${o.maxCostUsd}`)
+  if (o.maxAttempts !== undefined && !(Number.isInteger(o.maxAttempts) && o.maxAttempts >= 1)) throw new Error(`max attempts must be an integer >= 1, got ${o.maxAttempts}`)
   const target = realpathSync(o.shipTarget)
   const head = async () => {
     const h = await sandboxGit(target, ['rev-parse', 'HEAD'], false)
@@ -192,6 +195,9 @@ export async function runPlan(sd: string, plan: string, o: PlanOpts, factory: (a
       if (!existsSync(join(vaultDir(sd, id0), 'approval.json'))) { rep.status = 'drafted'; rep.changeIds = [id0]; return report('waiting', `approve ${id0}`) }
       const approved = loadApproved(sd, id0)
       if (approved.base.baseSha !== (i === 0 ? null : prev)) return report('failed', `${id0} was drafted against ${approved.base.baseSha ?? 'no app'}, not ${i === 0 ? 'a new app' : prev}`)
+      // A draft under this id that is not this plan's part (an ordinary `draft` took the reserved id) is not built.
+      if (approved.base.requestSha256 !== sha256(part.request)) return report('failed', `${id0} was not drafted from the plan's request for part ${part.id}`)
+      try { checkWithin(JSON.parse(specIface(approved.spec)), JSON.parse(specIface(loadApproved(sd, p.wholeId).spec))) } catch (e) { return report('failed', `${id0}: ${(e as Error).message}`) }
       rep.status = 'approved'
 
       let last = ''
@@ -204,7 +210,7 @@ export async function runPlan(sd: string, plan: string, o: PlanOpts, factory: (a
             if (!existsSync(vaultDir(sd, id))) cpSync(vaultDir(sd, id0), vaultDir(sd, id), { recursive: true, preserveTimestamps: true })
             if (loadApproved(sd, id).version !== approved.version) return report('failed', `${id} is not a copy of the approved ${id0}`)
           }
-          await factory(['run', id, '--ship-target', target, '--port', String(o.port), ...(o.maxCostUsd ? ['--max-cost', String(o.maxCostUsd)] : []), ...(o.maxAttempts ? ['--max-attempts', String(o.maxAttempts)] : [])])
+          await factory(['run', id, '--ship-target', target, '--port', String(o.port), ...(o.maxCostUsd !== undefined ? ['--max-cost', String(o.maxCostUsd)] : []), ...(o.maxAttempts !== undefined ? ['--max-attempts', String(o.maxAttempts)] : [])])
         }
         const r = rec(id)
         rep.changeIds.push(id)
@@ -224,11 +230,13 @@ export async function runPlan(sd: string, plan: string, o: PlanOpts, factory: (a
       if (stopped()) return report('failed', `emergency stop is active (${o.stopFile}); delete it by hand to continue`)
       if ((await head()) !== prev) return report('failed', `the ship target is not at the final shipped commit ${prev}; the whole request is not checked on another one`)
       const tmp = mkdtempSync(join(tmpdir(), 'factory-whole-'))
+      const ac = new AbortController(), poll = setInterval(() => { if (stopped()) ac.abort() }, 500)
       try {
-        await exportTree(target, prev, tmp)
-        const results = await runScenarios(tmp, loadApproved(sd, p.wholeId).scenarios, new AbortController().signal)
+        await exportTree(target, prev, tmp, ac.signal)
+        const results = await runScenarios(tmp, loadApproved(sd, p.wholeId).scenarios, ac.signal)
+        if (stopped()) return report('failed', `emergency stop is active (${o.stopFile}); the whole request was not recorded`)
         writeFileSync(wf, JSON.stringify({ sha: prev, pass: results.every((r) => r.pass), results }, null, 2))
-      } finally { removeTree(tmp) }
+      } finally { clearInterval(poll); removeTree(tmp) }
     }
     const w = readJson<{ sha: string; pass: boolean; results: { id: string; pass: boolean }[] }>(wf)!
     whole = { sha: w.sha, pass: w.pass, passed: w.results.filter((r) => r.pass).length, total: w.results.length }

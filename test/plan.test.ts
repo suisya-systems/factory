@@ -249,3 +249,24 @@ test('--retries outside 0..3 is refused before any build', async () => {
   await assert.rejects(h.cli(h.planArgs(['--retries', '9'])), /--retries must be an integer from 0 to 3/)
   assert.equal(h.count('builder'), 0)
 })
+
+test('invalid --max-cost / --max-attempts are refused before any draft, never replaced by the default', async () => {
+  const h = await ready({})
+  const calls = h.log.length
+  await assert.rejects(h.cli(h.planArgs(['--max-cost', '0'])), /max cost must be a positive number/)
+  await assert.rejects(h.cli(h.planArgs(['--max-cost', '10usd'])), /max cost must be a positive number/)
+  await assert.rejects(h.cli(h.planArgs(['--max-attempts', '0'])), /max attempts must be an integer >= 1/)
+  assert.equal(h.log.length, calls)
+})
+
+test('an ordinary draft that took a reserved part id is not built', async () => {
+  const h = await ready({})
+  const other = join(tmp('req'), 'other.md')
+  writeFileSync(other, 'a different request')
+  assert.equal(await h.cli(['draft', 'pl-create', '--request', other]), 0) // no --iface-from, not the plan's request
+  assert.equal(await h.cli(h.planArgs()), 3) // an unapproved draft: waiting
+  assert.equal(await h.approveWaiting(), 'pl-create')
+  assert.equal(await h.cli(h.planArgs()), 1)
+  assert.match(h.result().reason, /was not drafted from the plan's request for part create/)
+  assert.equal(h.count('builder'), 0)
+})
