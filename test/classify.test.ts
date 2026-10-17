@@ -167,7 +167,7 @@ test('classifyReply: wrong values contradict; captured ids; quote checks; isArra
   assert.equal(r(st([200], { title: 'beta' })).label, 'contradicts')
   const both: Scenario = { ...createGet, steps: [createGet.steps[0], { ...createGet.steps[1], expect: { status: 200, json: { id: '{{id}}', title: 'alpha' } } }] }
   assert.equal(r(st([200], { id: '{{id}}', title: 'alpha' }), both).label, 'readable')
-  assert.equal(r(st([200], { id: 'other', title: 'alpha' }), both).label, 'contradicts')
+  assert.equal(r(st([200], { id: 'other', title: 'alpha' }), both).label, 'unstated') // the created id was never determined: it might be 'other'
   assert.equal(r(st([200], { id: '?', title: 'beta' }), both).label, 'contradicts') // an open leaf does not hide a wrong one
   assert.equal(r(st([200], { id: '{{nope}}', title: 'alpha' }), both).label, 'unstated') // unknown name: undetermined
   // quotes: empty, or found only in the app code, never count as the spec
