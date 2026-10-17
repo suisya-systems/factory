@@ -31,13 +31,20 @@ export const CLASSIFIER_BUDGET = { maxCostUsd: 0.5, timeoutMs: 3 * 60_000 }
 
 // What the predictor sees of a scenario: the requests only. Anything else (id, title, summary, kind,
 // expect) would tell it the intended outcome.
-export const requestsOnly = (s: Scenario) => s.steps.map(({ method, path, body, headers, capture, service }) => ({ method, path, body, headers, capture, service }))
+export const requestsOnly = (s: Scenario) => s.steps.map(({ method, path, body, headers, capture, service, ui, target, text }) => ({ method, path, body, headers, capture, service, ui, target, text }))
 // #17: a step setting the fake's canned answer is the scenario's own setup, not app behaviour: its checks never count.
 const isSetup = (st: Step) => st.service === true && `${st.method} ${st.path.split('?')[0]}` === CONTROL.set
 const SERVICE_NOTE = `
 A request with "service": true does not go to the app: it goes to the control endpoint of a fake that stands in for the external service the spec names.
 "POST /responses" sets what the fake answers the app for that method and path (reply 204, no body); predict {"status": [204], "body": null, "basis": "convention", "quote": ""} for it.
 "GET /requests" replies 200 with the array of requests the app has sent to the service so far, in order, each {"method", "path" (with query), "headers" (lower-case names), "body" (parsed JSON, else text)}: predict which requests the app sent.
+`
+// #4: a ui step drives the app's pages in a browser; its "response" is the page as the runner reads it.
+const UI_NOTE = `
+A request with "ui" is a browser action on the app's pages, not an HTTP request: "goto" opens "path", "click" clicks and "fill" types "text" into
+the "target" element ("<testId>" = the one visible element with that data-testid, "<testId>.<n>" = the n-th visible one, 0-based).
+Its response "body" is the page after the action: {"<testId>": [the visible text (an input's value) of each visible element with that data-testid, in page order, whitespace collapsed]};
+"status" is the HTTP status of the page for "goto" only (null otherwise).
 `
 
 export function predictInstruction(spec: string, app: string, s: Scenario): string {
@@ -51,7 +58,7 @@ ${app || '(none)'}
 
 REQUESTS (in order; "{{name}}" is a value captured from an earlier response, per that step's "capture": {"name": "dot.path in the JSON body" or "header:<name>"}):
 ${JSON.stringify(requestsOnly(s), null, 1)}
-${s.steps.some((st) => st.service) ? SERVICE_NOTE : ''}
+${s.steps.some((st) => st.service) ? SERVICE_NOTE : ''}${s.steps.some((st) => st.ui) ? UI_NOTE : ''}
 Reply with ONE JSON object: {"steps": [one entry per request, in order]}. Each entry:
 {"status": [<every status code the spec/code allows here>] or null if they do not determine it,
  "body": <the JSON response body as far as it is determined, or null>,
@@ -95,7 +102,7 @@ function tri(e: unknown, p: unknown): Tri {
 // on either side. n: the step number, which keeps a re-capture's marker apart from the earlier one.
 export function compareStep(st: Step, p: Prediction, vars: Record<string, unknown>, n = 0): { check: string; result: Tri }[] {
   const out: { check: string; result: Tri }[] = []
-  const e = st.expect
+  const e = st.expect ?? {}
   const expected = e.json === undefined ? undefined : fill(e.json, vars) // as the runner: captures of this step come after its checks
   const marker = (name: string) => `${MARK}${name}@${n}`
   // A "{{name}}" in the prediction means the value captured EARLIER, as in the expectation; only a name

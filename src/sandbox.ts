@@ -103,12 +103,12 @@ export function appEnv(port: number, dataDir: string, servicePort?: number): Nod
 // opens to the service port (#17), which the host hands to the fake. Only the side that opened an id opens it.
 const REVERSE = 0x80000000
 const RELAY_READY = '/tmp/.factory-relay-ready'
-function frame(id: number, data: Buffer = Buffer.alloc(0)): Buffer {
+export function frame(id: number, data: Buffer = Buffer.alloc(0)): Buffer {
   const h = Buffer.alloc(8)
   h.writeUInt32BE(id); h.writeUInt32BE(data.length, 4)
   return Buffer.concat([h, data])
 }
-function frameReader(on: (id: number, data: Buffer) => void, onBad: () => void) {
+export function frameReader(on: (id: number, data: Buffer) => void, onBad: () => void) {
   let buf = Buffer.alloc(0)
   return (d: Buffer) => {
     buf = Buffer.concat([buf, d])

@@ -11,7 +11,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22 # engines: >=22.17; no dependencies, so no install step or npm cache
+          node-version: 22 # engines: >=22.17
+          cache: npm
+      - run: npm ci
+      # test/ui.test.ts drives a real headless browser (the Playwright pinned in package-lock.json) and its system libraries
+      - run: npx playwright-core install --with-deps --only-shell chromium
       # Tests run untrusted code under bubblewrap. Ubuntu 24.04 restricts unprivileged user
       # namespaces via AppArmor, which bwrap needs:
       # https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces

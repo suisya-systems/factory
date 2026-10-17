@@ -2,12 +2,16 @@
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { CONTROL, startFake, type Fake } from './fake.ts'
+import { openBrowser, TARGET, UI_ACTIONS, UI_LIMITS, usesUi, type Browser } from './browser.ts'
+import { CONTROL, startFake, usesService, type Fake } from './fake.ts'
 import { freePort, killTree, removeTree, spawnApp, waitPort } from './sandbox.ts'
 
 export type Expect = { status?: number | number[]; json?: unknown; jsonHas?: string[]; isArray?: boolean; length?: number | Record<string, number> }
 // service: the step goes to the fake external service's control endpoint (fake.ts), not to the app.
-export type Step = { method: string; path: string; body?: unknown; headers?: Record<string, string>; expect: Expect; capture?: Record<string, string>; service?: true }
+// ui (#4): a browser step instead of an HTTP request (no method, body, headers): "goto" a path, "click" / "fill" (with text)
+// a target "<testId>" or "<testId>.<n>". Its response is the page: json {"<testId>": [visible texts]}, status (goto only).
+export type Step = { method: string; path: string; body?: unknown; headers?: Record<string, string>; expect: Expect; capture?: Record<string, string>; service?: true
+  ui?: 'goto' | 'click' | 'fill'; target?: string; text?: string }
 // inSpec: the drafter's claim that the spec states this behaviour (used to split pass rates; self-reported, not verified).
 export type Scenario = { id: string; title: string; summary: string; inSpec: boolean; kind: string; steps: Step[] }
 export type ScenarioResult = { id: string; inSpec: boolean; kind: string; pass: boolean; failedStep?: number; detail: string }
@@ -44,25 +48,37 @@ export function validateScenarios(x: unknown): Scenario[] {
     for (const [j, st] of s.steps.entries()) {
       const ws = `${w}.steps[${j}]`
       if (!isObj(st)) throw new Error(`${ws}: not an object`)
-      keys(st, ['method', 'path', 'body', 'headers', 'expect', 'capture', 'service'], ws)
-      if (st.service !== undefined && (st.service !== true || st.headers !== undefined || ![CONTROL.set, CONTROL.list].includes(`${st.method} ${String(st.path).split('?')[0]}`)))
-        throw new Error(`${ws}: a service step is "${CONTROL.set}" or "${CONTROL.list}" with "service": true and no headers`)
-      if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(st.method)) throw new Error(`${ws}: bad method`)
-      if (typeof st.path !== 'string' || !st.path.startsWith('/')) throw new Error(`${ws}: path must start with /`)
-      if (st.method === 'GET' && st.body !== undefined) throw new Error(`${ws}: GET cannot have a body`)
-      if (st.headers !== undefined && (!isObj(st.headers) || !Object.values(st.headers).every((v) => typeof v === 'string'))) throw new Error(`${ws}: bad headers`)
+      if (st.ui !== undefined) {
+        keys(st, ['ui', 'path', 'target', 'text', 'expect', 'capture'], ws)
+        if (!UI_ACTIONS.includes(st.ui)) throw new Error(`${ws}: ui must be one of ${UI_ACTIONS.join(', ')}`)
+        if ((st.ui === 'goto') !== (st.path !== undefined) || (st.ui === 'goto') === (st.target !== undefined) || (st.ui === 'fill') !== (st.text !== undefined))
+          throw new Error(`${ws}: a "goto" step has a path, a "click" step a target, a "fill" step a target and a text`)
+        if (st.path !== undefined && (typeof st.path !== 'string' || !st.path.startsWith('/'))) throw new Error(`${ws}: path must start with /`)
+        if (st.target !== undefined && (typeof st.target !== 'string' || !TARGET.test(st.target))) throw new Error(`${ws}: target must be "<testId>" or "<testId>.<n>"`)
+        if (st.text !== undefined && typeof st.text !== 'string') throw new Error(`${ws}: text must be a string`)
+        if (st.ui !== 'goto' && st.expect?.status !== undefined) throw new Error(`${ws}: only a "goto" step has a status`)
+      } else {
+        keys(st, ['method', 'path', 'body', 'headers', 'expect', 'capture', 'service'], ws)
+        if (st.service !== undefined && (st.service !== true || st.headers !== undefined || ![CONTROL.set, CONTROL.list].includes(`${st.method} ${String(st.path).split('?')[0]}`)))
+          throw new Error(`${ws}: a service step is "${CONTROL.set}" or "${CONTROL.list}" with "service": true and no headers`)
+        if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(st.method)) throw new Error(`${ws}: bad method`)
+        if (typeof st.path !== 'string' || !st.path.startsWith('/')) throw new Error(`${ws}: path must start with /`)
+        if (st.method === 'GET' && st.body !== undefined) throw new Error(`${ws}: GET cannot have a body`)
+        if (st.headers !== undefined && (!isObj(st.headers) || !Object.values(st.headers).every((v) => typeof v === 'string'))) throw new Error(`${ws}: bad headers`)
+        if (st.expect === undefined) throw new Error(`${ws}: expect must be an object`)
+      }
       if (st.capture !== undefined && (!isObj(st.capture) || !Object.values(st.capture).every((v) => typeof v === 'string'))) throw new Error(`${ws}: bad capture`)
-      const e = st.expect
+      const e = st.expect ?? {} // only a ui action may have nothing to check
       if (!isObj(e)) throw new Error(`${ws}: expect must be an object`)
       keys(e, ['status', 'json', 'jsonHas', 'isArray', 'length'], `${ws}.expect`)
-      if (Object.keys(e).length === 0) throw new Error(`${ws}: expect must contain at least one check`)
+      if (st.expect !== undefined && Object.keys(e).length === 0) throw new Error(`${ws}: expect must contain at least one check`)
       if (e.status !== undefined && !(Number.isInteger(e.status) || (Array.isArray(e.status) && e.status.length > 0 && e.status.every(Number.isInteger)))) throw new Error(`${ws}: bad expect.status`)
       if (e.jsonHas !== undefined && !(Array.isArray(e.jsonHas) && e.jsonHas.length > 0 && e.jsonHas.every((p: unknown) => typeof p === 'string'))) throw new Error(`${ws}: bad expect.jsonHas`)
       if (e.isArray !== undefined && typeof e.isArray !== 'boolean') throw new Error(`${ws}: bad expect.isArray`)
       if (e.length !== undefined && !(Number.isInteger(e.length) || (isObj(e.length) && Object.keys(e.length).length > 0 && Object.values(e.length).every(Number.isInteger)))) throw new Error(`${ws}: bad expect.length`)
       // The summary is the only thing the builder may see on failure: it must not carry concrete values.
       // A service step's body is the fake's canned answer: its keys are scenario data too.
-      const lits = [st.path.split('?')[0].replace(/\{\{\w+\}\}/g, ''), ...strings(st.body), ...strings(e.json), ...strings(st.headers), ...(st.service ? objKeys(st.body) : [])]
+      const lits = [(st.path ?? '').split('?')[0].replace(/\{\{\w+\}\}/g, ''), ...strings(st.text), ...strings(st.body), ...strings(e.json), ...strings(st.headers), ...(st.service ? objKeys(st.body) : [])]
         .filter((v) => v.length >= 3 && v !== '/').map((v) => v.toLowerCase())
       const leaked = lits.find((v) => s.summary.toLowerCase().includes(v))
         ?? [e.status ?? [], ...numbers(st.body), ...numbers(e.json)].flat().find((c: number) => Math.abs(c) >= 100 && new RegExp(`(?<!\\d)${c}(?!\\d)`).test(s.summary))
@@ -109,7 +125,7 @@ export const at = (json: unknown, path: string) => (path ? get(json, path) : jso
 export const HEADER = 'header:'
 
 export function checkStep(st: Step, status: number, json: unknown, vars: Record<string, unknown>, headers?: Headers): string | null {
-  const e = st.expect
+  const e = st.expect ?? {}
   const statuses = e.status === undefined ? null : ([] as number[]).concat(e.status)
   if (statuses && !statuses.includes(status)) return `expected status ${statuses.join('|')}, got ${status}`
   if (e.isArray !== undefined && Array.isArray(json) !== e.isArray) return `expected isArray=${e.isArray}`
@@ -141,7 +157,24 @@ async function send(port: number, st: Omit<Step, 'expect'>, vars: Record<string,
 }
 
 // steps[i] is step from + i + 1 of the scenario. port 0: the app is not started yet (only service steps run).
-async function runSteps(port: number, steps: Step[], from: number, vars: Record<string, unknown>, fake: Fake | undefined, signal: AbortSignal): Promise<{ failedStep?: number; detail: string }> {
+// A ui step: act, then re-read the page until the checks pass or settleMs pass (pages update asynchronously), and report
+// the last failure. Each read is checked against a copy of vars: only the passing read's captures are kept.
+async function uiStep(ui: { browser?: Browser }, st: Step, port: number, vars: Record<string, unknown>, signal: AbortSignal): Promise<string | null> {
+  ui.browser ??= await openBrowser(port, signal)
+  const status = await ui.browser.act({ ui: st.ui!, target: st.target, path: st.path === undefined ? undefined : fill(st.path, vars) as string, text: st.text === undefined ? undefined : String(fill(st.text, vars)) }, port)
+  const end = Date.now() + UI_LIMITS.settleMs
+  for (;;) {
+    const page: Record<string, unknown> = await ui.browser.snapshot()
+    for (const [p] of lengthChecks(st.expect ?? {})) { const id = p.split('.')[0]; if (id && !Object.hasOwn(page, id)) page[id] = [] } // none visible: an empty list
+    const v = { ...vars }
+    const failed = checkStep(st, status, page, v)
+    if (!failed) { Object.assign(vars, v); return null }
+    if (Date.now() >= end || signal.aborted) return failed
+    await new Promise((r) => setTimeout(r, 100))
+  }
+}
+
+async function runSteps(port: number, steps: Step[], from: number, vars: Record<string, unknown>, fake: Fake | undefined, signal: AbortSignal, ui?: { browser?: Browser }): Promise<{ failedStep?: number; detail: string }> {
   for (const [i, st] of steps.entries()) {
     const n = from + i + 1
     try {
@@ -150,6 +183,9 @@ async function runSteps(port: number, steps: Step[], from: number, vars: Record<
         if (!fake) return { failedStep: n, detail: `step ${n}: the spec declares no external service` }
         const r = fake.control(st.method, fill(st.path, vars) as string, st.body === undefined ? undefined : fill(st.body, vars))
         failed = checkStep(st, r.status, r.json, vars)
+      } else if (st.ui) {
+        if (!ui) return { failedStep: n, detail: `step ${n}: the spec declares no browser UI` }
+        failed = await uiStep(ui, st, port, vars, signal)
       } else {
         const { res, json } = await send(port, st, vars, signal)
         failed = checkStep(st, res.status, json, vars, res.headers)
@@ -194,9 +230,13 @@ async function withApp<T>(appDir: string, signal: AbortSignal, go: (port: number
 
 // o.service (#17, the approved spec declares an external service): a fresh fake per scenario; the
 // scenario's leading service steps run before the app starts, so an app that calls the service at startup sees them.
-export async function runScenario(appDir: string, s: Scenario, signal: AbortSignal, o: { service?: boolean } = {}): Promise<ScenarioResult> {
+// o.ui (#4, the spec declares a browser UI): a fresh browser per scenario, opened at its first ui step.
+export type JudgeOpts = { service?: boolean; ui?: boolean }
+export const judgeOpts = (spec: string): JudgeOpts => ({ service: usesService(spec), ui: usesUi(spec) })
+export async function runScenario(appDir: string, s: Scenario, signal: AbortSignal, o: JudgeOpts = {}): Promise<ScenarioResult> {
   const base = { id: s.id, inSpec: s.inSpec, kind: s.kind }
   const fake = o.service ? startFake() : undefined
+  const ui: { browser?: Browser } | undefined = o.ui ? {} : undefined
   try {
     const vars: Record<string, unknown> = {}
     const first = s.steps.findIndex((st) => !st.service)
@@ -204,7 +244,7 @@ export async function runScenario(appDir: string, s: Scenario, signal: AbortSign
     const pre = await runSteps(0, s.steps.slice(0, lead), 0, vars, fake, signal)
     if (pre.failedStep !== undefined) return { ...base, pass: false, ...pre }
     return await withApp(appDir, signal, async (port) => {
-      const r = await runSteps(port, s.steps.slice(lead), lead, vars, fake, signal)
+      const r = await runSteps(port, s.steps.slice(lead), lead, vars, fake, signal, ui).finally(() => ui?.browser?.close())
       if (r.failedStep === undefined && fake?.overflow()) return { ...base, pass: false, failedStep: s.steps.length, detail: 'the app sent the external service more than the fake keeps' }
       return { ...base, pass: r.failedStep === undefined, ...r }
     }, (detail) => ({ ...base, pass: false, failedStep: 0, detail }), fake)
@@ -279,7 +319,7 @@ export async function runProbe(appDir: string, p: Probe, signal: AbortSignal): P
   }, (detail) => ({ id: p.id, answer: BLOCKED, detail }))
 }
 
-export async function runScenarios(appDir: string, scenarios: Scenario[], signal: AbortSignal, o: { service?: boolean } = {}): Promise<ScenarioResult[]> {
+export async function runScenarios(appDir: string, scenarios: Scenario[], signal: AbortSignal, o: JudgeOpts = {}): Promise<ScenarioResult[]> {
   const out: ScenarioResult[] = []
   for (const s of scenarios) {
     if (signal.aborted) throw new Error('stopped')
