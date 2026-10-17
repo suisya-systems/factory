@@ -1,0 +1,762 @@
+{
+ "decisions": [
+  {
+   "id": "remainder",
+   "steps": [
+    {
+     "method": "POST",
+     "path": "/groups",
+     "body": {
+      "name": "Probe",
+      "members": [
+       {
+        "name": "Ann"
+       },
+       {
+        "name": "Ben"
+       },
+       {
+        "name": "Cat"
+       }
+      ]
+     },
+     "capture": {
+      "g": "id",
+      "a": "members.0.id",
+      "b": "members.1.id",
+      "c": "members.2.id"
+     }
+    },
+    {
+     "method": "POST",
+     "path": "/groups/{{g}}/expenses",
+     "body": {
+      "payerId": "{{b}}",
+      "amount": 100,
+      "beneficiaryIds": [
+       "{{a}}",
+       "{{b}}",
+       "{{c}}"
+      ],
+      "description": "one"
+     }
+    },
+    {
+     "method": "GET",
+     "path": "/groups/{{g}}/settlement"
+    },
+    {
+     "method": "POST",
+     "path": "/groups/{{g}}/expenses",
+     "body": {
+      "payerId": "{{b}}",
+      "amount": 100,
+      "beneficiaryIds": [
+       "{{a}}",
+       "{{b}}",
+       "{{c}}"
+      ],
+      "description": "two"
+     }
+    },
+    {
+     "method": "GET",
+     "path": "/groups/{{g}}/settlement"
+    },
+    {
+     "method": "POST",
+     "path": "/groups/{{g}}/expenses",
+     "body": {
+      "payerId": "{{b}}",
+      "amount": 100,
+      "beneficiaryIds": [
+       "{{a}}",
+       "{{b}}",
+       "{{c}}"
+      ],
+      "description": "three"
+     }
+    },
+    {
+     "method": "GET",
+     "path": "/groups/{{g}}/settlement"
+    }
+   ],
+   "observe": [
+    "3:body.transfers",
+    "5:body.transfers",
+    "7:body.transfers"
+   ],
+   "options": {
+    "even-over-repeats": [
+     [
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 34
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 33
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 67
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 66
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 100
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 100
+       }
+      ]
+     ],
+     [
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 34
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 33
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 67
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 67
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 100
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 100
+       }
+      ]
+     ],
+     [
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 33
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 33
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 67
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 66
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 100
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 100
+       }
+      ]
+     ],
+     [
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 33
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 33
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 66
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 67
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 100
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 100
+       }
+      ]
+     ],
+     [
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 33
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 34
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 67
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 67
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 100
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 100
+       }
+      ]
+     ],
+     [
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 33
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 34
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 66
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 67
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 100
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 100
+       }
+      ]
+     ],
+     [
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 33
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 33
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 67
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 67
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 100
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 100
+       }
+      ]
+     ],
+     [
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 33
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 33
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 66
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 66
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 100
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 100
+       }
+      ]
+     ]
+    ],
+    "payer-covers": [
+     [
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 33
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 33
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 66
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 66
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 99
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 99
+       }
+      ]
+     ]
+    ],
+    "first-listed-fixed": [
+     [
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 34
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 33
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 68
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 66
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 102
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 99
+       }
+      ]
+     ]
+    ],
+    "last-listed-fixed": [
+     [
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 33
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 34
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 66
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 68
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 99
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 102
+       }
+      ]
+     ]
+    ],
+    "rotate-non-payers": [
+     [
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 34
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 33
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 67
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 67
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 101
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 100
+       }
+      ]
+     ],
+     [
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 33
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 34
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 67
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 67
+       }
+      ],
+      [
+       {
+        "fromMemberId": "{{a}}",
+        "toMemberId": "{{b}}",
+        "amount": 100
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 101
+       }
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "id": "payer-in-shares",
+   "steps": [
+    {
+     "method": "POST",
+     "path": "/groups",
+     "body": {
+      "name": "Probe",
+      "members": [
+       {
+        "name": "Ann"
+       },
+       {
+        "name": "Ben"
+       }
+      ]
+     },
+     "capture": {
+      "g": "id",
+      "a": "members.0.id",
+      "b": "members.1.id"
+     }
+    },
+    {
+     "method": "POST",
+     "path": "/groups/{{g}}/expenses",
+     "body": {
+      "payerId": "{{a}}",
+      "amount": 100,
+      "beneficiaryIds": [
+       "{{b}}"
+      ],
+      "description": "gift"
+     }
+    },
+    {
+     "method": "GET",
+     "path": "/groups/{{g}}/settlement"
+    }
+   ],
+   "observe": [
+    "3:body.transfers"
+   ],
+   "options": {
+    "listed-only": [
+     [
+      [
+       {
+        "fromMemberId": "{{b}}",
+        "toMemberId": "{{a}}",
+        "amount": 100
+       }
+      ]
+     ]
+    ],
+    "payer-always-shares": [
+     [
+      [
+       {
+        "fromMemberId": "{{b}}",
+        "toMemberId": "{{a}}",
+        "amount": 50
+       }
+      ]
+     ]
+    ],
+    "refused": [
+     [
+      []
+     ]
+    ]
+   }
+  },
+  {
+   "id": "netting",
+   "steps": [
+    {
+     "method": "POST",
+     "path": "/groups",
+     "body": {
+      "name": "Probe",
+      "members": [
+       {
+        "name": "Ann"
+       },
+       {
+        "name": "Ben"
+       },
+       {
+        "name": "Cat"
+       }
+      ]
+     },
+     "capture": {
+      "g": "id",
+      "a": "members.0.id",
+      "b": "members.1.id",
+      "c": "members.2.id"
+     }
+    },
+    {
+     "method": "POST",
+     "path": "/groups/{{g}}/expenses",
+     "body": {
+      "payerId": "{{a}}",
+      "amount": 600,
+      "beneficiaryIds": [
+       "{{a}}",
+       "{{b}}"
+      ],
+      "description": "for ann and ben"
+     }
+    },
+    {
+     "method": "POST",
+     "path": "/groups/{{g}}/expenses",
+     "body": {
+      "payerId": "{{b}}",
+      "amount": 600,
+      "beneficiaryIds": [
+       "{{b}}",
+       "{{c}}"
+      ],
+      "description": "for ben and cat"
+     }
+    },
+    {
+     "method": "GET",
+     "path": "/groups/{{g}}/settlement"
+    }
+   ],
+   "observe": [
+    "4:body.transfers"
+   ],
+   "options": {
+    "group-net": [
+     [
+      [
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{a}}",
+        "amount": 300
+       }
+      ]
+     ]
+    ],
+    "pairwise": [
+     [
+      [
+       {
+        "fromMemberId": "{{b}}",
+        "toMemberId": "{{a}}",
+        "amount": 300
+       },
+       {
+        "fromMemberId": "{{c}}",
+        "toMemberId": "{{b}}",
+        "amount": 300
+       }
+      ]
+     ]
+    ]
+   }
+  }
+ ]
+}

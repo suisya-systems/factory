@@ -120,21 +120,26 @@ export function checkStep(st: Step, status: number, json: unknown, vars: Record<
   return null
 }
 
+async function send(port: number, st: Omit<Step, 'expect'>, vars: Record<string, unknown>, signal: AbortSignal) {
+  const path = fill(st.path, vars) as string
+  const body = st.body === undefined ? undefined : JSON.stringify(fill(st.body, vars))
+  const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+    method: st.method, body, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...(fill(st.headers ?? {}, vars) as Record<string, string>) },
+    redirect: 'manual', // judge the tested endpoint's own response, never a redirect target
+    signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]),
+  })
+  const raw = await text(res)
+  let json: unknown
+  try { json = raw ? JSON.parse(raw) : undefined } catch { json = undefined }
+  return { res, json }
+}
+
 async function runSteps(port: number, s: Scenario, signal: AbortSignal): Promise<{ failedStep?: number; detail: string }> {
   const vars: Record<string, unknown> = {}
   for (const [i, st] of s.steps.entries()) {
     const n = i + 1
     try {
-      const path = fill(st.path, vars) as string
-      const body = st.body === undefined ? undefined : JSON.stringify(fill(st.body, vars))
-      const res = await fetch(`http://127.0.0.1:${port}${path}`, {
-        method: st.method, body, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...(fill(st.headers ?? {}, vars) as Record<string, string>) },
-        redirect: 'manual', // judge the tested endpoint's own response, never a redirect target
-        signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]),
-      })
-      const raw = await text(res)
-      let json: unknown
-      try { json = raw ? JSON.parse(raw) : undefined } catch { json = undefined }
+      const { res, json } = await send(port, st, vars, signal)
       const failed = checkStep(st, res.status, json, vars, res.headers)
       if (failed) return { failedStep: n, detail: `step ${n}: ${failed}` }
     } catch (err) {
@@ -145,23 +150,23 @@ async function runSteps(port: number, s: Scenario, signal: AbortSignal): Promise
   return { detail: 'ok' }
 }
 
-export async function runScenario(appDir: string, s: Scenario, signal: AbortSignal): Promise<ScenarioResult> {
+// Starts the app fresh (own data dir, own port), runs `go` against it, always stops it.
+// When the app does not start, `failed` gets why.
+async function withApp<T>(appDir: string, signal: AbortSignal, go: (port: number) => Promise<T>, failed: (why: string) => T): Promise<T> {
   const dataDir = mkdtempSync(join(tmpdir(), 'factory-data-'))
   const port = await freePort()
   const app = spawnApp(appDir, port, dataDir)
   let stderr = ''
   app.stderr?.on('data', (d) => { stderr = (stderr + d).slice(-300) })
-  const base = { id: s.id, inSpec: s.inSpec, kind: s.kind }
   try {
     try {
       await waitPort(port, 15_000, app, signal)
     } catch (err) {
       if (signal.aborted) throw err
-      return { ...base, pass: false, failedStep: 0, detail: `app did not start: ${(err as Error).message}; stderr: ${stderr.trim()}` }
+      return failed(`app did not start: ${(err as Error).message}; stderr: ${stderr.trim()}`)
     }
-    try { assertLoopbackOnly(app) } catch (err) { return { ...base, pass: false, failedStep: 0, detail: (err as Error).message } }
-    const r = await runSteps(port, s, signal)
-    return { ...base, pass: r.failedStep === undefined, ...r }
+    try { assertLoopbackOnly(app) } catch (err) { return failed((err as Error).message) }
+    return await go(port)
   } finally {
     killTree(app, 500)
     await new Promise((r) => {
@@ -171,6 +176,82 @@ export async function runScenario(appDir: string, s: Scenario, signal: AbortSign
     })
     removeTree(dataDir)
   }
+}
+
+export async function runScenario(appDir: string, s: Scenario, signal: AbortSignal): Promise<ScenarioResult> {
+  const base = { id: s.id, inSpec: s.inSpec, kind: s.kind }
+  return withApp(appDir, signal, async (port) => {
+    const r = await runSteps(port, s, signal)
+    return { ...base, pass: r.failedStep === undefined, ...r }
+  }, (detail) => ({ ...base, pass: false, failedStep: 0, detail }))
+}
+
+// ---- probes (lap 5) ----
+// A probe tells which of several pre-registered answers a build chose for one open decision: its steps
+// run on a fresh app (no checks), `observe` picks values out of the responses ("<step>:status",
+// "<step>:body" or "<step>:body.<dot.path>"), and the first option listing a matching observation
+// names the answer. Options may name captured values ("{{a}}"); each observed value matches its own
+// position like unordered(). No option matches -> "other" (the observation is kept); a step that could not run
+// (no response, a capture missing) -> "blocked". Written by the experimenter, never shown to a builder.
+export type Probe = { id: string; steps: Omit<Step, 'expect'>[]; observe: string[]; options: Record<string, unknown[][]> }
+export type ProbeResult = { id: string; answer: string; observed?: unknown[]; detail?: string }
+export const OTHER = 'other', BLOCKED = 'blocked'
+
+export function validateProbes(x: unknown): Probe[] {
+  const ds = isObj(x) ? x.decisions : undefined
+  if (!Array.isArray(ds) || ds.length === 0) throw new Error('probes: "decisions" must be a non-empty array')
+  for (const [i, d] of ds.entries()) {
+    const w = `probes.decisions[${i}]`
+    if (!isObj(d) || typeof d.id !== 'string' || !Array.isArray(d.steps) || d.steps.length === 0) throw new Error(`${w}: needs an id and steps`)
+    for (const st of d.steps) if (!isObj(st) || !['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(st.method) || typeof st.path !== 'string' || !st.path.startsWith('/')) throw new Error(`${w}: bad step`)
+    if (!Array.isArray(d.observe) || d.observe.length === 0 || !d.observe.every((o: unknown) => typeof o === 'string' && /^\d+:(status|body(\..+)?)$/.test(o) && Number(o.split(':')[0]) >= 1 && Number(o.split(':')[0]) <= d.steps.length)) throw new Error(`${w}: bad observe`)
+    if (!isObj(d.options) || Object.keys(d.options).length < 2) throw new Error(`${w}: needs at least two options`)
+    for (const [name, vs] of Object.entries(d.options)) {
+      if (name === OTHER || name === BLOCKED) throw new Error(`${w}: option name "${name}" is reserved`)
+      if (!Array.isArray(vs) || vs.length === 0 || !vs.every((v) => Array.isArray(v) && v.length === d.observe.length)) throw new Error(`${w}.options.${name}: a list of observations, each as long as observe`)
+    }
+  }
+  return ds as Probe[]
+}
+
+// Like subset(), but arrays must be as long as expected and match in any order (a settlement's
+// transfers have no fixed order); objects may carry extra keys.
+export function unordered(expected: unknown, actual: unknown): boolean {
+  if (Array.isArray(expected)) {
+    if (!Array.isArray(actual) || actual.length !== expected.length) return false
+    const take = (i: number, used: boolean[]): boolean => i === expected.length
+      || actual.some((a, j) => !used[j] && unordered(expected[i], a) && take(i + 1, used.map((u, k) => u || k === j)))
+    return take(0, actual.map(() => false))
+  }
+  if (isObj(expected)) return isObj(actual) && Object.entries(expected).every(([k, v]) => unordered(v, actual[k]))
+  return expected === actual
+}
+
+export async function runProbe(appDir: string, p: Probe, signal: AbortSignal): Promise<ProbeResult> {
+  return withApp(appDir, signal, async (port) => {
+    const vars: Record<string, unknown> = {}
+    const seen: { status: number; json: unknown }[] = []
+    for (const [i, st] of p.steps.entries()) {
+      try {
+        const { res, json } = await send(port, st, vars, signal)
+        seen.push({ status: res.status, json })
+        for (const [name, path] of Object.entries(st.capture ?? {})) {
+          const v = path.startsWith(HEADER) ? (res.headers.get(path.slice(HEADER.length)) ?? undefined) : get(json, path)
+          if (v !== undefined) vars[name] = v
+          else delete vars[name] // missing (even if captured before): a later step that uses it throws, and the probe is blocked
+        }
+      } catch (err) {
+        if (signal.aborted) throw err
+        return { id: p.id, answer: BLOCKED, detail: `step ${i + 1}: ${(err as Error).message}` }
+      }
+    }
+    const observed = p.observe.map((o) => {
+      const [n, what] = [Number(o.split(':')[0]), o.slice(o.indexOf(':') + 1)]
+      return what === 'status' ? seen[n - 1].status : at(seen[n - 1].json, what.slice('body.'.length))
+    })
+    const answer = Object.entries(p.options).find(([, vs]) => vs.some((v) => { try { return (fill(v, vars) as unknown[]).every((e, i) => unordered(e, observed[i])) } catch { return false } }))?.[0] ?? OTHER
+    return { id: p.id, answer, observed }
+  }, (detail) => ({ id: p.id, answer: BLOCKED, detail }))
 }
 
 export async function runScenarios(appDir: string, scenarios: Scenario[], signal: AbortSignal): Promise<ScenarioResult[]> {

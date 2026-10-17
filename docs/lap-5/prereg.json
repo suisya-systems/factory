@@ -1,0 +1,163 @@
+{
+ "lap": 5,
+ "writtenAt": "2026-10-17",
+ "factoryCommit": "22c95fa",
+ "probesSha256": "6834228881ac644f7fa7319e3760ad2cbc6d6e59c5648bbd0691fbfc54849452",
+ "decisions": {
+  "remainder": [
+   "even-over-repeats",
+   "payer-covers",
+   "first-listed-fixed",
+   "last-listed-fixed",
+   "rotate-non-payers"
+  ],
+  "payer-in-shares": [
+   "listed-only",
+   "payer-always-shares",
+   "refused"
+  ],
+  "netting": [
+   "group-net",
+   "pairwise"
+  ]
+ },
+ "ties": [
+  "remainder: exact shares rounded only at the end can answer like a rotation that starts with the payer, so both count as even-over-repeats (the raw observations are kept per build)",
+  "remainder: first-listed-fixed and first-in-join-order coincide on the probe (list order = join order)"
+ ],
+ "scenarioSetsAccept": {
+  "settle-a1": {
+   "remainder": [
+    "even-over-repeats"
+   ],
+   "payer-in-shares": [
+    "listed-only"
+   ],
+   "netting": [
+    "group-net"
+   ]
+  },
+  "settle-a2": {
+   "remainder": [
+    "even-over-repeats"
+   ],
+   "payer-in-shares": [
+    "listed-only"
+   ],
+   "netting": [
+    "group-net"
+   ]
+  },
+  "settle-b1": {
+   "remainder": "untested",
+   "payer-in-shares": [
+    "listed-only"
+   ],
+   "netting": [
+    "group-net"
+   ]
+  },
+  "settle-b2": {
+   "remainder": [
+    "even-over-repeats",
+    "payer-covers",
+    "rotate-non-payers"
+   ],
+   "payer-in-shares": [
+    "listed-only"
+   ],
+   "netting": [
+    "group-net"
+   ]
+  },
+  "settle-c1": {
+   "remainder": "untested",
+   "payer-in-shares": [
+    "listed-only"
+   ],
+   "netting": [
+    "group-net"
+   ]
+  }
+ },
+ "scenarioSetsTestedBy": {
+  "settle-a1": {
+   "remainder": [
+    "remainder-repeated-split-not-skewed",
+    "remainder-rotating-payers-balance-out",
+    "remainder-odd-amount-two-people-balance-out"
+   ],
+   "payer-in-shares": [
+    "settlement-payer-not-beneficiary"
+   ],
+   "netting": [
+    "settlement-nets-balances"
+   ]
+  },
+  "settle-a2": {
+   "remainder": [
+    "remainder-not-skewed-repeated-odd-split",
+    "remainder-cancels-out-in-a-cycle",
+    "remainder-tiny-amounts-three-way"
+   ],
+   "payer-in-shares": [
+    "settlement-payer-not-beneficiary"
+   ],
+   "netting": [
+    "settlement-nets-balances"
+   ]
+  },
+  "settle-b1": {
+   "remainder": [],
+   "payer-in-shares": [
+    "payer-not-beneficiary",
+    "remainder-two-beneficiaries",
+    "chain-collapses"
+   ],
+   "netting": [
+    "chain-collapses"
+   ]
+  },
+  "settle-b2": {
+   "remainder": [
+    "remainder-not-skewed"
+   ],
+   "payer-in-shares": [
+    "payer-not-beneficiary",
+    "chain-netting"
+   ],
+   "netting": [
+    "chain-netting"
+   ]
+  },
+  "settle-c1": {
+   "remainder": [],
+   "payer-in-shares": [
+    "settlement-payer-not-beneficiary",
+    "settlement-mutual-debts-net",
+    "settlement-chain-simplified"
+   ],
+   "netting": [
+    "settlement-chain-simplified"
+   ]
+  }
+ },
+ "acceptMethod": "reference apps (.worker-scratch/refapps, to be committed with the report): one decision varied at a time, the others fixed at even-over-repeats / listed-only / group-net; a scenario that changes result tests the decision; an answer is accepted when it passes all of them",
+ "rules": {
+  "K": 8,
+  "strong": "mode >= 6 of 8",
+  "noStrongPreference": "valid >= 6 and mode <= 4",
+  "valid": "answers among the registered options; other and blocked are missing, never merged",
+  "minValid": 6,
+  "M": "both builder models strong, modes differ, and each model's scenario drafts include >= 1 set identifying the decision, all identifying sets point at that model's builder mode, and non-identifying (not untested) sets allow it",
+  "notM": "both builder models strong with the same mode",
+  "noPreference": "either model has no strong preference",
+  "undecidable": "everything else, including a model without an identifying scenario set; no automatic extra K",
+  "R": "remainder only: in settle-c1 a model's mode differs from settle-a1 or stops being strong -> R supported; both modes unchanged and strong -> no effect of the sentence observed in this comparison",
+  "noTests": true
+ },
+ "statedBeforeBuilds": [
+  "remainder: the sonnet scenario sets do not identify it (b1 untested, b2 accepts three answers), so the drafter side of M is undecidable for remainder whatever the builders do; the builder-side counts are still reported",
+  "payer-in-shares and netting: all four scenario sets identify listed-only and group-net"
+ ]
+}

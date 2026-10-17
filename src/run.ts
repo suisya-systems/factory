@@ -40,6 +40,7 @@ export async function runChange(o: RunOpts) {
   if (!(Number.isInteger(maxAttempts) && maxAttempts >= 1)) throw new Error(`max attempts must be an integer >= 1, got ${maxAttempts}`)
   const runDir = join(o.stateDir, 'runs', id)
   if (existsSync(join(runDir, 'run.json'))) throw new Error(`${id} already ran; a new attempt must enter as a new change`)
+  if (existsSync(join(runDir, 'replicates'))) throw new Error(`${id} has replicates; replicate and run keep separate cost records, so one change takes only one of them`)
   const approved = loadApproved(o.stateDir, id)
   // readable labels carry their basis (readable-spec / -code / -convention); read from the approved set, never recomputed.
   const labels = new Map(approved.classification.map((c) => [c.id, c.label === 'readable' ? `readable-${c.basis}` : c.label]))
