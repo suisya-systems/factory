@@ -56,6 +56,9 @@ http.createServer((q, r) => {
     if (u.pathname === '/liar') return html(r, 200, '<p data-testid="real">truth</p><script>Element.prototype.getAttribute = () => "real"; document.querySelectorAll = () => [];' +
       'String.prototype.trim = () => "lie"; JSON.stringify = () => "{}"; Object.defineProperty(HTMLElement.prototype, "innerText", { get: () => "lie" })</script>')
     if (u.pathname === '/many') return html(r, 200, '<ul>' + '<li data-testid="row">r</li>'.repeat(Number(u.searchParams.get('n'))) + '</ul>')
+    // a tagged SVG and a web component: read like any element, in the order actions count them
+    if (u.pathname === '/odd') return html(r, 200, '<svg data-testid="icon" width="10" height="10"><text y="9">s</text></svg><p data-testid="item">light</p><x-c></x-c>' +
+      '<script>customElements.define("x-c", class extends HTMLElement { constructor() { super(); this.attachShadow({ mode: "open" }).innerHTML = "<p data-testid=item>shadow</p><button data-testid=b onclick=this.textContent=1>0</button>" } })</script>')
     if (u.pathname === '/stall') return html(r, 200, '<p data-testid="x">x</p><script>for (;;) {}</script>')
     json(r, 404, {})
   })
@@ -153,6 +156,14 @@ test('the browser has no port a builder could reach, none of the factory environ
 
 test('the page is read in an isolated world: page JS that bends DOM and builtins cannot change what the judge reads', async () => {
   const r = await runScenario(app, sc('liar', [ui({ ui: 'goto', path: '/liar', expect: { json: { real: ['truth'] }, length: { real: 1 } } })]), never, { ui: true })
+  assert.equal(r.pass, true, r.detail)
+})
+
+test('tagged SVG and open shadow roots are read, in the order actions count elements', async () => {
+  const r = await runScenario(app, sc('odd', [
+    ui({ ui: 'goto', path: '/odd', expect: { json: { icon: ['s'], item: ['light', 'shadow'], b: ['0'] } } }),
+    ui({ ui: 'click', target: 'b', expect: { json: { b: ['1'] } } }),
+  ]), never, { ui: true })
   assert.equal(r.pass, true, r.detail)
 })
 

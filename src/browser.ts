@@ -54,14 +54,17 @@ net.createServer((c) => {
 }).listen(port, '127.0.0.1', () => require('node:fs').writeFileSync(${JSON.stringify(READY)}, ''))`
 const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
 
-// Runs in the isolated world: visible elements carrying a test id (Playwright's notion of visible, so "<id>.<n>"
-// names the same element for actions and checks), their text (an input's value), in document order.
+// Runs in the isolated world: visible elements carrying a test id (Playwright's notion of visible, and its order:
+// each tree's matches, then open shadow roots, so "<id>.<n>" names the same element for actions and checks), their
+// text (an input's value; textContent for non-HTML elements such as SVG).
 const SNAPSHOT = `(() => {
-  const out = {}; let n = 0, size = 0
-  for (const e of document.querySelectorAll('[data-testid]')) {
+  const out = {}, els = []; let n = 0, size = 0
+  const walk = (root) => { const all = root.querySelectorAll('*'); for (const e of all) if (e.hasAttribute('data-testid')) els.push(e); for (const e of all) if (e.shadowRoot) walk(e.shadowRoot) }
+  walk(document)
+  for (const e of els) {
     const r = e.getBoundingClientRect()
     if (!e.checkVisibility() || !r.width || !r.height || getComputedStyle(e).visibility !== 'visible') continue
-    const id = e.getAttribute('data-testid'), t = (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.tagName) ? e.value : e.innerText).replace(/\\s+/g, ' ').trim()
+    const id = e.getAttribute('data-testid'), t = (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.tagName) ? e.value : e.innerText ?? e.textContent).replace(/\\s+/g, ' ').trim()
     if (++n > ${UI_LIMITS.elements} || (size += id.length + t.length) > ${UI_LIMITS.chars}) return null
     if (!Object.hasOwn(out, id)) out[id] = []
     out[id].push(t)
