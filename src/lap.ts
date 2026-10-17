@@ -229,6 +229,7 @@ export async function lap(file: string, o: LapOpts, factory: (argv: string[]) =>
     }
     save()
   }
+  failed ||= stopped() || '' // a STOP that came during the last step: never report the lap as done
   if (failed) { console.error(`lap ${def.name}: failed (${failed}). A failed or interrupted step is never re-run; change the definition (e.g. a new change id) to go on.`); return 1 }
   prog.waiting = null
   save()

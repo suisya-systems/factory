@@ -159,6 +159,8 @@ test('a definition home sets the state dir; another FACTORY_HOME is refused', as
   try {
     assert.equal(await main(['lap', file]), 0)
     assert.ok(existsSync(join(dir, 'state', 'laps', 'laph', 'progress.json')))
+    writeFileSync(join(dir, 'state', 'STOP'), 'x') // e.g. pressed during the last step: the lap is not reported done
+    assert.equal(await main(['lap', file]), 1)
   } finally { process.env.FACTORY_HOME = prev }
 })
 
