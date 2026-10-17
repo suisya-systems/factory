@@ -49,7 +49,7 @@ export function validateScenarios(x: unknown): Scenario[] {
       keys(e, ['status', 'json', 'jsonHas', 'isArray', 'length'], `${ws}.expect`)
       if (Object.keys(e).length === 0) throw new Error(`${ws}: expect must contain at least one check`)
       if (e.status !== undefined && !(Number.isInteger(e.status) || (Array.isArray(e.status) && e.status.length > 0 && e.status.every(Number.isInteger)))) throw new Error(`${ws}: bad expect.status`)
-      if (e.jsonHas !== undefined && !(Array.isArray(e.jsonHas) && e.jsonHas.every((p: unknown) => typeof p === 'string'))) throw new Error(`${ws}: bad expect.jsonHas`)
+      if (e.jsonHas !== undefined && !(Array.isArray(e.jsonHas) && e.jsonHas.length > 0 && e.jsonHas.every((p: unknown) => typeof p === 'string'))) throw new Error(`${ws}: bad expect.jsonHas`)
       if (e.isArray !== undefined && typeof e.isArray !== 'boolean') throw new Error(`${ws}: bad expect.isArray`)
       if (e.length !== undefined && !(Number.isInteger(e.length) || (isObj(e.length) && Object.keys(e.length).length > 0 && Object.values(e.length).every(Number.isInteger)))) throw new Error(`${ws}: bad expect.length`)
       // The summary is the only thing the builder may see on failure: it must not carry concrete values.

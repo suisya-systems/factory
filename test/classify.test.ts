@@ -45,7 +45,7 @@ test('draft: spec and scenarios come from separate sessions; the scenario writer
   assert.match(sc, /- no auth/)
   assert.match(d.spec, /## Interface/) // the builder gets the same names
   assert.deepEqual(d.assumptions.slice(1), ['no auth', '(scenario writer) titles are short'])
-  assert.equal(seen[2].maxCostUsd, 0.5)
+  assert.deepEqual(seen.map((t) => t.maxCostUsd), [1, 1, 0.5])
 })
 
 test('the classifier sees requests only: no id, title, summary, kind or expectations', () => {
@@ -156,4 +156,39 @@ test('scenario runner: header captures, templated headers, lengths inside the bo
   assert.equal(ok.pass, true, ok.detail)
   const bad = await runScenario(app, sc(3), never)
   assert.match(bad.detail, /expected length 3 at items, got 2/)
+})
+
+test('classifyReply: wrong values contradict; captured ids; quote checks; isArray and array prefixes', () => {
+  const q = 'GET /notes/:id returns the note'
+  const st = (status: number[] | null, body: unknown, basis = 'spec', quote = q) => ({ status, body, basis, quote })
+  const first = st([201], { id: '{{id}}' }) // echoes the value this very step captures
+  const r = (b: object, s = createGet, app = '') => classifyReply(s, SPEC, app, { steps: [first, b] })
+  assert.equal(r(st([200], { title: 'alpha' })).label, 'readable')
+  assert.equal(r(st([200], { title: 'beta' })).label, 'contradicts')
+  const both: Scenario = { ...createGet, steps: [createGet.steps[0], { ...createGet.steps[1], expect: { status: 200, json: { id: '{{id}}', title: 'alpha' } } }] }
+  assert.equal(r(st([200], { id: '{{id}}', title: 'alpha' }), both).label, 'readable')
+  assert.equal(r(st([200], { id: 'other', title: 'alpha' }), both).label, 'contradicts')
+  assert.equal(r(st([200], { id: '?', title: 'beta' }), both).label, 'contradicts') // an open leaf does not hide a wrong one
+  assert.equal(r(st([200], { id: '{{nope}}', title: 'alpha' }), both).label, 'unstated') // unknown name: undetermined
+  // quotes: empty, or found only in the app code, never count as the spec
+  assert.equal(r(st([200], { title: 'alpha' }, 'spec', '')).basis, 'convention')
+  assert.equal(r(st([200], { title: 'alpha' }, 'spec', 'app.get(notes) returns the note'), createGet, 'app.get(notes) returns the note').basis, 'convention')
+  const list = SCENARIOS[1] // GET /notes: isArray true, length 0
+  const one = (body: unknown) => classifyReply(list, SPEC, '', { steps: [st([200], body)] }).label
+  assert.deepEqual([one([]), one({}), one(['?'])], ['readable', 'contradicts', 'contradicts'])
+  const prefix: Scenario = { ...list, steps: [{ ...list.steps[0], expect: { json: [{ title: 'a' }] } }] }
+  assert.equal(classifyReply(prefix, SPEC, '', { steps: [st([200], [{ title: 'a' }, { title: 'b' }])] }).label, 'readable')
+})
+
+test('spec drafter: an interface with status codes or unknown keys is refused', async () => {
+  for (const iface of [{ endpoints: ['POST /notes -> 201'] }, { endpoints: ['GET /notes'], rules: 'AND' }]) {
+    const m: Model = async (t) => ({ ok: true, costUsd: 0, text: JSON.stringify(t.role === 'spec-drafter' ? { spec: SPEC, interface: iface, assumptions: [] } : {}) })
+    await assert.rejects(draft(m, 'x'), /interface/)
+  }
+})
+
+test('approval summary (b): a convention-only mismatch is listed with its step', () => {
+  const s = approvalSummary('x', { spec: SPEC, scenarios: [createGet], assumptions: [], classification: [{ id: 'create-get', label: 'unstated', checks: [{ step: 1, check: 'status 201', result: 'X', basis: 'convention' }] }] }, 'v')
+  assert.match(s, /\(b\)[^\n]*\(1\)\n- create-get: .*step 1 POST status 201/)
+  assert.match(s, /\(a\)[^\n]*\(0\)\n- none/)
 })

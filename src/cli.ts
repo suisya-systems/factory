@@ -128,7 +128,6 @@ export async function main(argv: string[], model: Model = claudeModel): Promise<
         const request = readFileSync(v.request, 'utf8')
         const app = v.base ? await appSnapshot(resolve(v.base)) : null
         const drafted = await draft(guard.model(model), request, { signals: v.signals ? readFileSync(v.signals, 'utf8') : undefined, app: app?.text })
-        guard.check() // a stop during the last call: nothing is written for approval
         const d: Draft = { ...drafted, base: { baseSha: app?.sha ?? null, requestSha256: createHash('sha256').update(request).digest('hex') } }
         const dir = writeDraft(sd, id, d)
         const version = hash(dir)

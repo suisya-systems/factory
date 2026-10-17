@@ -96,3 +96,13 @@ test('a ship target that moved since the draft is refused before any build', asy
   assert.match(r.stopReason, /no longer at the approved base/)
   assert.equal(calls, 0)
 })
+
+test('a ship target still at the approved base is built on', async () => {
+  const target = gitTarget()
+  const sha = execFileSync('git', ['-C', target, 'rev-parse', 'HEAD']).toString().trim()
+  approvedChange(sd, 'memo-same', SCENARIOS, { baseSha: sha, requestSha256: null })
+  let calls = 0
+  const r = await runChange({ changeId: 'memo-same', shipTarget: target, model: async () => { calls++; return { ok: false, text: '', costUsd: 0.1, error: 'x' } }, stateDir: sd, port: await freePort(), stopFile: join(sd, 'NOSTOP'), maxAttempts: 1 })
+  assert.doesNotMatch(r.stopReason, /approved base/)
+  assert.ok(calls > 0)
+})
