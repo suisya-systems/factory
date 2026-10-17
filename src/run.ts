@@ -51,7 +51,7 @@ export async function runChange(o: RunOpts) {
   const draftCost: Ledger | null = existsSync(draftFile) ? JSON.parse(readFileSync(draftFile, 'utf8')) : null
   // The per-change cap covers all roles: the drafter's spend is already counted against it.
   const guard = startGuard(capUsd, o.stopFile ?? process.env.FACTORY_STOP_FILE ?? join(o.stateDir, 'STOP'),
-    { spentUsd: draftCost?.totalUsd ?? 0, lapFile: join(o.stateDir, 'lap-ledger.json') })
+    { spentUsd: draftCost?.totalUsd ?? 0, lapFile: join(o.stateDir, 'lap-ledger.jsonl') })
   const model = guard.model(o.model)
   const record = {
     changeId: id, approvedVersion: approved.version, status: 'running' as 'running' | 'shipped' | 'failed', stopReason: '',
@@ -103,7 +103,7 @@ export async function runChange(o: RunOpts) {
     await syntheticTraffic(o.port, o.trafficBase ?? '/memos')
     await new Promise((r) => setTimeout(r, 200))
     guard.check()
-    record.signals = observe(o.stateDir)
+    record.signals = observe(o.stateDir, o.port)
     record.status = 'shipped'
   } catch (e) {
     let err = e as Error

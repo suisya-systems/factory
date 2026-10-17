@@ -1,14 +1,16 @@
 // Stop conditions: cost cap, retry cap, emergency stop from outside. All end as 'failed'.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { runCli, type Model, type Task } from '../src/adapter.ts'
-import { CAPS, mergeLedger, startGuard, Stop, UNATTRIBUTED } from '../src/limits.ts'
+import { CAPS, chargeLap, holdLap, lapSpent, lapTotals, mergeLedger, startGuard, Stop, UNATTRIBUTED } from '../src/limits.ts'
 import { runChange } from '../src/run.ts'
 import { freePort } from '../src/sandbox.ts'
-import { approvedChange, freshState, gitTarget, MEMO_SERVER, tmp, writeApp } from './helpers.ts'
+import { approvedChange, freshState, gitTarget, MEMO_SERVER, REPO, tmp, writeApp } from './helpers.ts'
+
+const REPO_SRC = join(REPO, 'src')
 
 const sd = freshState()
 const task = (role: string): Task => ({ role, instruction: 'x', workdir: tmp('lim'), access: 'none', maxCostUsd: 99, timeoutMs: 10_000 })
@@ -38,7 +40,7 @@ test('null cost is listed as uncounted AND charged its whole budget, so the cap 
 })
 
 test('per-model cost (lap 4): the guard ledger and the lap ledger split each role per model; the rest is unattributed', async () => {
-  const lapFile = join(tmp('lapsplit'), 'lap-ledger.json')
+  const lapFile = join(tmp('lapsplit'), 'lap-ledger.jsonl')
   const g = startGuard(5, join(sd, 'NOSTOP'), { lapFile })
   const replies = [{ costUsd: 0.3, costByModel: { 'claude-opus-5-5': 0.25, 'claude-haiku-5-5': 0.05 } }, { costUsd: 0.2, costByModel: { 'claude-opus-5-5': 0.15 } }, { costUsd: null }]
   const m = g.model(async () => ({ ok: true, text: '', ...replies.shift()! }))
@@ -55,7 +57,7 @@ test('per-model cost (lap 4): the guard ledger and the lap ledger split each rol
     }
   }
   close(g.ledger.byRoleModel)
-  const lap = JSON.parse(readFileSync(lapFile, 'utf8'))
+  const lap = lapTotals(lapFile) // summed from the append-only lines: the same totals as the lap-4 totals file
   close(lap.byRoleModel)
   assert.ok(Math.abs(lap.totalUsd - 1.5) < 1e-9)
   // a re-draft's ledger adds to the earlier one, per role and model
@@ -63,6 +65,95 @@ test('per-model cost (lap 4): the guard ledger and the lap ledger split each rol
   assert.ok(Math.abs(mergeLedger(g.ledger, g.ledger).byRoleModel!.builder['claude-opus-5-5'] - 0.8) < 1e-9)
   assert.equal(JSON.stringify(g.ledger.byRoleModel), before) // merge does not mutate its inputs
   assert.deepEqual(mergeLedger({ note: '', byRole: {}, totalUsd: 0, uncounted: [] }, g.ledger).byRoleModel, g.ledger.byRoleModel) // a lap-3 ledger has no split
+})
+
+// #13: the lap ledger is append-only, so parallel runs never lose a charge, and the lap cap holds under them.
+const near = (a: number, b: number) => assert.ok(Math.abs(a - b) < 1e-9, `${a} != ${b}`)
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+async function fastPoll<T>(f: () => Promise<T>): Promise<T> {
+  const p = CAPS.pollMs
+  CAPS.pollMs = 10
+  try { return await f() } finally { CAPS.pollMs = p }
+}
+
+test('lap ledger: concurrent guards lose no charge; the lap total is the sum of every call', async () => {
+  const lapFile = join(tmp('lapconc'), 'lap-ledger.jsonl')
+  const guards = Array.from({ length: 6 }, () => startGuard(5, join(sd, 'NOSTOP'), { lapFile }))
+  await Promise.all(guards.map(async (g, i) => {
+    const m = g.model(async () => { await sleep(Math.random() * 5); return { ok: true, text: '', costUsd: 0.01 * (i + 1) } })
+    for (let n = 0; n < 15; n++) await m(task('builder'))
+  }))
+  guards.forEach((g) => g.dispose())
+  near(lapSpent(lapFile), guards.reduce((a, g) => a + g.ledger.totalUsd, 0))
+  near(lapSpent(lapFile), 15 * 0.01 * (1 + 2 + 3 + 4 + 5 + 6))
+  assert.equal(readFileSync(lapFile, 'utf8').split('\n').filter(Boolean).length, 6 * 15 * 2) // a hold and a charge per call
+})
+
+test('lap ledger: several processes appending at once lose and tear no line', () => {
+  const lapFile = join(tmp('lapproc'), 'lap-ledger.jsonl')
+  const code = `import('${join(REPO_SRC, 'limits.ts')}').then(({ chargeLap }) => { for (let i = 0; i < 300; i++) chargeLap(process.argv[1], 0.01, 'builder') })`
+  const kids = Array.from({ length: 4 }, () => spawn(process.execPath, ['--experimental-strip-types', '--no-warnings', '-e', code, lapFile], { stdio: 'inherit' }))
+  return Promise.all(kids.map((k) => new Promise((ok) => k.on('exit', ok)))).then((codes) => {
+    assert.deepEqual(codes, [0, 0, 0, 0])
+    near(lapSpent(lapFile), 4 * 300 * 0.01)
+  })
+})
+
+test('lap cap: calls started together just below the cap never take it past the cap', () => fastPoll(async () => {
+  const lapFile = join(tmp('lapedge'), 'lap-ledger.jsonl')
+  chargeLap(lapFile, CAPS.lapCostUsd - 1, 'builder')
+  const seen: number[] = []
+  const results = await Promise.allSettled(Array.from({ length: 5 }, async () => {
+    const g = startGuard(5, join(sd, 'NOSTOP'), { lapFile })
+    try { return await g.model(async (t) => { seen.push(t.maxCostUsd); await sleep(30); return { ok: true, text: '', costUsd: t.maxCostUsd } })({ ...task('builder'), maxCostUsd: 0.6 }) } finally { g.dispose() }
+  }))
+  assert.deepEqual(seen, [0.6, 0.4]) // what the first held was not handed out twice
+  assert.equal(results.filter((r) => r.status === 'rejected' && r.reason instanceof Stop && /lap cost cap reached/.test(r.reason.message)).length, 3)
+  near(lapSpent(lapFile), CAPS.lapCostUsd)
+}))
+
+test('lap cap: a call held back by a sibling gets its whole budget once the sibling spent little', () => fastPoll(async () => {
+  const lapFile = join(tmp('lapwait'), 'lap-ledger.jsonl')
+  chargeLap(lapFile, CAPS.lapCostUsd - 1, 'builder')
+  const seen: number[] = []
+  const go = () => {
+    const g = startGuard(5, join(sd, 'NOSTOP'), { lapFile })
+    return g.model(async (t) => { seen.push(t.maxCostUsd); await sleep(30); return { ok: true, text: '', costUsd: 0.01 } })({ ...task('builder'), maxCostUsd: 0.6 }).finally(() => g.dispose())
+  }
+  await Promise.all([go(), go()])
+  assert.deepEqual(seen, [0.6, 0.6])
+}))
+
+test('lap ledger: an unsettled hold and a throwing model count in full; a malformed line refuses', async () => {
+  const dir = tmp('lapbad'), lapFile = join(dir, 'lap-ledger.jsonl')
+  holdLap(lapFile, 0.7, 'builder') // the process died mid-call: never settled
+  near(lapSpent(lapFile), 0.7)
+  assert.deepEqual(lapTotals(lapFile).byRoleModel, { builder: { [UNATTRIBUTED]: 0.7 } })
+  const g = startGuard(5, join(sd, 'NOSTOP'), { lapFile })
+  await assert.rejects(g.model(async () => { throw new Error('boom') })({ ...task('builder'), maxCostUsd: 0.5 }), /boom/)
+  g.dispose()
+  near(lapSpent(lapFile), 1.2)
+  assert.deepEqual(g.ledger.uncounted, [{ role: 'builder', reason: 'model threw: boom', chargedUsd: 0.5 }])
+  for (const bad of ['{"call":"x"', '{}', '{"call":"x","role":"b","usd":-5}', '{"call":"x","role":"b","usd":"1"}', '{"call":"x","role":"b","hold":1,"usd":1}']) {
+    writeFileSync(lapFile, `${bad}\n`)
+    assert.throws(() => lapSpent(lapFile), /refusing to guess/, bad)
+  }
+  writeFileSync(join(dir, 'lap-ledger.json'), JSON.stringify({ totalUsd: 'x' })) // a pre-#13 totals file
+  writeFileSync(lapFile, '')
+  assert.throws(() => lapSpent(lapFile), /no valid totalUsd/)
+  writeFileSync(join(dir, 'lap-ledger.json'), JSON.stringify({ totalUsd: 2, byRoleModel: { judge: { m: 2 } } }))
+  chargeLap(lapFile, 1, 'judge', { m: 1 })
+  assert.deepEqual(lapTotals(lapFile), { totalUsd: 3, byRoleModel: { judge: { m: 3 } } })
+})
+
+test('a budget is rounded down to the CLI precision; under $0.0001 left is a stop, not a free call', async () => {
+  const lapFile = join(tmp('lapround'), 'lap-ledger.jsonl')
+  chargeLap(lapFile, CAPS.lapCostUsd - 0.00005, 'builder')
+  const g = startGuard(5, join(sd, 'NOSTOP'), { lapFile })
+  let calls = 0
+  await assert.rejects(g.model(async () => { calls++; return { ok: true, text: '', costUsd: 0 } })(task('builder')), Stop)
+  g.dispose()
+  assert.equal(calls, 0)
 })
 
 test('a non-numeric or non-positive cap / attempts is refused, never silently uncapped', async () => {

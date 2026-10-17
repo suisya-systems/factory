@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import type { Model } from '../src/adapter.ts'
 import { runChange } from '../src/run.ts'
 import { freePort } from '../src/sandbox.ts'
-import { stopServer } from '../src/ship.ts'
+import { prodDir, stopServer } from '../src/ship.ts'
 import { approvedChange, CLI_MARKERS, freshState, gitTarget, MEMO_SERVER, SCENARIOS, writeApp } from './helpers.ts'
 
 const sd = freshState()
@@ -71,17 +71,17 @@ test('full lap ships a passing build and records signals; builder never sees sce
   // shipped: ship target fast-forwarded to the passing sha, release live behind the proxy
   const head = execFileSync('git', ['-C', target, 'rev-parse', 'HEAD']).toString().trim()
   assert.equal(head, r.attempts[2].sha)
-  assert.ok(existsSync(join(sd, 'releases', 'current', 'server.cjs')))
+  assert.ok(existsSync(join(prodDir(sd, port), 'current', 'server.cjs')))
   const live = await (await fetch(`http://127.0.0.1:${port}/notes`)).json()
   assert.ok(Array.isArray(live))
 
-  const sig = JSON.parse(readFileSync(join(sd, 'prod', 'signals.json'), 'utf8'))
+  const sig = JSON.parse(readFileSync(join(prodDir(sd, port), 'signals.json'), 'utf8'))
   assert.ok(sig.requests >= 5, JSON.stringify(sig))
   assert.ok(sig.byStatus['404'] >= 1)
   assert.equal(typeof sig.latencyMs.p50, 'number')
 
   // nothing the factory wrote to its records mentions the CLI
-  for (const f of [...filesUnder(join(sd, 'runs')), ...filesUnder(join(sd, 'vault')), ...['signals.json', 'access.log', 'error.log'].map((x) => join(sd, 'prod', x)).filter(existsSync)]) {
+  for (const f of [...filesUnder(join(sd, 'runs')), ...filesUnder(join(sd, 'vault')), ...['signals.json', 'access.log', 'error.log'].map((x) => join(prodDir(sd, port), x)).filter(existsSync)]) {
     const txt = readFileSync(f, 'utf8')
     for (const m of CLI_MARKERS) assert.ok(!m.test(txt), `${f} contains ${m}`)
   }

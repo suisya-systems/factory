@@ -9,7 +9,7 @@ import type { Model } from '../src/adapter.ts'
 import { build, judge } from '../src/roles.ts'
 import { exportTree, freePort, removeTree } from '../src/sandbox.ts'
 import { runScenario, type Scenario } from '../src/scenario.ts'
-import { ship, stopServer } from '../src/ship.ts'
+import { prodDir, ship, stopServer } from '../src/ship.ts'
 import { freshState, gitTarget, MEMO_SERVER, SCENARIOS, tmp, writeApp } from './helpers.ts'
 
 const sd = freshState()
@@ -37,15 +37,22 @@ test('judge tests the exported commit: files git ignores do not count', async ()
   assert.equal(v.testsAllPass, false, 'the live workspace would pass; the shipped commit cannot start')
 })
 
+test('ship: a state dir with the prod layout from before #13 is refused before anything goes live', async () => {
+  const old = tmp('oldprod')
+  mkdirSync(join(old, 'prod', 'data'), { recursive: true })
+  await assert.rejects(ship({ changeId: 'c', sha: 'a'.repeat(40), approvedVersion: 'v' }, tmp('ws'), gitTarget(), old, 1), /prod layout from before #13/)
+  assert.ok(!existsSync(join(old, 'prod', '1')))
+})
+
 test('ship: a release that cannot start changes nothing (target, current)', async () => {
   const target = gitTarget()
   const ws = tmp('ws')
   execFileSync('git', ['clone', '-q', target, ws])
   const { sha } = await build(builder((d) => writeApp(d, 'process.exit(1)')), ws, 'spec', '')
-  const h0 = head(target)
-  await assert.rejects(ship({ changeId: 'c', sha, approvedVersion: 'v' }, ws, target, sd, await freePort()), /exited before listening/)
+  const h0 = head(target), port = await freePort()
+  await assert.rejects(ship({ changeId: 'c', sha, approvedVersion: 'v' }, ws, target, sd, port), /exited before listening/)
   assert.equal(head(target), h0)
-  assert.ok(!existsSync(join(sd, 'releases', 'current')))
+  assert.ok(!existsSync(join(prodDir(sd, port), 'current')))
 })
 
 test('ship: refuses when something else already listens on the port, and when stopped', async () => {
@@ -61,7 +68,7 @@ test('ship: refuses when something else already listens on the port, and when st
     await assert.rejects(ship({ changeId: 'c', sha, approvedVersion: 'v' }, ws, target, sd, port), /already in use/)
   } finally { squatter.close() }
   assert.equal(head(target), h0)
-  assert.ok(!existsSync(join(sd, 'releases', 'current')))
+  assert.ok(!existsSync(join(prodDir(sd, port), 'current')))
   const ac = new AbortController()
   ac.abort()
   await assert.rejects(ship({ changeId: 'c', sha, approvedVersion: 'v' }, ws, target, sd, port, ac.signal), /stopped/)
@@ -134,7 +141,7 @@ test('ship: a dirty ship target puts nothing live; the previous release keeps se
   writeFileSync(join(target, 'stray.txt'), 'local edit')
   await assert.rejects(ship({ changeId: 'c', sha: v2.sha, approvedVersion: 'v' }, ws, target, sd, port), /local changes/)
   assert.equal(head(target), v1.sha)
-  assert.equal(readlinkSync(join(sd, 'releases', 'current')), join(sd, 'releases', v1.sha))
+  assert.equal(readlinkSync(join(prodDir(sd, port), 'current')), join(prodDir(sd, port), 'releases', v1.sha))
   assert.equal((await fetch(`http://127.0.0.1:${port}/notes`)).status, 200)
   await stopServer(sd)
 })

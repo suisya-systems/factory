@@ -31,7 +31,7 @@ const USAGE = `usage: factory <command>
                                                    K independent builds from the approved spec in empty repos;
                                                    scenarios + probes only, no LLM judge, nothing ships
   tally <id>                                       tables of the replicates' probe answers and scenario passes
-  observe                                          read prod logs into signals.json
+  observe [--port N]                               read the prod logs of port N (default 8787) into signals.json
   stop                                             emergency stop (creates the STOP file)
   probe-isolation <id>                             REAL model call: can a builder read the vault?
                                                    (exit 1 = canary found, 2 = model failed, 3 = over cost cap)
@@ -145,7 +145,7 @@ export async function main(argv: string[], model: Model = claudeModel): Promise<
   const base = model
   model = (t) => base(Object.hasOwn(requestedModels, t.role) ? { ...t, model: requestedModels[t.role] } : t)
   const sd = stateDir() // refuses to start unless vault + runs are hidden from the sandbox
-  const lapFile = join(sd, 'lap-ledger.json')
+  const lapFile = join(sd, 'lap-ledger.jsonl')
   const port = Number(v.port ?? 8787)
   const stopFile = process.env.FACTORY_STOP_FILE ?? join(sd, 'STOP')
   // 'serve' is exempt: ship launches it only after its own stop checks, and a rollback restart must not be blocked.
@@ -215,7 +215,7 @@ export async function main(argv: string[], model: Model = claudeModel): Promise<
     }
     case 'tally': if (!id) break; console.log(tally(sd, id)); return 0
     case 'serve': await serve(sd, port); return -1 // keeps running
-    case 'observe': console.log(JSON.stringify(observe(sd), null, 2)); return 0
+    case 'observe': console.log(JSON.stringify(observe(sd, port), null, 2)); return 0
     case 'stop': {
       const f = stopFile
       writeFileSync(f, new Date().toISOString())

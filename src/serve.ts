@@ -4,12 +4,13 @@ import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, realpath
 import http from 'node:http'
 import { join } from 'node:path'
 import { freePort, killTree, spawnApp, waitPort } from './sandbox.ts'
+import { prodDir } from './ship.ts'
 
 export async function serve(stateDir: string, port: number): Promise<void> {
-  const prod = join(stateDir, 'prod')
+  const prod = prodDir(stateDir, port)
   const dataDir = join(prod, 'data')
   mkdirSync(dataDir, { recursive: true })
-  const appDir = realpathSync(join(stateDir, 'releases', 'current'))
+  const appDir = realpathSync(join(prod, 'current'))
   const accessLog = join(prod, 'access.log')
   const errorLog = join(prod, 'error.log')
   const internal = await freePort()
@@ -44,8 +45,8 @@ export async function serve(stateDir: string, port: number): Promise<void> {
 
 // Reads prod logs into signals.json and stops there: turning a signal into the next job goes
 // through the drafter + human approval at the entrance (decision 2), never automatically.
-export function observe(stateDir: string) {
-  const prod = join(stateDir, 'prod')
+export function observe(stateDir: string, port: number) {
+  const prod = prodDir(stateDir, port)
   const read = (f: string) => (existsSync(join(prod, f)) ? readFileSync(join(prod, f), 'utf8').split('\n').filter(Boolean) : [])
   const access = read('access.log').map((l) => {
     const [time, method, path, status, ms] = l.split(' ')
