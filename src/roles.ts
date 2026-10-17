@@ -31,8 +31,14 @@ export function extractJson(text: string): any {
 // Then every scenario is classified by a third, spec-only procedure (classify.ts).
 export const INTERFACE_KEYS = ['endpoints', 'queryParams', 'fields', 'listShape', 'conflictToken']
 
-const SPEC_FORMAT = `Reply with ONE JSON object and nothing else:
-{"spec": "<markdown spec for the builder>",
+// Lap 3 (owner decision 2026-10-17): a deliberately coarse spec, so the hidden scenarios have room to
+// check behaviour the spec does not state. The spec carries only what the request says and the interface.
+export const UNDECIDED = /^##\s+Undecided\s*$/m
+const SPEC_FORMAT = `Write ONLY what the request states, plus the interface (names and shapes). Do NOT decide behaviour the
+request leaves open (defaults, status codes, limits and boundaries, ordering, error cases, how features combine):
+end the spec with a "## Undecided" section that lists each such point as one bullet, without choosing an answer.
+Reply with ONE JSON object and nothing else:
+{"spec": "<markdown spec for the builder, ending with the ## Undecided section>",
  "interface": {"endpoints": ["METHOD /path", ...], "queryParams": {"METHOD /path": ["name", ...]}, "fields": {"<resource>": ["name", ...]},
    "listShape": "<'bare array', or the envelope's key names; say that a missing next page is null>", "conflictToken": {"in": "body|header", "name": "..."}},
  "assumptions": ["<one line each: what you assumed because the request did not say>"]}
@@ -87,6 +93,7 @@ export async function draft(model: Model, request: string, o: { signals?: string
   const req = `REQUEST:\n${request}\n` + (o.signals ? `\nPRODUCTION SIGNALS (observed from the running app):\n${o.signals}\n` : '') + appBlock(o.app ?? '')
   const j = await ask(model, 'spec-drafter', `You are the spec drafter of a software factory. Turn the request into a spec for a builder (HTTP JSON API).\n\n${req}\n${SPEC_FORMAT}`, (j) => {
     if (typeof j.spec !== 'string' || !j.spec.trim()) throw new Error('spec drafter: spec missing')
+    if (!UNDECIDED.test(j.spec)) throw new Error('spec drafter: spec has no "## Undecided" section')
     return { spec: j.spec as string, iface: JSON.stringify(checkInterface(j.interface)), assumptions: strs(j.assumptions, 'spec drafter') }
   })
   const assumptions = [`Interface (names and shapes only): ${j.iface}`, ...j.assumptions]
@@ -109,7 +116,8 @@ export const RUN_CONTRACT = `RUN CONTRACT (fixed, non-negotiable):
 
 // The builder gets the spec only. assumptions.json carries scenario-writer text: never pass it here.
 export async function build(model: Model, workspace: string, spec: string, feedback: string, signal?: AbortSignal): Promise<{ sha: string; ok: boolean; error?: string }> {
-  const instruction = `You are the builder of a software factory. Implement the spec below in the current directory.\n\nSPEC:\n${spec}\n\n${RUN_CONTRACT}\n` +
+  const instruction = `You are the builder of a software factory. Implement the spec below in the current directory. ` +
+    `Points the spec lists under "Undecided" are left to you: choose sensible behaviour.\n\nSPEC:\n${spec}\n\n${RUN_CONTRACT}\n` +
     (feedback ? `\nYOUR PREVIOUS ATTEMPT WAS REJECTED. Feedback:\n${feedback}\n` : '')
   const r = await model({ ...base, role: 'builder', instruction, workdir: workspace, access: 'write' })
   // The workspace (incl. .git/config) is builder-written: a silently failed commit would leave HEAD
