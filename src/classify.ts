@@ -7,12 +7,12 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Model } from './adapter.ts'
-import { at, fill, get, isObj, lengthChecks, type Scenario, type Step } from './scenario.ts'
+import { at, fill, get, HEADER, isObj, lengthChecks, type Scenario, type Step } from './scenario.ts'
 
 export type Basis = 'spec' | 'code' | 'convention'
 export type Label = 'readable' | 'unstated' | 'contradicts' | 'unknown'
 type Tri = 'M' | 'X' | 'U'
-export type Prediction = { status: number[] | null; body: unknown; basis: Basis; quote: string }
+export type Prediction = { status: number[] | null; body: unknown; headers?: Record<string, unknown>; basis: Basis; quote: string }
 export type Check = { step: number; check: string; result: Tri; basis: Basis }
 // basis: for readable, the weakest basis among the steps that matched (spec > code > convention).
 export type Classification = { id: string; label: Label; basis?: Basis; checks: Check[]; predictions?: Prediction[]; error?: string }
@@ -38,6 +38,7 @@ ${JSON.stringify(requestsOnly(s), null, 1)}
 Reply with ONE JSON object: {"steps": [one entry per request, in order]}. Each entry:
 {"status": [<every status code the spec/code allows here>] or null if they do not determine it,
  "body": <the JSON response body as far as it is determined, or null>,
+ "headers": {<response headers a later request relies on (see "capture": "header:<name>"), lower-case name: value or "?"; omit if not determined>},
  "basis": "spec" | "code" | "convention" (where the prediction comes from; "convention" = general HTTP habit, not stated anywhere),
  "quote": "<the exact sentence of the spec or line of code you rely on, copied verbatim; empty for convention>"}
 In "body": leave a field OUT when its presence is not determined; write "?" when the field is present but its value is not determined; an array you write is a claim about ALL its items in order, so use "?" for any item you cannot determine; write "{{name}}" where the value equals a captured value. Do not invent ids or timestamps.`
@@ -45,7 +46,8 @@ In "body": leave a field OUT when its presence is not determined; write "?" when
 
 const norm = (t: string) => t.replace(/\s+/g, ' ').trim()
 const worst = (rs: Tri[]): Tri => (rs.includes('X') ? 'X' : rs.includes('U') ? 'U' : 'M')
-const open = (v: unknown) => v === undefined || v === null || v === '?'
+// Undetermined. A null inside the body is a determined value; a whole body of null is turned into undefined.
+const open = (v: unknown) => v === undefined || v === '?'
 // The prediction is untrusted: a "{{name}}" it uses but nothing captured reads as undetermined.
 const fillOpen = (x: unknown, vars: Record<string, unknown>): unknown => {
   if (typeof x === 'string') {
@@ -59,10 +61,9 @@ const fillOpen = (x: unknown, vars: Record<string, unknown>): unknown => {
 
 // Expected json vs predicted body, leaf by leaf.
 function tri(e: unknown, p: unknown): Tri {
-  if (open(p) && e !== null) return 'U'
+  if (open(p)) return 'U'
   if (Array.isArray(e)) return !Array.isArray(p) || p.length < e.length ? 'X' : worst(e.map((x, i) => tri(x, p[i])))
   if (isObj(e)) return !isObj(p) ? 'X' : worst(Object.entries(e).map(([k, v]) => tri(v, Object.hasOwn(p, k) ? p[k] : undefined)))
-  if (e === null) return p === null ? 'M' : p === undefined || p === '?' ? 'U' : 'X'
   return e === p ? 'M' : 'X'
 }
 
@@ -74,6 +75,11 @@ export function compareStep(st: Step, p: Prediction, vars: Record<string, unknow
   const expected = e.json === undefined ? undefined : fill(e.json, vars) // as the runner: captures of this step come after its checks
   for (const name of Object.keys(st.capture ?? {})) vars[name] = `\u0000captured:${name}`
   const body = p.body === null ? undefined : fillOpen(p.body, vars) // may echo this step's own capture
+  // The runner fails a step whose capture is missing: the prediction must establish it.
+  for (const [name, path] of Object.entries(st.capture ?? {})) {
+    const v = path.startsWith(HEADER) ? (isObj(p.headers) ? p.headers[path.slice(HEADER.length).toLowerCase()] : undefined) : get(body, path)
+    out.push({ check: `capture ${name}`, result: v === undefined ? 'U' : 'M' })
+  }
   if (e.status !== undefined) {
     const want = ([] as number[]).concat(e.status)
     const got = p.status ?? []
@@ -101,7 +107,7 @@ export function classifyReply(s: Scenario, spec: string, app: string, reply: unk
     const claimed: Basis = x.basis === 'spec' || x.basis === 'code' ? x.basis : 'convention'
     const source = claimed === 'spec' ? spec : app
     const basis: Basis = claimed !== 'convention' && norm(quote).length >= 8 && norm(source).includes(norm(quote)) ? claimed : 'convention'
-    return { status, body: x.body ?? null, basis, quote }
+    return { status, body: x.body ?? null, ...(isObj(x.headers) ? { headers: x.headers } : {}), basis, quote }
   })
   const vars: Record<string, unknown> = {}
   const checks: Check[] = s.steps.flatMap((st, i) => compareStep(st, preds[i], vars).map((c) => ({ step: i + 1, ...c, basis: preds[i].basis })))

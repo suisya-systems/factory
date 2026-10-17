@@ -192,3 +192,13 @@ test('approval summary (b): a convention-only mismatch is listed with its step',
   assert.match(s, /\(b\)[^\n]*\(1\)\n- create-get: .*step 1 POST status 201/)
   assert.match(s, /\(a\)[^\n]*\(0\)\n- none/)
 })
+
+test('classifyReply: a predicted null inside the body is a value; captures must be established', () => {
+  const q = 'GET /notes/:id returns the note'
+  const one = (s: Scenario, p: object) => classifyReply(s, SPEC, '', { steps: [{ status: [200], basis: 'spec', quote: q, ...p }] }).label
+  const page: Scenario = { id: 'p', title: 'p', summary: 'the last page says so', inSpec: true, kind: 'paging', steps: [{ method: 'GET', path: '/notes', expect: { status: 200, json: { next: 'abc' } } }] }
+  assert.equal(one(page, { body: { next: null } }), 'contradicts')
+  const etag: Scenario = { id: 'e', title: 'e', summary: 'a version is handed out', inSpec: true, kind: 'conflict', steps: [{ method: 'GET', path: '/notes', expect: { status: 200 }, capture: { v: 'header:etag' } }] }
+  assert.equal(one(etag, { body: null }), 'unstated')
+  assert.equal(one(etag, { body: null, headers: { etag: '?' } }), 'readable')
+})
