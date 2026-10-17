@@ -5,7 +5,7 @@ import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from
 import { join } from 'node:path'
 import type { Model, Task } from '../src/adapter.ts'
 import { main, approvalSummary } from '../src/cli.ts'
-import { classify, classifyReply, predictInstruction } from '../src/classify.ts'
+import { classify, classifyReply, predictInstruction, withoutUndecided } from '../src/classify.ts'
 import { startGuard, Stop } from '../src/limits.ts'
 import { draft, extractJson } from '../src/roles.ts'
 import { runScenario, type Scenario } from '../src/scenario.ts'
@@ -15,7 +15,7 @@ import { freshState, gitTarget, SCENARIOS, tmp, writeApp } from './helpers.ts'
 const sd = freshState()
 process.env.FACTORY_STOP_FILE = join(sd, 'NOSTOP')
 
-const SPEC = '# Memo API\n- POST /notes creates a note and returns 201 with its id.\n- GET /notes/:id returns the note.'
+const SPEC = '# Memo API\n- POST /notes creates a note and returns 201 with its id.\n- GET /notes/:id returns the note.\n\n## Undecided\n- the status code for an unknown id'
 const IFACE = { endpoints: ['POST /notes', 'GET /notes/:id'], fields: { note: ['id', 'title'] } }
 const createGet = SCENARIOS[0] // POST 201 {id} capture id; GET /notes/{{id}} 200 {title: 'alpha'}
 
@@ -235,4 +235,52 @@ test('a rejected drafter reply gets one repair round with the error, in a fresh 
   const bad = await run(false)
   assert.ok(bad.d instanceof Error && /concrete value/.test(bad.d.message))
   assert.equal(bad.seen.filter((t) => t.role === 'scenario-drafter').length, 2)
+})
+
+test('lap 3: the spec drafter must leave open points under "## Undecided"; the builder and the approver see them', async () => {
+  const noUndecided: Model = async (t) => ({ ok: true, costUsd: 0, text: JSON.stringify(t.role === 'spec-drafter' ? { spec: '# Memo API\n- all rules decided', interface: IFACE, assumptions: [] } : {}) })
+  await assert.rejects(draft(noUndecided, 'x'), /Undecided/)
+  const { model, seen } = fake()
+  const d = await draft(model, 'a memo api')
+  assert.match(seen[0].instruction, /Do NOT decide behaviour/)
+  const s = approvalSummary('x', { ...d, assumptions: [] }, 'v')
+  assert.match(s, /## Undecided in the spec[^\n]*\n- the status code for an unknown id\n\n/) // stops before the appended interface
+})
+
+test('classifyReply: a re-captured name keeps its earlier value for "{{name}}"; each capture gets its own marker', () => {
+  const q = 'GET /notes/:id returns the note'
+  const p = (body: unknown, headers?: object) => ({ status: [200], body, basis: 'spec', quote: q, ...(headers ? { headers } : {}) })
+  const recap: Scenario = { id: 'r', title: 'r', summary: 'the same note keeps its id', inSpec: true, kind: 'crud', steps: [
+    { method: 'POST', path: '/notes', body: {}, expect: { status: 200 }, capture: { id: 'id', v: 'version' } },
+    { method: 'PUT', path: '/notes/{{id}}', body: {}, expect: { json: { id: '{{id}}' } }, capture: { id: 'id', v: 'version' } },
+    { method: 'GET', path: '/notes/{{id}}', expect: { json: { version: '{{v}}' } } }] }
+  const label = (b3: unknown) => classifyReply(recap, SPEC, '', { steps: [p({ id: '?', version: '?' }), p({ id: '{{id}}', version: '?' }), p(b3)] }).label
+  assert.equal(label({ version: '{{v}}' }), 'readable')
+  assert.equal(label({ version: '?' }), 'unstated')
+  // a "{{name}}" inside a predicted header is expanded before it is captured
+  const hdr: Scenario = { id: 'h', title: 'h', summary: 'the version tag is echoed', inSpec: true, kind: 'conflict', steps: [
+    { method: 'POST', path: '/notes', body: {}, expect: { status: 200 }, capture: { id: 'id' } },
+    { method: 'GET', path: '/notes/{{id}}', expect: { status: 200 }, capture: { e: 'header:etag' } },
+    { method: 'GET', path: '/notes/{{id}}', expect: { json: { tag: '{{e}}' } } }] }
+  assert.equal(classifyReply(hdr, SPEC, '', { steps: [p({ id: '?' }), p(null, { etag: '{{id}}' }), p({ tag: '{{id}}' })] }).label, 'readable')
+})
+
+test('classifyReply (lap 3 review): "?" inside a captured object, header name case and type, quotes from Undecided', () => {
+  const q = 'GET /notes/:id returns the note'
+  const p = (body: unknown, headers?: object) => ({ status: [200], body, basis: 'spec', quote: q, ...(headers ? { headers } : {}) })
+  const obj: Scenario = { id: 'o', title: 'o', summary: 'an old version is returned', inSpec: true, kind: 'history', steps: [
+    { method: 'POST', path: '/notes', body: {}, expect: { status: 200 }, capture: { m: 'memo' } },
+    { method: 'GET', path: '/notes', expect: { json: { memo: '{{m}}' } } }] }
+  // the prediction never determined the title: open, not a contradiction
+  assert.equal(classifyReply(obj, SPEC, '', { steps: [p({ memo: { title: '?' } }), p({ memo: { title: 'z' } })] }).label, 'unstated')
+  assert.equal(classifyReply(obj, SPEC, '', { steps: [p({ memo: { title: '?' } }), p({ memo: '{{m}}' })] }).label, 'readable')
+  const hdr: Scenario = { id: 'h', title: 'h', summary: 'the tag is echoed', inSpec: true, kind: 'conflict', steps: [
+    { method: 'GET', path: '/notes', expect: { status: 200 }, capture: { e: 'header:ETag' } },
+    { method: 'GET', path: '/notes', expect: { json: { tag: '{{e}}' } } }] }
+  assert.equal(classifyReply(hdr, SPEC, '', { steps: [p(null, { ETag: 7 }), p({ tag: '7' })] }).label, 'readable') // any case; a header is a string
+  assert.equal(classifyReply(hdr, SPEC, '', { steps: [p(null, { ETag: 7 }), p({ tag: 7 })] }).label, 'contradicts')
+  // a quote from the Undecided section is not spec evidence
+  assert.equal(withoutUndecided(SPEC + '\n\n## Interface\nx'), SPEC.split('## Undecided')[0] + '## Interface\nx')
+  const r = classifyReply(SCENARIOS[3], SPEC, '', { steps: [{ status: [404], body: null, basis: 'spec', quote: 'the status code for an unknown id' }] })
+  assert.equal(r.basis, 'convention')
 })

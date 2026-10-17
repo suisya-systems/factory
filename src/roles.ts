@@ -5,13 +5,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Model } from './adapter.ts'
 import { CAPS } from './limits.ts'
-import { classify } from './classify.ts'
+import { classify, UNDECIDED } from './classify.ts'
 import { exportTree, removeTree, sandboxGit } from './sandbox.ts'
 import { runScenarios, validateScenarios, type Scenario, type ScenarioResult } from './scenario.ts'
 import type { Draft } from './vault.ts'
 
-// No per-call ceiling of their own: the guard gives each call what is left of the change / lap caps.
-// Always call these roles through a guard (an unguarded Infinity budget is not a valid CLI budget).
+// Each call also gets at most what is left of the change / lap caps (the guard).
+// Since lap 3 the builder and the judge have a per-call ceiling (CAPS): a call that reports no cost
+// (a timeout) is charged that ceiling, not everything left of the change cap, so one timeout does not end the retries.
 const base = { maxCostUsd: Infinity, timeoutMs: CAPS.modelTimeoutMs }
 
 export function extractJson(text: string): any {
@@ -31,8 +32,13 @@ export function extractJson(text: string): any {
 // Then every scenario is classified by a third, spec-only procedure (classify.ts).
 export const INTERFACE_KEYS = ['endpoints', 'queryParams', 'fields', 'listShape', 'conflictToken']
 
-const SPEC_FORMAT = `Reply with ONE JSON object and nothing else:
-{"spec": "<markdown spec for the builder>",
+// Lap 3 (owner decision 2026-10-17): a deliberately coarse spec, so the hidden scenarios have room to
+// check behaviour the spec does not state. The spec carries only what the request says and the interface.
+const SPEC_FORMAT = `Write ONLY what the request states, plus the interface (names and shapes). Do NOT decide behaviour the
+request leaves open (defaults, status codes, limits and boundaries, ordering, error cases, how features combine):
+end the spec with a "## Undecided" section that lists each such point as one bullet, without choosing an answer.
+Reply with ONE JSON object and nothing else:
+{"spec": "<markdown spec for the builder, ending with the ## Undecided section>",
  "interface": {"endpoints": ["METHOD /path", ...], "queryParams": {"METHOD /path": ["name", ...]}, "fields": {"<resource>": ["name", ...]},
    "listShape": "<'bare array', or the envelope's key names; say that a missing next page is null>", "conflictToken": {"in": "body|header", "name": "..."}},
  "assumptions": ["<one line each: what you assumed because the request did not say>"]}
@@ -87,6 +93,7 @@ export async function draft(model: Model, request: string, o: { signals?: string
   const req = `REQUEST:\n${request}\n` + (o.signals ? `\nPRODUCTION SIGNALS (observed from the running app):\n${o.signals}\n` : '') + appBlock(o.app ?? '')
   const j = await ask(model, 'spec-drafter', `You are the spec drafter of a software factory. Turn the request into a spec for a builder (HTTP JSON API).\n\n${req}\n${SPEC_FORMAT}`, (j) => {
     if (typeof j.spec !== 'string' || !j.spec.trim()) throw new Error('spec drafter: spec missing')
+    if (!UNDECIDED.test(j.spec)) throw new Error('spec drafter: spec has no "## Undecided" section')
     return { spec: j.spec as string, iface: JSON.stringify(checkInterface(j.interface)), assumptions: strs(j.assumptions, 'spec drafter') }
   })
   const assumptions = [`Interface (names and shapes only): ${j.iface}`, ...j.assumptions]
@@ -109,9 +116,10 @@ export const RUN_CONTRACT = `RUN CONTRACT (fixed, non-negotiable):
 
 // The builder gets the spec only. assumptions.json carries scenario-writer text: never pass it here.
 export async function build(model: Model, workspace: string, spec: string, feedback: string, signal?: AbortSignal): Promise<{ sha: string; ok: boolean; error?: string }> {
-  const instruction = `You are the builder of a software factory. Implement the spec below in the current directory.\n\nSPEC:\n${spec}\n\n${RUN_CONTRACT}\n` +
+  const instruction = `You are the builder of a software factory. Implement the spec below in the current directory. ` +
+    `Points the spec lists under "Undecided" are left to you: choose sensible behaviour.\n\nSPEC:\n${spec}\n\n${RUN_CONTRACT}\n` +
     (feedback ? `\nYOUR PREVIOUS ATTEMPT WAS REJECTED. Feedback:\n${feedback}\n` : '')
-  const r = await model({ ...base, role: 'builder', instruction, workdir: workspace, access: 'write' })
+  const r = await model({ ...base, maxCostUsd: CAPS.builderCallUsd, role: 'builder', instruction, workdir: workspace, access: 'write' })
   // The workspace (incl. .git/config) is builder-written: a silently failed commit would leave HEAD
   // at the previous attempt's sha while the working tree holds new code.
   for (const args of [['add', '-A'], ['commit', '-q', '--allow-empty', '--no-verify', '-m', 'factory: builder attempt']]) {
@@ -147,9 +155,9 @@ export async function judge(model: Model, workspace: string, sha: string, spec: 
 async function judgeDir(model: Model, dir: string, spec: string, scenarios: Scenario[], approvedVersion: string, signal: AbortSignal): Promise<Verdict> {
   const results = await runScenarios(dir, scenarios, signal)
   const testsAllPass = results.every((r) => r.pass)
-  const instruction = `You are the judge of a software factory. The deterministic hidden scenarios have already run. Read the code in the current directory (read-only) and decide whether it satisfies the spec as a whole.\n\nSPEC:\n${spec}\n\nSCENARIOS:\n${JSON.stringify(scenarios)}\n\nRESULTS:\n${JSON.stringify(results)}\n\nReply with ONE JSON object: {"pass": true|false, "reason": "..."}`
+  const instruction = `You are the judge of a software factory. The deterministic hidden scenarios have already run. Read the code in the current directory (read-only) and decide whether it satisfies the spec as a whole. Points the spec lists under "Undecided" were left to the builder: any sensible choice satisfies the spec.\n\nSPEC:\n${spec}\n\nSCENARIOS:\n${JSON.stringify(scenarios)}\n\nRESULTS:\n${JSON.stringify(results)}\n\nReply with ONE JSON object: {"pass": true|false, "reason": "..."}`
   let r
-  try { r = await model({ ...base, role: 'judge', instruction, workdir: dir, access: 'read' }) }
+  try { r = await model({ ...base, maxCostUsd: CAPS.judgeCallUsd, role: 'judge', instruction, workdir: dir, access: 'read' }) }
   catch (e) { return { pass: false, testsAllPass, llmPass: null, reason: 'judge call stopped', results, approvedVersion, stop: e as Error } }
   let llmPass: boolean | null = null
   let reason = r.ok ? '' : `judge call failed: ${r.error}`
