@@ -18,7 +18,8 @@ const PROBES = { decisions: [
   { id: 'create-status', steps: [{ method: 'POST', path: '/notes', body: { title: 't', body: 'b' } }], observe: ['1:status'], options: { 'created-201': [[201]], 'ok-200': [[200]] } },
   { id: 'title-kept', steps: [{ method: 'POST', path: '/notes', body: { title: 't', body: 'b' }, capture: { id: 'id' } }, { method: 'GET', path: '/notes/{{id}}' }],
     observe: ['2:body.title'], options: { kept: [['t']], dropped: [[null]] } },
-  { id: 'ghost', steps: [{ method: 'POST', path: '/notes', body: {}, capture: { g: 'ghost' } }, { method: 'GET', path: '/notes/{{g}}' }], observe: ['2:status'], options: { a: [[200]], b: [[404]] } },
+  // the second capture of g finds nothing: the first value must not be reused
+  { id: 'ghost', steps: [{ method: 'POST', path: '/notes', body: {}, capture: { g: 'id' } }, { method: 'POST', path: '/notes', body: {}, capture: { g: 'ghost' } }, { method: 'GET', path: '/notes/{{g}}' }], observe: ['3:status'], options: { a: [[200]], b: [[404]] } },
 ] }
 const probesFile = (id: string) => { const f = join(vaultDir(sd, id), 'probes.json'); writeFileSync(f, JSON.stringify(PROBES)); return f }
 
@@ -28,7 +29,7 @@ function builder(seen: { files: string[]; task: Task }[], cost = 0.25): Model {
   return async (t) => {
     seen.push({ files: readdirSync(t.workdir), task: t })
     writeApp(t.workdir, ++n % 2 ? MEMO_SERVER : MEMO_SERVER.replace('return send(res, 201, note)', 'return send(res, 200, note)'))
-    return { ok: true, text: 'built', costUsd: cost }
+    return { ok: true, text: 'built', costUsd: cost, model: n === 1 ? 'mx' : undefined, costByModel: n === 1 ? { mx: cost } : undefined }
   }
 }
 
@@ -46,9 +47,10 @@ test('K builds from empty repos, scored by this change, a same-spec change and t
     assert.ok(!s.task.instruction.includes('created-201'), 'probe text reached the builder')
   }
   assert.deepEqual(rs.map((r) => r.probes.map((p) => p.answer)), [['created-201', 'kept', 'blocked'], ['ok-200', 'kept', 'blocked']])
-  assert.match(rs[0].probes[2].detail!, /never captured/)
+  assert.match(rs[0].probes[2].detail!, /step 3: variable g was never captured/)
   assert.deepEqual(rs.map((r) => r.passed), [{ 'rep-a': 4, 'rep-b': 2 }, { 'rep-a': 2, 'rep-b': 1 }]) // 200 on create fails the 201 checks
   assert.ok(rs.every((r) => r.probesSha256 && r.costUsd === 0.25 && r.requestedModels.builder === 'm1'))
+  assert.deepEqual(rs.map((r) => [r.answeredBy, r.costByModel]), [['mx', { mx: 0.25 }], [null, null]])
   // a second command adds builds, numbered on
   const more = await replicate({ changeId: 'rep-a', model: builder([]), stateDir: sd, k: 1, builderModel: 'm2', probesFile: probesFile('rep-a') })
   assert.equal(more[0].n, 1)
@@ -56,9 +58,10 @@ test('K builds from empty repos, scored by this change, a same-spec change and t
   assert.equal(JSON.parse(readFileSync(join(sd, 'runs', 'rep-a', 'replicate-cost.json'), 'utf8')).totalUsd, 0.75)
   const t = tally(sd, 'rep-a')
   assert.match(t, /\| builder model \| created-201 \| ok-200 \|/)
+  assert.match(t, /\| m1 \| 2 \| 0 \| mx; \(unreported\) \|/)
   assert.match(t, /\| m1 \| 1 \| 1 \|/)
   assert.match(t, /\| m2 \| 1 \| 0 \|/)
-  assert.match(t, /- m1-1: blocked step 2/)
+  assert.match(t, /- m1-1: blocked step 3/)
   assert.match(t, /\| rep-b \| 2 \| 2, 1 \| - \|/) // m2 was not scored on rep-b
   // rescore re-runs the kept commits without a model call
   const again = await replicate({ changeId: 'rep-a', model: async () => { throw new Error('model called') }, stateDir: sd, k: 0, builderModel: 'm1', rescore: true })

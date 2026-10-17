@@ -224,7 +224,8 @@ export async function runProbe(appDir: string, p: Probe, signal: AbortSignal): P
         seen.push({ status: res.status, json })
         for (const [name, path] of Object.entries(st.capture ?? {})) {
           const v = path.startsWith(HEADER) ? (res.headers.get(path.slice(HEADER.length)) ?? undefined) : get(json, path)
-          if (v !== undefined) vars[name] = v // missing: a later step that uses it throws, and the probe is blocked
+          if (v !== undefined) vars[name] = v
+          else delete vars[name] // missing (even if captured before): a later step that uses it throws, and the probe is blocked
         }
       } catch (err) {
         if (signal.aborted) throw err
