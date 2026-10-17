@@ -48,7 +48,7 @@ export async function runChange(o: RunOpts) {
   const record = {
     changeId: id, approvedVersion: approved.version, status: 'running' as 'running' | 'shipped' | 'failed', stopReason: '',
     caps: { maxCostUsd: capUsd, maxAttempts },
-    attempts: [] as { n: number; sha: string; builderOk: boolean; testsAllPass: boolean; llmPass: boolean | null; pass: boolean; approvedVersion: string; passRate: { inSpec: object; notInSpec: object }; results: ScenarioResult[] }[],
+    attempts: [] as { n: number; sha: string; builderOk: boolean; testsAllPass: boolean; llmPass: boolean | null; llmReason: string; pass: boolean; approvedVersion: string; passRate: { inSpec: object; notInSpec: object }; results: ScenarioResult[] }[],
     llmOnlyRejections: 0, // attempts where every deterministic test passed but the LLM judge did not approve
     judgeFailures: 0, // attempts where the LLM judge gave no verdict (call failed / unparseable reply)
     passedWithinCap: false, shipped: null as null | { sha: string; release: string }, signals: null as unknown,
@@ -72,7 +72,7 @@ export async function runChange(o: RunOpts) {
       const b = await build(model, work, approved.spec, feedback, guard.signal)
       sha = b.sha
       const v = await judge(model, work, sha, approved.spec, approved.scenarios, approved.version, guard.signal)
-      record.attempts.push({ n, sha, builderOk: b.ok, testsAllPass: v.testsAllPass, llmPass: v.llmPass, pass: v.pass, approvedVersion: v.approvedVersion,
+      record.attempts.push({ n, sha, builderOk: b.ok, testsAllPass: v.testsAllPass, llmPass: v.llmPass, llmReason: v.reason, pass: v.pass, approvedVersion: v.approvedVersion,
         passRate: { inSpec: rate(v.results, true), notInSpec: rate(v.results, false) }, results: v.results })
       if (v.testsAllPass && v.llmPass === false) record.llmOnlyRejections++
       if (v.llmPass === null && !v.stop) record.judgeFailures++
