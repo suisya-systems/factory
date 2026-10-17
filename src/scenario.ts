@@ -190,7 +190,8 @@ export async function runScenario(appDir: string, s: Scenario, signal: AbortSign
 // A probe tells which of several pre-registered answers a build chose for one open decision: its steps
 // run on a fresh app (no checks), `observe` picks values out of the responses ("<step>:status",
 // "<step>:body" or "<step>:body.<dot.path>"), and the first option listing a matching observation
-// names the answer. Options may name captured values ("{{a}}"); they match like unordered(). No option matches -> "other" (the observation is kept); a step that could not run
+// names the answer. Options may name captured values ("{{a}}"); each observed value matches its own
+// position like unordered(). No option matches -> "other" (the observation is kept); a step that could not run
 // (no response, a capture missing) -> "blocked". Written by the experimenter, never shown to a builder.
 export type Probe = { id: string; steps: Omit<Step, 'expect'>[]; observe: string[]; options: Record<string, unknown[][]> }
 export type ProbeResult = { id: string; answer: string; observed?: unknown[]; detail?: string }
@@ -248,7 +249,7 @@ export async function runProbe(appDir: string, p: Probe, signal: AbortSignal): P
       const [n, what] = [Number(o.split(':')[0]), o.slice(o.indexOf(':') + 1)]
       return what === 'status' ? seen[n - 1].status : at(seen[n - 1].json, what.slice('body.'.length))
     })
-    const answer = Object.entries(p.options).find(([, vs]) => vs.some((v) => { try { return unordered(fill(v, vars), observed) } catch { return false } }))?.[0] ?? OTHER
+    const answer = Object.entries(p.options).find(([, vs]) => vs.some((v) => { try { return (fill(v, vars) as unknown[]).every((e, i) => unordered(e, observed[i])) } catch { return false } }))?.[0] ?? OTHER
     return { id: p.id, answer, observed }
   }, (detail) => ({ id: p.id, answer: BLOCKED, detail }))
 }
