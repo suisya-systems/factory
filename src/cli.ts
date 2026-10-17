@@ -262,7 +262,7 @@ export async function main(argv: string[], model: Model = realModel): Promise<nu
       if (intervalSec !== undefined && !(Number.isFinite(intervalSec) && intervalSec >= 1)) throw new Error(`--interval must be a number of seconds >= 1, got ${v.interval}`)
       const ports = v.port === undefined ? undefined : [Number(v.port)]
       if (ports && !Number.isInteger(ports[0])) throw new Error(`--port must be an integer, got ${v.port}`)
-      return watch(sd, { shipTarget: resolve(v['ship-target']), ports, stopFile, intervalSec }, (argv) => main([...argv, ...(v.model ?? []).flatMap((m) => ['--model', m])], base))
+      return watch(sd, { shipTarget: resolve(v['ship-target']), ports, stopFile, intervalSec }, (argv) => main([...argv, ...(v.model ?? []).flatMap((m) => ['--model', m])], model))
     }
     case 'replicate': {
       if (!id || (!v.k && !v.rescore)) break
