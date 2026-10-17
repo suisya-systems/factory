@@ -23,26 +23,35 @@ type Received = { method: string; path: string; headers: Record<string, unknown>
 export type Fake = { connect(): Duplex; control(method: string, path: string, body: unknown): { status: number; json: unknown }; overflow(): boolean; close(): void }
 
 const isObj = (x: unknown): x is Record<string, any> => typeof x === 'object' && x !== null && !Array.isArray(x)
-const strMap = (x: unknown) => isObj(x) && Object.values(x).every((v) => typeof v === 'string')
+// Checked when the answer is set: an invalid header would otherwise throw in writeHead, in the factory process.
+const headersOk = (x: unknown) => isObj(x) && Object.entries(x).every(([k, v]) => {
+  try { http.validateHeaderName(k); http.validateHeaderValue(k, v); return typeof v === 'string' } catch { return false }
+})
 
 export function startFake(): Fake {
   const canned = new Map<string, Canned>()
   const log: Received[] = []
   const socks = new Set<Duplex>()
   let total = 0, over = false
+  // Everything here is app-sent (builder-written code) and runs in the factory process: nothing may throw out of it.
   const server = http.createServer((req, res) => {
-    let raw = '', size = 0
-    req.on('data', (d: Buffer) => { size += d.length; if (size <= FAKE_LIMITS.bodyBytes) raw += d })
+    const chunks: Buffer[] = []
+    let size = 0
+    req.on('data', (d: Buffer) => { size += d.length; if (size <= FAKE_LIMITS.bodyBytes) chunks.push(d) })
     req.on('end', () => {
-      total += size
-      if (size > FAKE_LIMITS.bodyBytes || total > FAKE_LIMITS.totalBytes || log.length >= FAKE_LIMITS.requests) { over = true; res.writeHead(413).end(); return }
-      let body: unknown = raw || undefined
-      try { body = raw ? JSON.parse(raw) : undefined } catch { /* kept as text */ }
-      log.push({ method: req.method!, path: req.url!, headers: { ...req.headers }, body })
-      const c = canned.get(`${req.method} ${new URL(req.url!, 'http://fake').pathname}`)
-      if (!c) { res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'no canned response' })); return }
-      res.writeHead(c.status, { ...(c.json === undefined ? {} : { 'content-type': 'application/json' }), ...c.headers })
-      res.end(c.json === undefined ? undefined : JSON.stringify(c.json))
+      try {
+        total += size
+        if (size > FAKE_LIMITS.bodyBytes || total > FAKE_LIMITS.totalBytes || log.length >= FAKE_LIMITS.requests) { over = true; res.writeHead(413).end(); return }
+        const raw = Buffer.concat(chunks).toString('utf8') // decoded once: a character split across chunks stays whole
+        let body: unknown = raw || undefined
+        try { body = raw ? JSON.parse(raw) : undefined } catch { /* kept as text */ }
+        const path = req.url ?? ''
+        log.push({ method: req.method ?? '', path, headers: { ...req.headers }, body })
+        const c = canned.get(`${req.method} ${path.split('?')[0]}`)
+        if (!c) { res.writeHead(404, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'no canned response' })); return }
+        res.writeHead(c.status, { ...(c.json === undefined ? {} : { 'content-type': 'application/json' }), ...c.headers })
+        res.end(c.json === undefined ? undefined : JSON.stringify(c.json))
+      } catch { res.destroy() }
     })
   })
   server.on('clientError', (_e, s) => s.destroy())
@@ -62,7 +71,7 @@ export function startFake(): Fake {
       if (at !== CONTROL.set) return { status: 404, json: { error: 'unknown control endpoint' } }
       const b = body as any
       if (!isObj(b) || !METHODS.includes(b.method) || typeof b.path !== 'string' || !b.path.startsWith('/') || !(Number.isInteger(b.status) && b.status >= 200 && b.status <= 599)
-        || (b.headers !== undefined && !strMap(b.headers))) return { status: 400, json: { error: 'needs {method, path, status (200-599), json?, headers?}' } }
+        || (b.headers !== undefined && !headersOk(b.headers))) return { status: 400, json: { error: 'needs {method, path, status (200-599), json?, headers?}' } }
       canned.set(`${b.method} ${b.path.split('?')[0]}`, structuredClone({ status: b.status, json: b.json, headers: b.headers }))
       return { status: 204, json: undefined }
     },

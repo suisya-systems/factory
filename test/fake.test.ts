@@ -183,3 +183,24 @@ test('run end to end with a fake model: judged against the fake, builder sees th
   assert.match(seen[0], /SERVICE_URL/)
   for (const lit of ['/rates/eur', '/responses', '"rate"', 'x-api-key']) assert.ok(!seen.join('\n').includes(lit), `builder saw ${lit}`)
 })
+
+test('app-sent bytes and canned answers cannot throw in the factory process; bodies decode whole', async () => {
+  const fake = startFake()
+  const ask = (raw: string | Buffer[]) => new Promise<string>((ok) => {
+    const c = fake.connect()
+    let got = ''
+    c.on('data', (d) => { got += d }).on('end', () => ok(got)).on('close', () => ok(got))
+    for (const part of typeof raw === 'string' ? [raw] : raw) c.write(part)
+  })
+  try {
+    assert.match(await ask('GET // HTTP/1.1\r\nHost: s\r\nConnection: close\r\n\r\n'), /^HTTP\/1.1 404/)
+    assert.equal(fake.control('POST', '/responses', { method: 'GET', path: '/h', status: 200, headers: { 'x-test': 'a\nb' } }).status, 400)
+    assert.equal(fake.control('POST', '/responses', { method: 'GET', path: '/h', status: 200, headers: { 'bad name': 'v' } }).status, 400)
+    const body = Buffer.from(JSON.stringify({ name: 'é' }))
+    const cut = body.indexOf(0xc3) + 1 // between the two bytes of é
+    await ask([Buffer.from(`POST /u HTTP/1.1\r\nHost: s\r\nContent-Length: ${body.length}\r\nConnection: close\r\n\r\n`), body.subarray(0, cut), body.subarray(cut)])
+    const log = fake.control('GET', '/requests', undefined).json as { path: string; body: unknown }[]
+    assert.deepEqual(log.map((r) => r.path), ['//', '/u'])
+    assert.deepEqual(log[1].body, { name: 'é' })
+  } finally { fake.close() }
+})
