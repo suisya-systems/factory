@@ -47,6 +47,7 @@ In "body": leave a field OUT when its presence is not determined; write "?" when
 const norm = (t: string) => t.replace(/\s+/g, ' ').trim()
 const worst = (rs: Tri[]): Tri => (rs.includes('X') ? 'X' : rs.includes('U') ? 'U' : 'M')
 // Undetermined. A null inside the body is a determined value; a whole body of null is turned into undefined.
+const MARK = '\u0000captured:'
 const open = (v: unknown) => v === undefined || v === '?'
 // The prediction is untrusted: a "{{name}}" it uses but nothing captured reads as undetermined.
 const fillOpen = (x: unknown, vars: Record<string, unknown>): unknown => {
@@ -62,23 +63,25 @@ const fillOpen = (x: unknown, vars: Record<string, unknown>): unknown => {
 // Expected json vs predicted body, leaf by leaf.
 function tri(e: unknown, p: unknown): Tri {
   if (open(p)) return 'U'
+  if (typeof p === 'string' && p.includes(MARK)) return e === p ? 'M' : 'U' // a captured value nobody determined
   if (Array.isArray(e)) return !Array.isArray(p) || p.length < e.length ? 'X' : worst(e.map((x, i) => tri(x, p[i])))
   if (isObj(e)) return !isObj(p) ? 'X' : worst(Object.entries(e).map(([k, v]) => tri(v, Object.hasOwn(p, k) ? p[k] : undefined)))
   return e === p ? 'M' : 'X'
 }
 
-// The checks of one step against one prediction. Captures always bind an opaque marker, so neither
-// side's concrete ids matter; a later "{{name}}" on either side becomes the same marker.
+// The checks of one step against one prediction. A capture binds the value the prediction determines,
+// else an opaque marker, so ids nobody can predict still match a later "{{name}}" on either side.
 export function compareStep(st: Step, p: Prediction, vars: Record<string, unknown>): { check: string; result: Tri }[] {
   const out: { check: string; result: Tri }[] = []
   const e = st.expect
   const expected = e.json === undefined ? undefined : fill(e.json, vars) // as the runner: captures of this step come after its checks
-  for (const name of Object.keys(st.capture ?? {})) vars[name] = `\u0000captured:${name}`
+  for (const name of Object.keys(st.capture ?? {})) vars[name] = `${MARK}${name}`
   const body = p.body === null ? undefined : fillOpen(p.body, vars) // may echo this step's own capture
   // The runner fails a step whose capture is missing: the prediction must establish it.
   for (const [name, path] of Object.entries(st.capture ?? {})) {
     const v = path.startsWith(HEADER) ? (isObj(p.headers) ? p.headers[path.slice(HEADER.length).toLowerCase()] : undefined) : get(body, path)
-    out.push({ check: `capture ${name}`, result: v === undefined ? 'U' : 'M' })
+    out.push({ check: `capture ${name}`, result: v === undefined ? 'U' : 'M' }) // as the runner: only a missing value fails
+    if (!open(v) && !(typeof v === 'string' && v.includes(MARK))) vars[name] = v
   }
   if (e.status !== undefined) {
     const want = ([] as number[]).concat(e.status)

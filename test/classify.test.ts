@@ -202,3 +202,14 @@ test('classifyReply: a predicted null inside the body is a value; captures must 
   assert.equal(one(etag, { body: null }), 'unstated')
   assert.equal(one(etag, { body: null, headers: { etag: '?' } }), 'readable')
 })
+
+test('classifyReply: a determined captured value is kept for later steps; an undetermined one stays open', () => {
+  const s: Scenario = { id: 'v', title: 'v', summary: 'the version is echoed back', inSpec: true, kind: 'conflict', steps: [
+    { method: 'POST', path: '/notes', body: {}, expect: { status: 201 }, capture: { v: 'version' } },
+    { method: 'GET', path: '/notes', expect: { json: { version: 1 } } }] }
+  const p = (body: object) => ({ status: [201], body, basis: 'spec', quote: 'GET /notes/:id returns the note' })
+  const label = (a: object, b: object) => classifyReply(s, SPEC, '', { steps: [p(a), p(b)] }).label
+  assert.equal(label({ version: 1 }, { version: '{{v}}' }), 'readable')
+  assert.equal(label({ version: 2 }, { version: '{{v}}' }), 'contradicts')
+  assert.equal(label({ version: '?' }, { version: '{{v}}' }), 'unstated')
+})
