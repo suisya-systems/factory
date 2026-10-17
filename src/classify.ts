@@ -7,8 +7,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Model } from './adapter.ts'
-import { Stop } from './limits.ts'
-import { at, fill, get, HEADER, isObj, lengthChecks, type Scenario, type Step } from './scenario.ts'
+import { at, fill, get, isObj, lengthChecks, type Scenario, type Step } from './scenario.ts'
 
 export type Basis = 'spec' | 'code' | 'convention'
 export type Label = 'readable' | 'unstated' | 'contradicts' | 'unknown'
@@ -47,6 +46,16 @@ In "body": leave a field OUT when its presence is not determined; write "?" when
 const norm = (t: string) => t.replace(/\s+/g, ' ').trim()
 const worst = (rs: Tri[]): Tri => (rs.includes('X') ? 'X' : rs.includes('U') ? 'U' : 'M')
 const open = (v: unknown) => v === undefined || v === null || v === '?'
+// The prediction is untrusted: a "{{name}}" it uses but nothing captured reads as undetermined.
+const fillOpen = (x: unknown, vars: Record<string, unknown>): unknown => {
+  if (typeof x === 'string') {
+    const names = [...x.matchAll(/\{\{(\w+)\}\}/g)].map((m) => m[1])
+    return names.every((n) => Object.hasOwn(vars, n)) ? fill(x, vars) : '?'
+  }
+  if (Array.isArray(x)) return x.map((v) => fillOpen(v, vars))
+  if (isObj(x)) return Object.fromEntries(Object.entries(x).map(([k, v]) => [k, fillOpen(v, vars)]))
+  return x
+}
 
 // Expected json vs predicted body, leaf by leaf.
 function tri(e: unknown, p: unknown): Tri {
@@ -62,7 +71,9 @@ function tri(e: unknown, p: unknown): Tri {
 export function compareStep(st: Step, p: Prediction, vars: Record<string, unknown>): { check: string; result: Tri }[] {
   const out: { check: string; result: Tri }[] = []
   const e = st.expect
-  const body = p.body === null ? undefined : fill(p.body, vars)
+  const expected = e.json === undefined ? undefined : fill(e.json, vars) // as the runner: captures of this step come after its checks
+  for (const name of Object.keys(st.capture ?? {})) vars[name] = `\u0000captured:${name}`
+  const body = p.body === null ? undefined : fillOpen(p.body, vars) // may echo this step's own capture
   if (e.status !== undefined) {
     const want = ([] as number[]).concat(e.status)
     const got = p.status ?? []
@@ -74,8 +85,7 @@ export function compareStep(st: Step, p: Prediction, vars: Record<string, unknow
     out.push({ check: `length ${path || '(top)'} ${n}`, result: open(v) ? 'U' : Array.isArray(v) && v.length === n ? 'M' : 'X' })
   }
   for (const path of e.jsonHas ?? []) out.push({ check: `has ${path}`, result: get(body, path) === undefined ? 'U' : 'M' })
-  if (e.json !== undefined) out.push({ check: 'json', result: tri(fill(e.json, vars), body) })
-  for (const name of Object.keys(st.capture ?? {})) vars[name] = `\u0000captured:${name}`
+  if (expected !== undefined) out.push({ check: 'json', result: tri(expected, body) })
   return out
 }
 
@@ -98,19 +108,18 @@ export function classifyReply(s: Scenario, spec: string, app: string, reply: unk
   const rank = { convention: 0, code: 1, spec: 2 }
   const label: Label = checks.some((c) => c.result === 'X' && c.basis !== 'convention') ? 'contradicts'
     : checks.some((c) => c.result !== 'M') ? 'unstated' : 'readable'
-  const basis = label === 'readable' ? checks.map((c) => c.basis).reduce((a, b) => (rank[b] < rank[a] ? b : a)) : undefined
+  const basis = label === 'readable' ? checks.map((c) => c.basis).reduce((a, b) => (rank[b] < rank[a] ? b : a), 'spec' as Basis) : undefined
   return { id: s.id, label, ...(basis ? { basis } : {}), checks, predictions: preds }
 }
 
-// One session per scenario. Stops (emergency stop, cost caps) propagate; anything else about one
-// scenario (failed call, unparseable or malformed reply) labels it 'unknown' and moves on.
+// One session per scenario. Stops (emergency stop, cost caps) are thrown by the guarded model call and
+// propagate; a failed call or an unparseable / malformed reply labels that scenario 'unknown'.
 export async function classify(model: Model, spec: string, app: string, scenarios: Scenario[], extractJson: (t: string) => unknown): Promise<Classification[]> {
   const out: Classification[] = []
   for (const s of scenarios) {
     const r = await model({ ...CLASSIFIER_BUDGET, role: 'classifier', instruction: predictInstruction(spec, app, s), workdir: mkdtempSync(join(tmpdir(), 'factory-classify-')), access: 'none' })
     if (!r.ok) { out.push({ id: s.id, label: 'unknown', checks: [], error: `classifier call failed: ${r.error}` }); continue }
     try { out.push(classifyReply(s, spec, app, extractJson(r.text))) } catch (e) {
-      if (e instanceof Stop) throw e
       out.push({ id: s.id, label: 'unknown', checks: [], error: `classifier reply unusable: ${(e as Error).message}` })
     }
   }

@@ -54,7 +54,8 @@ Each scenario starts from an EMPTY app.
 Write 8-15 scenarios, a mix of inSpec true and false. You cannot ask questions: record every guess in assumptions.`
 
 const appBlock = (app: string) => (app ? `\nEXISTING APP (the current code; the request extends it):\n${app}\n` : '')
-const draftTask = (role: string, instruction: string) => ({ ...base, role, instruction, workdir: mkdtempSync(join(tmpdir(), 'factory-draft-')), access: 'none' as const })
+// Each drafter gets at most $1 so the classifier calls (CLASSIFIER_BUDGET each, about 15) still fit in the draft cap.
+const draftTask = (role: string, instruction: string) => ({ ...base, maxCostUsd: 1, role, instruction, workdir: mkdtempSync(join(tmpdir(), 'factory-draft-')), access: 'none' as const })
 
 function checkInterface(x: unknown): Record<string, unknown> {
   if (typeof x !== 'object' || x === null || Array.isArray(x) || Object.keys(x).length === 0) throw new Error('spec drafter: interface missing')
