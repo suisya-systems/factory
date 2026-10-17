@@ -50,7 +50,10 @@ export function sandboxCommand(cmd: string, args: string[], o: SandboxOpts): { c
   // Host runtime sockets (systemd --user, D-Bus session bus, gpg/ssh agent) would let a child run
   // commands OUTSIDE the sandbox (e.g. systemd-run --user) and so reach the vault.
   const xdg = process.env.XDG_RUNTIME_DIR ? real(process.env.XDG_RUNTIME_DIR) : ''
-  const hidden = ['/mnt', '/run/user', '/var/tmp', xdg].filter((d) => d && existsSync(d) && !within(d, HOME) && !within(d, '/tmp'))
+  const cand = ['/mnt', '/run/user', '/var/tmp', xdg].filter((d) => d && existsSync(d) && !within(d, HOME) && !within(d, '/tmp'))
+  // A dir under another hidden one (e.g. XDG=/run/user/<uid>) is already hidden; a nested --tmpfs
+  // would recreate its mountpoint inside the parent tmpfs and so reveal it.
+  const hidden = cand.filter((d) => !cand.some((o) => o !== d && within(d, o)))
   for (const d of hidden) a.push('--tmpfs', d)
   // Name resolution must survive the hiding: on WSL /etc/resolv.conf -> /mnt/wsl/resolv.conf.
   for (const f of RESOLVER_FILES) { const r = real(f); if (existsSync(r) && hidden.some((d) => within(r, d))) a.push('--ro-bind', r, r) }
