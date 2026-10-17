@@ -137,6 +137,8 @@ test ! -e "$STATE/lap-ledger.json" && test -f "$LAP5/vault/settle-a1/approval.js
 
 ## 手順
 
+**1 回の指示で流す場合**: 以下の 1〜5 は [lap-6/lap.json](lap-6/lap.json) に定義として書いてあり、`npm run factory -- lap docs/lap-6/lap.json` が先頭から実行する（`FACTORY_HOME` は定義の `home` が決める。5 周目の状態ディレクトリ `.factory-lap5` は要る）。止まるのは停止点 B のゲートだけで、読む要約のパスと再開のコマンドを 1 行で出す。承認は `npm run factory -- lap docs/lap-6/lap.json --approve entrance --by <承認者名> --version <要約の version>` の 1 回で、2 組の入口の承認と事前登録の固定をまとめて行う。再開は同じ `lap` コマンドで、済んだ段は飛ばす。run の失敗（試行上限以外）・費用上限・緊急停止は lap の失敗として止まり、最後の集計（`attempts.ts`）だけは走る。以下は、1 段ずつ手で打つ場合の手順。
+
 ### 1. 検証（費用なし）
 
 ```bash

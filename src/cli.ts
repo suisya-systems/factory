@@ -1,4 +1,4 @@
-// factory CLI. Humans touch exactly two things: `approve` (entrance) and `stop` (emergency).
+// factory CLI. Humans touch exactly two things: approval (`approve`, or a lap gate: `lap --approve`) and `stop` (emergency).
 import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -7,6 +7,7 @@ import { parseArgs } from 'node:util'
 import { claudeModel, MODEL_BY_ROLE, parseModels, type Model } from './adapter.ts'
 import { CAPS, chargeLap, lapSpent, mergeLedger, startGuard, type Ledger } from './limits.ts'
 import { draft, specBody, specIface } from './roles.ts'
+import { lap } from './lap.ts'
 import { replicate, tally } from './replicate.ts'
 import { runChange } from './run.ts'
 import { UNDECIDED, type Classification } from './classify.ts'
@@ -32,10 +33,14 @@ const USAGE = `usage: factory <command>
   stop                                             emergency stop (creates the STOP file)
   probe-isolation <id>                             REAL model call: can a builder read the vault?
                                                    (exit 1 = canary found, 2 = model failed, 3 = over cost cap)
+  lap <definition.json> [--approve <gate> --by <name> --version <hash>]
+                                                   run a whole lap from its definition; stops only at a human
+                                                   gate (exit 3) and prints the summary to read and the resume
+                                                   command; the same command resumes, skipping finished steps
   serve --port N                                   (internal) production supervisor
 --model <role>=<model> (repeatable; draft, replicate, probe-isolation): the model for that role in this command.
 After \`stop\`, every command refuses to start until the STOP file is deleted by hand.`
-const COMMANDS = ['draft', 'approve', 'run', 'serve', 'observe', 'stop', 'probe-isolation', 'replicate', 'tally']
+const COMMANDS = ['draft', 'approve', 'run', 'serve', 'observe', 'stop', 'probe-isolation', 'replicate', 'tally', 'lap']
 const MODEL_COMMANDS = ['draft', 'replicate', 'probe-isolation']
 
 // The canary is a random string the probe plants in the vault; seeing it outside means the vault leaked.
@@ -121,13 +126,18 @@ export async function main(argv: string[], model: Model = claudeModel): Promise<
       args: argv, allowPositionals: true,
       options: { help: { type: 'boolean', short: 'h' }, request: { type: 'string' }, base: { type: 'string' }, signals: { type: 'string' }, by: { type: 'string' }, version: { type: 'string' }, note: { type: 'string' }, 'ship-target': { type: 'string' },
         'max-cost': { type: 'string' }, 'max-attempts': { type: 'string' }, port: { type: 'string' }, 'traffic-base': { type: 'string' },
-        model: { type: 'string', multiple: true }, 'spec-from': { type: 'string' }, spec: { type: 'string' }, k: { type: 'string' }, score: { type: 'string' }, probes: { type: 'string' }, rescore: { type: 'boolean' }, minority: { type: 'boolean' } },
+        model: { type: 'string', multiple: true }, 'spec-from': { type: 'string' }, spec: { type: 'string' }, k: { type: 'string' }, score: { type: 'string' }, probes: { type: 'string' }, rescore: { type: 'boolean' }, minority: { type: 'boolean' }, approve: { type: 'string' } },
     })
   } catch (e) { console.error(`factory: ${(e as Error).message}\n${USAGE}`); return 2 }
   const { positionals, values: v } = parsed
   const [cmd, id] = positionals
   if (v.help || !COMMANDS.includes(cmd)) { (v.help ? console.log : console.error)(USAGE); return v.help ? 0 : 2 }
   if (v.model && !MODEL_COMMANDS.includes(cmd)) { console.error(`factory: --model applies to ${MODEL_COMMANDS.join(', ')} only`); return 2 }
+  // Before stateDir(): the lap's definition may name the state dir. Its steps call main() again with the same model.
+  if (cmd === 'lap') {
+    if (!id || (v.approve && (!v.by || !v.version))) { console.error(USAGE); return 2 }
+    return lap(id, { approve: v.approve, by: v.by, version: v.version }, (argv) => main(argv, model))
+  }
   let requestedModels: Record<string, string>
   try { requestedModels = parseModels(v.model) } catch (e) { console.error(`factory: ${(e as Error).message}`); return 2 }
   const base = model
