@@ -6,7 +6,7 @@
 
 - cwd: `/home/happy_ryo/work/org/workers/factory/.worktrees/factory-lap-1`（以下、すべてこのディレクトリで実行する）
 - Node 22.17 以上（`node --version`）、`/usr/bin/bwrap` があること。npm install は不要（依存ゼロ）
-- 環境変数は特に要らない。`claude` は `~/.local/bin/claude` を使い、ログイン情報は `~/.claude/.credentials.json` を読み取り専用で渡す。env 認証を使う場合だけ `ANTHROPIC_API_KEY` か `CLAUDE_CODE_OAUTH_TOKEN` を渡す（工場はこれ以外の環境変数をモデル側へ渡さない）
+- 環境変数は特に要らない。`claude` は `~/.local/bin/claude` の実体（`~/.local/share/claude/versions/<ver>`）を使い、ログイン情報は `~/.claude/.credentials.json` を読み取り専用で渡す。env 認証を使う場合だけ `ANTHROPIC_API_KEY` か `CLAUDE_CODE_OAUTH_TOKEN` を渡す（工場はこれ以外の環境変数をモデル側へ渡さない）
 - 工場の状態は `.factory/` に置かれる（git 管理外）。隠しシナリオは `.factory/vault/` にある
 - 緊急停止: 別の端末から `npm run factory -- stop`（`.factory/STOP` を作る）または工場のプロセスに SIGTERM。どちらも進行中のモデル呼び出しを止め、その変更を失敗で終える
 
