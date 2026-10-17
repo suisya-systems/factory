@@ -86,4 +86,5 @@ export function writeApp(dir: string, server: string, start = 'node server.cjs')
   writeFileSync(join(dir, 'server.cjs'), server)
 }
 
-export const CLI_MARKERS = [/error_max|subtype|session_id/, /claude(?!-(?:opus|sonnet|haiku|fable)-)/i, /--output-format/, /total_cost_usd/, /--permission/, /bypassPermissions/, /--max-budget/, /is_error/, /--tools/, /allowedTools/, /setting-sources/, /no-session-persistence/, /stream-json/]
+export const CLI_MARKERS = [/error_max|subtype|session_id/, /claude(?!-(?:opus|sonnet|haiku|fable)-)/i, /--output-format/, /total_cost_usd/, /--permission/, /bypassPermissions/, /--max-budget/, /is_error/, /--tools/, /allowedTools/, /setting-sources/, /no-session-persistence/, /stream-json/,
+  /codex/i, /agent_message|turn\.failed|item\.completed/, /--ephemeral|--ignore-user-config|--skip-git-repo-check/] // lap 8: the second family's CLI

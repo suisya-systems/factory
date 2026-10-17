@@ -1,9 +1,9 @@
 // Adapter boundary: CLI flags / output fields exist only in src/adapter.ts.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { cliEnv, MODEL_BY_ROLE, MODELS, parseModels, runCli, type Access } from '../src/adapter.ts'
+import { cliEnv, codexBin, codexEnv, crossLoginSecrets, CROSS_ROLES, MODEL_BY_ROLE, MODELS, modelFor, parseModels, realModel, runCli, runCodex, type Access, type Task } from '../src/adapter.ts'
 import { startGuard } from '../src/limits.ts'
 import { CLI_MARKERS, REPO, tmp } from './helpers.ts'
 
@@ -114,9 +114,10 @@ test('a role missing from the table is an error, not a default; a per-role model
 })
 
 test('--model values: only table roles and the listed models', () => {
-  assert.deepEqual(MODELS, ['claude-opus-5-5', 'claude-sonnet-5-5'])
+  assert.deepEqual(MODELS, ['claude-opus-5-5', 'claude-sonnet-5-5', 'gpt-6-astra'])
   assert.deepEqual(parseModels(['builder=claude-sonnet-5-5', 'scenario-drafter=claude-opus-5-5']), { builder: 'claude-sonnet-5-5', 'scenario-drafter': 'claude-opus-5-5' })
-  for (const bad of ['drafter=claude-opus-5-5', 'builder=claude-sonnet-5', 'builder', 'builder=claude-opus-5-5=x']) assert.throws(() => parseModels([bad]), /--model/)
+  assert.deepEqual(parseModels(['spec-drafter=gpt-6-astra', 'scenario-drafter=gpt-6-astra']), { 'spec-drafter': 'gpt-6-astra', 'scenario-drafter': 'gpt-6-astra' })
+  for (const bad of ['drafter=claude-opus-5-5', 'builder=claude-sonnet-5', 'builder', 'builder=claude-opus-5-5=x', 'builder=gpt-6-astra', 'judge=gpt-6-astra', 'classifier=gpt-6-astra']) assert.throws(() => parseModels([bad]), /--model/)
 })
 
 test('per-model cost (lap 4): costUSD of each model in the usage, only when it is a number', async () => {
@@ -125,4 +126,99 @@ test('per-model cost (lap 4): costUSD of each model in the usage, only when it i
   const e = await call(fakeCli(`echo '{"result":"","is_error":true,"total_cost_usd":0.1,"modelUsage":{"claude-opus-5-5":{"costUSD":0.1}}}'; exit 1`))
   assert.deepEqual(e.costByModel, { 'claude-opus-5-5': 0.1 }) // a failed call's spend is split too
   assert.equal((await call(fakeCli(`echo '{"result":"ok","total_cost_usd":0.2,"modelUsage":{"claude-opus-5-5":{}}}'`))).costByModel, undefined)
+})
+
+// ---- lap 8: the second model family (Codex CLI) ----
+// A fake codex laid out like the npm package (<pkg>/bin/codex), so the package mount is <pkg>, never a parent dir.
+function fakeCodex(body: string) {
+  const w = tmp('fakecodex')
+  mkdirSync(join(w, 'pkg', 'bin'), { recursive: true })
+  writeFileSync(join(w, 'pkg', 'bin', 'codex'), `#!/bin/sh\nIN=$(cat)\n${body}\n`)
+  chmodSync(join(w, 'pkg', 'bin', 'codex'), 0o755)
+  return { w, bin: join(w, 'pkg', 'bin', 'codex') }
+}
+const msg = (text: string) => JSON.stringify({ type: 'item.completed', item: { id: 'i', type: 'agent_message', text } })
+const drafterTask = (w: string, more: Partial<Task> = {}): Task => ({ role: 'spec-drafter', model: 'gpt-6-astra', instruction: 'hello', workdir: w, access: 'none', maxCostUsd: 1, timeoutMs: 10_000, ...more })
+
+test('codex: the last agent message is the reply; no USD and no answering model are reported; flags are pinned', async () => {
+  const echo = `node -e 'console.log(JSON.stringify({type:"item.completed",item:{id:"i",type:"agent_message",text:process.argv.slice(1).join(" ")}}))' "$IN" "$@"`
+  const { w, bin } = fakeCodex(`echo '{"type":"thread.started","thread_id":"t"}'\necho '${msg('first')}'\n${echo}\necho '{"type":"turn.completed","usage":{"input_tokens":5,"output_tokens":1}}'`)
+  const r = await runCodex(drafterTask(w), bin, join(w, 'no-auth.json'))
+  assert.equal(r.ok, true, r.error)
+  assert.equal(r.costUsd, null)
+  assert.equal(r.model, undefined)
+  assert.match(r.text, /^hello exec --json --model gpt-6-astra --sandbox read-only --skip-git-repo-check --ephemeral --ignore-user-config -c model_reasoning_effort="medium" --cd \S+ -$/)
+})
+
+test('codex: a failed turn, no reply, a crash or garbage is not ok, and no CLI words reach the error', async () => {
+  for (const body of [`echo '${msg('partial')}'; echo '{"type":"turn.failed","error":{"message":"usage limit --model x"}}'`, `echo '{"type":"turn.completed"}'`,
+    `echo '${msg('x')}'; exit 3`, 'echo "error: unexpected argument --ephemeral"; exit 2', `echo '{"type":"error","message":"stream disconnected"}'`]) {
+    const { w, bin } = fakeCodex(body)
+    const r = await runCodex(drafterTask(w), bin, join(w, 'no-auth.json'))
+    assert.equal(r.ok, false, body)
+    assert.equal(r.costUsd, null)
+    assert.doesNotMatch(r.error!, /--|turn\.failed|agent_message|usage limit|stream/, r.error)
+  }
+})
+
+test('codex: only drafters, only without tools; the builder never reaches it, whatever the task says', async () => {
+  const { w, bin } = fakeCodex(`echo '${msg('x')}'`)
+  for (const role of Object.keys(MODEL_BY_ROLE).filter((r) => !CROSS_ROLES.includes(r))) {
+    assert.throws(() => modelFor({ role, model: 'gpt-6-astra' }), /only/)
+    await assert.rejects(runCodex(drafterTask(w, { role, access: 'write' }), bin), /only/)
+    await assert.rejects(realModel(drafterTask(w, { role, access: 'write' })), /only/) // refused before any process starts
+  }
+  await assert.rejects(runCodex(drafterTask(w, { access: 'read' }), bin), /without tool access/)
+})
+
+test('codex: found on PATH by its real path (a version manager links it), or an explicit error', () => {
+  const { w, bin } = fakeCodex('true')
+  mkdirSync(join(w, 'shell-bin'))
+  symlinkSync(bin, join(w, 'shell-bin', 'codex'))
+  assert.equal(codexBin(`/nonexistent:${join(w, 'shell-bin')}`), realpathSync(bin))
+  assert.throws(() => codexBin('/nonexistent'), /not on PATH/)
+})
+
+test('codex: env carries no first-family auth; its home is the dir of the login file', () => {
+  Object.assign(process.env, { ANTHROPIC_API_KEY: 'k', CLAUDE_CODE_OAUTH_TOKEN: 't' })
+  try {
+    const e = codexEnv('/h/.codex/auth.json')
+    assert.equal(e.ANTHROPIC_API_KEY, undefined)
+    assert.equal(e.CLAUDE_CODE_OAUTH_TOKEN, undefined)
+    assert.equal(e.CODEX_HOME, '/h/.codex')
+  } finally { delete process.env.ANTHROPIC_API_KEY; delete process.env.CLAUDE_CODE_OAUTH_TOKEN }
+})
+
+test('login secrets for the leak check: every long string of the login file, nested; none when it is missing or garbage', () => {
+  const w = tmp('login')
+  writeFileSync(join(w, 'auth.json'), JSON.stringify({ mode: 'chatgpt', tokens: { id_token: 'i'.repeat(30), access_token: 'a'.repeat(25), list: ['r'.repeat(20)] }, short: 'x'.repeat(19) }))
+  assert.deepEqual(crossLoginSecrets(join(w, 'auth.json')).sort(), ['a'.repeat(25), 'i'.repeat(30), 'r'.repeat(20)])
+  assert.deepEqual(crossLoginSecrets(join(w, 'missing.json')), [])
+  writeFileSync(join(w, 'bad.json'), '{')
+  assert.deepEqual(crossLoginSecrets(join(w, 'bad.json')), [])
+})
+
+test('codex: a reply carrying a login secret is dropped whole (the CLI keeps a read-only shell and its login is mounted)', async () => {
+  const leak = `node -e 'const a=require("fs").readFileSync(process.env.CODEX_HOME+"/auth.json","utf8");console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"spec: "+a}}))'`
+  const { w, bin } = fakeCodex(leak)
+  const auth = join(w, 'auth.json')
+  writeFileSync(auth, JSON.stringify({ tokens: { refresh_token: 'rt-' + 'q'.repeat(40) } }))
+  const r = await runCodex(drafterTask(w), bin, auth)
+  assert.equal(r.ok, false)
+  assert.equal(r.text, '')
+  assert.match(r.error!, /login secret/)
+  writeFileSync(auth, JSON.stringify({ tokens: { refresh_token: 'short' } })) // control: nothing long enough to be a secret
+  assert.equal((await runCodex(drafterTask(w), bin, auth)).ok, true)
+})
+
+test('codex: the secret check covers the login from before a token refresh during the call', async () => {
+  // The fake "refreshes" (rewrites the login) and then replies with the old token.
+  const refresh = `node -e 'const f=process.env.CODEX_HOME+"/auth.json",a=require("fs").readFileSync(f,"utf8");require("fs").writeFileSync(f,JSON.stringify({tokens:{refresh_token:"new-"+"n".repeat(40)}}));console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"spec: "+a}}))'`
+  const { w, bin } = fakeCodex(refresh)
+  const auth = join(w, 'auth.json')
+  writeFileSync(auth, JSON.stringify({ tokens: { refresh_token: 'old-' + 'o'.repeat(40) } }))
+  const r = await runCodex(drafterTask(w), bin, auth)
+  assert.equal(r.ok, false)
+  assert.match(r.error!, /login secret/)
+  assert.match(readFileSync(auth, 'utf8'), /new-/) // the refresh reached the host file (bound, not copied)
 })

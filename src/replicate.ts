@@ -95,7 +95,7 @@ export async function replicate(o: ReplicateOpts): Promise<Replicate[]> {
   const drafted = existsSync(draftFile) ? (readJson(draftFile) as Ledger).totalUsd : 0
   // One cap per change: its drafts and every replicate command so far count against it.
   const guard = startGuard(capUsd, stopFile,
-    { spentUsd: drafted + (before?.totalUsd ?? 0), lapFile: join(o.stateDir, 'lap-ledger.jsonl') })
+    { spentUsd: drafted + (before?.totalUsd ?? 0), lapFile: join(o.stateDir, 'lap-ledger.jsonl'), models: o.requestedModels })
   let last: Result | null = null
   const guarded = guard.model(o.model)
   const model: Model = async (t) => (last = await guarded(t))

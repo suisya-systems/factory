@@ -143,7 +143,7 @@ test('lap ledger: an unsettled hold and a throwing model count in full; a malfor
   assert.throws(() => lapSpent(lapFile), /no valid totalUsd/)
   writeFileSync(join(dir, 'lap-ledger.json'), JSON.stringify({ totalUsd: 2, byRoleModel: { judge: { m: 2 } } }))
   chargeLap(lapFile, 1, 'judge', { m: 1 })
-  assert.deepEqual(lapTotals(lapFile), { totalUsd: 3, byRoleModel: { judge: { m: 3 } } })
+  assert.deepEqual(lapTotals(lapFile), { totalUsd: 3, byRoleModel: { judge: { m: 3 } }, countedCalls: 0 })
 })
 
 test('a budget is rounded down to the CLI precision; under $0.0001 left is a stop, not a free call', async () => {
@@ -330,4 +330,52 @@ test('run (lap 3): a builder timeout is charged the builder ceiling, so the retr
   assert.deepEqual(seen.map(([role]) => role), ['builder', 'judge', 'builder', 'judge'])
   assert.ok(seen.every(([role, usd]) => usd <= (role === 'builder' ? CAPS.builderCallUsd : CAPS.judgeCallUsd))) // the lap ledger of this file may bind lower
   assert.deepEqual(r.cost.uncounted.map((u) => u.chargedUsd), [CAPS.builderCallUsd, CAPS.builderCallUsd])
+})
+
+// Lap 8: a model priced in calls (the second family) is counted, never charged a USD ceiling, and capped per lap.
+test('counted calls: $0 in USD, one lap-ledger call each (repairs and failures too), refused at the lap cap before the call', async () => {
+  const lapFile = join(tmp('lapcount'), 'lap-ledger.jsonl'), cap = CAPS.lapCountedCalls
+  CAPS.lapCountedCalls = 3
+  try {
+    const g = startGuard(5, join(sd, 'NOSTOP'), { lapFile, models: { 'spec-drafter': 'gpt-6-astra' } })
+    const seen: (string | undefined)[] = []
+    const m = g.model(async (t) => { seen.push(t.model); return t.role === 'classifier' ? { ok: true, text: '', costUsd: 0.25, model: 'claude-opus-5-5' } : { ok: false, text: '', costUsd: null, error: 'x' } })
+    await m(task('spec-drafter'))
+    await m(task('classifier'))
+    await m(task('spec-drafter')) // a failed call that reported no cost: still $0, still one call
+    await assert.rejects(g.model(async () => { throw new Error('boom') })(task('spec-drafter')), /boom/)
+    let calls = 0
+    await assert.rejects(g.model(async () => { calls++; return { ok: true, text: '', costUsd: 0 } })(task('spec-drafter')), /lap cap on calls not priced in USD reached \(3 calls\)/)
+    g.dispose()
+    assert.equal(calls, 0)
+    assert.deepEqual(seen, ['gpt-6-astra', undefined, 'gpt-6-astra']) // the override is applied by the guard
+    assert.equal(g.ledger.totalUsd, 0.25)
+    assert.deepEqual(g.ledger.uncounted, [])
+    assert.equal(g.ledger.countedCalls, 3)
+    assert.deepEqual(g.ledger.calls!.map((c) => [c.role, c.requested, c.answered, c.counted ?? false]),
+      [['spec-drafter', 'gpt-6-astra', null, true], ['classifier', 'claude-opus-5-5', 'claude-opus-5-5', false], ['spec-drafter', 'gpt-6-astra', null, true], ['spec-drafter', 'gpt-6-astra', null, true]])
+    const t = lapTotals(lapFile)
+    assert.equal(t.countedCalls, 3)
+    near(t.totalUsd, 0.25)
+    assert.deepEqual(t.byRoleModel['spec-drafter'], { 'gpt-6-astra': 0 })
+  } finally { CAPS.lapCountedCalls = cap }
+})
+
+test('counted calls: a hold never settled (the process died) still counts; a bad mark refuses', () => {
+  const lapFile = join(tmp('lapcount2'), 'lap-ledger.jsonl')
+  holdLap(lapFile, 0, 'scenario-drafter', true)
+  holdLap(lapFile, 0.5, 'builder')
+  assert.equal(lapTotals(lapFile).countedCalls, 1)
+  writeFileSync(lapFile, '{"call":"x","role":"b","hold":0,"counted":1}\n')
+  assert.throws(() => lapTotals(lapFile), /bad counted mark/)
+})
+
+test('guard: a model the role may not use is refused before anything is spent or held', async () => {
+  const lapFile = join(tmp('lapcount3'), 'lap-ledger.jsonl')
+  const g = startGuard(5, join(sd, 'NOSTOP'), { lapFile, models: { builder: 'gpt-6-astra' } })
+  let calls = 0
+  await assert.rejects(g.model(async () => { calls++; return { ok: true, text: '', costUsd: 0 } })(task('builder')), /only/)
+  g.dispose()
+  assert.equal(calls, 0)
+  assert.equal(existsSync(lapFile), false)
 })

@@ -2,7 +2,7 @@
 // Everything outside speaks only Task / Result (job, workplace, access, limits, result, cost).
 import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { sandboxSpawn, killTree, HOME, SANDBOX_PATH, type SandboxOpts } from './sandbox.ts'
 
 export type Access = 'none' | 'read' | 'write'
@@ -49,18 +49,29 @@ export function cliSandbox(t: Task): SandboxOpts {
 export const MODEL_BY_ROLE: Record<string, string> = {
   splitter: 'claude-opus-5-5', 'spec-drafter': 'claude-opus-5-5', 'scenario-drafter': 'claude-opus-5-5', classifier: 'claude-opus-5-5', builder: 'claude-opus-5-5', judge: 'claude-opus-5-5',
 }
-// The models a `--model` override may name (lap 5 compares these two).
-export const MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5']
+// Lap 8 (owner decision 2026-10-18): a second model family, for the two drafter roles only. The builder, and every
+// role that reads builder-written code, stays on the first family, so the second family's login is never mounted
+// where builder code runs. Its spend is not reported in USD (a subscription): the guard counts its calls instead.
+export const CROSS_MODELS = ['gpt-6-astra']
+export const CROSS_ROLES = ['spec-drafter', 'scenario-drafter']
+// The models a `--model` override may name (lap 5 compares the first two).
+export const MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5', ...CROSS_MODELS]
 export function modelFor(t: Pick<Task, 'role' | 'model'>): string {
   if (!Object.hasOwn(MODEL_BY_ROLE, t.role)) throw new Error(`no model is set for role "${t.role}"`)
-  return t.model ?? MODEL_BY_ROLE[t.role]
+  const m = t.model ?? MODEL_BY_ROLE[t.role]
+  if (CROSS_MODELS.includes(m) && !CROSS_ROLES.includes(t.role)) throw new Error(`model ${m} is for ${CROSS_ROLES.join(' / ')} only, not for role "${t.role}"`)
+  return m
 }
+// The model a call will be made with, or null for a role the factory does not know (tests' own roles).
+export const requestedModel = (t: Pick<Task, 'role' | 'model'>): string | null => (Object.hasOwn(MODEL_BY_ROLE, t.role) ? modelFor(t) : null)
+export const countedInCalls = (model: string | null): boolean => model !== null && CROSS_MODELS.includes(model)
 // `--model <role>=<model>` values -> {role: model}. Rejected before any model is called.
 export function parseModels(specs: string[] = []): Record<string, string> {
   const out: Record<string, string> = {}
   for (const s of specs) {
     const [role, model, ...rest] = s.split('=')
     if (rest.length || !Object.hasOwn(MODEL_BY_ROLE, role) || !MODELS.includes(model)) throw new Error(`--model ${s}: expected <role>=<model> with role in ${Object.keys(MODEL_BY_ROLE).join('|')} and model in ${MODELS.join('|')}`)
+    try { modelFor({ role, model }) } catch (e) { throw new Error(`--model ${s}: ${(e as Error).message}`) }
     out[role] = model
   }
   return out
@@ -91,12 +102,10 @@ export function cliEnv(): NodeJS.ProcessEnv {
 // CLI error kinds -> factory words; the CLI's own names never leave this module.
 const ERROR_KIND: Record<string, string> = { error_max_budget_usd: 'budget exceeded', error_max_turns: 'turn limit', error_during_execution: 'execution error' }
 
-// Exported for tests only (bin = a fake CLI); production code uses claudeModel.
-export async function runCli(t: Task, bin: string): Promise<Result> {
-  modelFor(t) // an unknown role throws before anything starts
-  if (t.signal?.aborted) return { ok: false, text: '', costUsd: null, error: 'stopped before start' }
-  const child = sandboxSpawn(bin, cliArgs(t), cliSandbox(t),
-    { cwd: t.workdir, env: cliEnv(), stdio: ['pipe', 'pipe', 'pipe'] })
+// Runs one model process in the sandbox: the instruction on stdin, stdout collected, stderr dropped.
+// why: set when the factory stopped it (abort, timeout, failed start).
+async function spawnModel(t: Task, bin: string, args: string[], box: SandboxOpts, env: NodeJS.ProcessEnv): Promise<{ out: string; code: number | null; why?: string }> {
+  const child = sandboxSpawn(bin, args, box, { cwd: t.workdir, env, stdio: ['pipe', 'pipe', 'pipe'] })
   let out = ''
   child.stdout!.on('data', (d) => { out += d })
   child.stderr!.resume() // raw CLI stderr never leaves this module
@@ -113,6 +122,14 @@ export async function runCli(t: Task, bin: string): Promise<Result> {
   })
   clearTimeout(timer)
   t.signal?.removeEventListener('abort', onAbort)
+  return { out, code, why }
+}
+
+// Exported for tests only (bin = a fake CLI); production code uses realModel.
+export async function runCli(t: Task, bin: string): Promise<Result> {
+  modelFor(t) // an unknown role throws before anything starts
+  if (t.signal?.aborted) return { ok: false, text: '', costUsd: null, error: 'stopped before start' }
+  const { out, code, why } = await spawnModel(t, bin, cliArgs(t), cliSandbox(t), cliEnv())
   let j: any = null
   try { j = JSON.parse(out) } catch { /* died without JSON */ }
   const cost = j && typeof j.total_cost_usd === 'number' && Number.isFinite(j.total_cost_usd) ? j.total_cost_usd : null
@@ -128,4 +145,69 @@ export async function runCli(t: Task, bin: string): Promise<Result> {
   return { ok: true, text, costUsd: cost, model, ...by }
 }
 
-export const claudeModel: Model = (t) => runCli(t, BIN)
+// ---- the second family: Codex CLI (lap 8) ----
+// Its real path is not fixed (a node version manager's per-shell dir), so it is looked up on PATH at call time.
+export function codexBin(path = process.env.PATH ?? ''): string {
+  for (const d of path.split(':').filter(Boolean)) if (existsSync(join(d, 'codex'))) return realpathSync(join(d, 'codex'))
+  throw new Error('the codex CLI is not on PATH; it is needed for a gpt-6-astra drafter')
+}
+export const CODEX_AUTH = `${HOME}/.codex/auth.json`
+// Exported so the isolation test checks the exact mounts. Only a drafter sandbox ever gets the login.
+export function codexSandbox(t: Task, bin: string, auth = CODEX_AUTH): SandboxOpts {
+  return {
+    workdir: t.workdir,
+    writable: false,
+    // The launcher is a node script in its npm package (bin/codex.js); the package holds the native binary.
+    extraRo: [dirname(dirname(bin))],
+    // Bound read-write, not copied: a token refresh during the call must reach the host file, or the host could be
+    // left holding a rotated-out refresh token. Everything else of ~/.codex (history, sessions, config) stays hidden.
+    extraRw: [auth].filter(existsSync),
+  }
+}
+// No config, no rules files, no session files; the CLI's own sandbox read-only on top of ours. The reasoning effort
+// is pinned so a CLI default never decides it.
+function codexArgs(t: Task): string[] {
+  return ['exec', '--json', '--model', modelFor(t), '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral', '--ignore-user-config',
+    '-c', 'model_reasoning_effort="medium"', '--cd', t.workdir, '-']
+}
+export function codexEnv(auth = CODEX_AUTH): NodeJS.ProcessEnv {
+  const env = cliEnv()
+  delete env.ANTHROPIC_API_KEY
+  delete env.CLAUDE_CODE_OAUTH_TOKEN
+  return { ...env, CODEX_HOME: dirname(auth) }
+}
+
+// Exported for tests only (bin = a fake CLI). The reply is the last agent message of the JSONL event stream.
+// The CLI reports neither a USD cost nor the model that answered: costUsd stays null and no model is reported.
+export async function runCodex(t: Task, bin: string, auth = CODEX_AUTH): Promise<Result> {
+  modelFor(t)
+  if (t.access !== 'none') throw new Error(`role ${t.role}: the second model family runs without tool access only`)
+  if (t.signal?.aborted) return { ok: false, text: '', costUsd: null, error: 'stopped before start' }
+  const before = crossLoginSecrets(auth) // a token refresh during the call replaces them in the file
+  const { out, code, why } = await spawnModel(t, bin, codexArgs(t), codexSandbox(t, bin, auth), codexEnv(auth))
+  const events = out.split('\n').flatMap((l) => { try { return [JSON.parse(l)] } catch { return [] } })
+  const msgs = events.filter((e) => e?.type === 'item.completed' && e.item?.type === 'agent_message' && typeof e.item.text === 'string')
+  const text = msgs.length ? msgs[msgs.length - 1].item.text : ''
+  if (why) return { ok: false, text, costUsd: null, error: why }
+  if (events.some((e) => e?.type === 'turn.failed' || e?.type === 'error')) return { ok: false, text, costUsd: null, error: 'model reported an error (turn failed)' }
+  if (code !== 0 || !msgs.length) return { ok: false, text, costUsd: null, error: `model process exited (code ${code}) without a reply` }
+  // The CLI keeps a read-only shell, and its login is mounted: a reply carrying a login secret is dropped whole, so it
+  // never reaches a spec, a scenario or a builder. ponytail: verbatim copies only; an encoded one is NOT detected.
+  if ([...before, ...crossLoginSecrets(auth)].some((x) => out.includes(x))) return { ok: false, text: '', costUsd: null, error: 'reply contained a second-family login secret (dropped)' }
+  return { ok: true, text, costUsd: null }
+}
+
+// Login secrets of the second family (string values of its auth file), for leak checks only: never written anywhere.
+export function crossLoginSecrets(auth = CODEX_AUTH): string[] {
+  let j: unknown
+  try { j = JSON.parse(readFileSync(auth, 'utf8')) } catch { return [] }
+  const out: string[] = []
+  const walk = (x: unknown) => { if (typeof x === 'string') { if (x.length >= 20) out.push(x) } else if (x && typeof x === 'object') Object.values(x).forEach(walk) }
+  walk(j)
+  return out
+}
+
+// Shell commands a builder is asked to run in the isolation probe: where the login would be if it leaked.
+export const crossLoginProbe = (auth = CODEX_AUTH) => [`ls -la ${dirname(auth)}`, `cat ${auth}`]
+
+export const realModel: Model = async (t) => (countedInCalls(modelFor(t)) ? runCodex(t, codexBin()) : runCli(t, BIN))

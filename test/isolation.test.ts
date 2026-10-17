@@ -1,16 +1,17 @@
 // The hidden-scenario guarantee: nothing the factory runs sandboxed can read the vault.
 // These tests attack with exact absolute paths (the strongest position a builder could have).
 import { test } from 'node:test'
+import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
-import { chmodSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { homedir, networkInterfaces, tmpdir } from 'node:os'
 import net from 'node:net'
-import { join } from 'node:path'
-import { BIN, CONFIG_KEEP, cliSandbox, runCli, type Task } from '../src/adapter.ts'
+import { dirname, join } from 'node:path'
+import { BIN, CODEX_AUTH, CONFIG_KEEP, CROSS_ROLES, cliSandbox, MODEL_BY_ROLE, runCli, runCodex, type Task } from '../src/adapter.ts'
 import { freePort, killTree, protect, sandboxCommand, sandboxExec, SANDBOX_PATH, spawnApp, waitPort } from '../src/sandbox.ts'
 import { runScenario } from '../src/scenario.ts'
 import { vaultDir } from '../src/vault.ts'
-import { freshState, MEMO_SERVER, tmp, writeApp } from './helpers.ts'
+import { freshState, MEMO_SERVER, REPO, tmp, writeApp } from './helpers.ts'
 
 const sd = freshState()
 const CANARY = `vault-canary-${process.pid}-${Date.now()}`
@@ -217,4 +218,36 @@ test('name resolution files stay readable inside the sandbox (WSL: /etc/resolv.c
     assert.equal(r.code, 0, `${f}: ${r.out}`)
     assert.equal(r.out, host)
   }
+})
+
+// Lap 8 (owner condition): the second family's login reaches a drafter sandbox only, never a builder's.
+test('second-family login: mounted for its drafter, invisible to the builder (synthetic login canary)', async () => {
+  const login = join(mkdtempSync(join(REPO, '.worker-scratch', 'login-')), 'auth.json') // under $HOME like the real one
+  const LOGIN = `login-canary-${process.pid}-${Date.now()}`
+  writeFileSync(login, JSON.stringify({ tokens: { refresh_token: LOGIN } }))
+  for (const role of Object.keys(MODEL_BY_ROLE)) {
+    const args = sandboxCommand('true', [], cliSandbox({ role, instruction: '', workdir: tmp('m'), access: 'write', maxCostUsd: 1, timeoutMs: 1 })).args.join(' ')
+    assert.ok(!args.includes(dirname(CODEX_AUTH)) && !args.includes(login), `${role} sandbox mounts the second-family login`)
+  }
+  // The drafter sees the login at its home, and still not the vault.
+  const w = tmp('iso-codex')
+  mkdirSync(join(w, 'pkg', 'bin'), { recursive: true })
+  const fake = join(w, 'pkg', 'bin', 'codex')
+  // It echoes a hash of its login (a reply carrying the login itself is dropped by the adapter) and its try at the vault.
+  writeFileSync(fake, `#!/bin/sh\ncat > /dev/null\nS="$(sha256sum "$CODEX_HOME/auth.json" | cut -c1-64) $(cat ${vfile} 2>&1 | tr -d '"{}\\\\\\n')"\necho "{\\"type\\":\\"item.completed\\",\\"item\\":{\\"type\\":\\"agent_message\\",\\"text\\":\\"$S\\"}}"\n`)
+  chmodSync(fake, 0o755)
+  const d = await runCodex({ role: CROSS_ROLES[0], model: 'gpt-6-astra', instruction: '', workdir: w, access: 'none', maxCostUsd: 1, timeoutMs: 30_000 }, fake, login)
+  assert.equal(d.ok, true, d.error)
+  assert.ok(d.text.includes(createHash('sha256').update(readFileSync(login)).digest('hex')), `drafter did not see its login: ${d.text}`)
+  assert.ok(!d.text.includes(CANARY))
+  // The builder, through the real adapter path, snoops for the canary file and the real login path.
+  const b = tmp('iso-builder')
+  const snoop = join(b, 'snoop')
+  writeFileSync(snoop, `#!/bin/sh\ncat ${login} ${CODEX_AUTH} > snoop.out 2>&1; ls -A ${dirname(CODEX_AUTH)} >> snoop.out 2>&1\ncat > /dev/null\necho '{"result":"done","total_cost_usd":0}'\n`)
+  chmodSync(snoop, 0o755)
+  const r = await runCli({ role: 'builder', instruction: '', workdir: b, access: 'write', maxCostUsd: 1, timeoutMs: 30_000 }, snoop)
+  assert.equal(r.ok, true, r.error)
+  const seen = readFileSync(join(b, 'snoop.out'), 'utf8')
+  assert.ok(!seen.includes(LOGIN))
+  assert.equal(seen.match(/No such file or directory/g)?.length, 3, seen) // both files and the dir are absent, not just unreadable
 })
