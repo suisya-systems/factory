@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import type { Model, Result } from './adapter.ts'
 import { CAPS, mergeLedger, startGuard, type Ledger } from './limits.ts'
+import { usesService } from './fake.ts'
 import { build } from './roles.ts'
 import { exportTree, removeTree } from './sandbox.ts'
 import { BLOCKED, OTHER, runProbe, runScenarios, validateProbes, type Probe, type ProbeResult, type ScenarioResult } from './scenario.ts'
@@ -36,7 +37,7 @@ async function evaluate(ws: string, sha: string, scored: [string, Approved][], p
   try {
     await exportTree(ws, sha, dir, signal) // the same bytes a judge would test
     const results: Record<string, ScenarioResult[]> = {}
-    for (const [cid, a] of scored) results[cid] = await runScenarios(dir, a.scenarios, signal)
+    for (const [cid, a] of scored) results[cid] = await runScenarios(dir, a.scenarios, signal, { service: usesService(a.spec) })
     const pr: ProbeResult[] = []
     for (const p of probes) pr.push(await runProbe(dir, p, signal))
     return { results, passed: Object.fromEntries(Object.entries(results).map(([cid, rs]) => [cid, rs.filter((r) => r.pass).length])), probes: pr }

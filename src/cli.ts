@@ -24,6 +24,8 @@ const USAGE = `usage: factory <command>
         [--minority]                               the scenario writer picks reasonable minority answers on purpose
                                                    and marks them "[minority]" in its assumptions
         [--minority-brief <text>]                  (with --minority) the experimenter's extra constraints on those points
+        [--service]                                the app calls an external service: the spec names SERVICE_URL and
+                                                   the hidden scenarios set and check a fake of it while judging
   approve <id> --by <name> --version <hash> [--note <text>]   human entrance approval of the version you read
   run <id> --ship-target <repo> [--max-cost N (per change, drafter included)] [--max-attempts N] [--port N] [--traffic-base /memos]
       [--feedback summaries|bare]               bare: a rejected builder gets one "failed: a hidden scenario" line per failed scenario
@@ -128,7 +130,7 @@ export async function main(argv: string[], model: Model = claudeModel): Promise<
       args: argv, allowPositionals: true,
       options: { help: { type: 'boolean', short: 'h' }, request: { type: 'string' }, base: { type: 'string' }, signals: { type: 'string' }, by: { type: 'string' }, version: { type: 'string' }, note: { type: 'string' }, 'ship-target': { type: 'string' },
         'max-cost': { type: 'string' }, 'max-attempts': { type: 'string' }, port: { type: 'string' }, 'traffic-base': { type: 'string' },
-        model: { type: 'string', multiple: true }, 'spec-from': { type: 'string' }, spec: { type: 'string' }, k: { type: 'string' }, score: { type: 'string' }, probes: { type: 'string' }, rescore: { type: 'boolean' }, minority: { type: 'boolean' }, 'minority-brief': { type: 'string' }, feedback: { type: 'string' }, approve: { type: 'string' } },
+        model: { type: 'string', multiple: true }, 'spec-from': { type: 'string' }, spec: { type: 'string' }, k: { type: 'string' }, score: { type: 'string' }, probes: { type: 'string' }, rescore: { type: 'boolean' }, minority: { type: 'boolean' }, 'minority-brief': { type: 'string' }, service: { type: 'boolean' }, feedback: { type: 'string' }, approve: { type: 'string' } },
     })
   } catch (e) { console.error(`factory: ${(e as Error).message}\n${USAGE}`); return 2 }
   const { positionals, values: v } = parsed
@@ -173,7 +175,7 @@ export async function main(argv: string[], model: Model = claudeModel): Promise<
         } else if (v.spec) throw new Error('--spec needs --spec-from')
         if (v['minority-brief'] !== undefined && (!v.minority || !v['minority-brief'].trim())) throw new Error('--minority-brief needs --minority and a text')
         const app = v.base ? await appSnapshot(resolve(v.base)) : null
-        const drafted = await draft(guard.model(model), request, { signals: v.signals ? readFileSync(v.signals, 'utf8') : undefined, app: app?.text, reuse, minority: v.minority, minorityBrief: v['minority-brief'] })
+        const drafted = await draft(guard.model(model), request, { signals: v.signals ? readFileSync(v.signals, 'utf8') : undefined, app: app?.text, reuse, minority: v.minority, minorityBrief: v['minority-brief'], service: v.service })
         const d: Draft = { ...drafted, base: { baseSha: app?.sha ?? null, requestSha256 } }
         const dir = writeDraft(sd, id, d)
         const version = hash(dir)

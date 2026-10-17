@@ -7,6 +7,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Model } from './adapter.ts'
+import { CONTROL } from './fake.ts'
 import { at, fill, get, HEADER, isObj, lengthChecks, type Scenario, type Step } from './scenario.ts'
 
 export type Basis = 'spec' | 'code' | 'convention'
@@ -30,7 +31,14 @@ export const CLASSIFIER_BUDGET = { maxCostUsd: 0.5, timeoutMs: 3 * 60_000 }
 
 // What the predictor sees of a scenario: the requests only. Anything else (id, title, summary, kind,
 // expect) would tell it the intended outcome.
-export const requestsOnly = (s: Scenario) => s.steps.map(({ method, path, body, headers, capture }) => ({ method, path, body, headers, capture }))
+export const requestsOnly = (s: Scenario) => s.steps.map(({ method, path, body, headers, capture, service }) => ({ method, path, body, headers, capture, service }))
+// #17: a step setting the fake's canned answer is the scenario's own setup, not app behaviour: its checks never count.
+const isSetup = (st: Step) => st.service === true && `${st.method} ${st.path.split('?')[0]}` === CONTROL.set
+const SERVICE_NOTE = `
+A request with "service": true does not go to the app: it goes to the control endpoint of a fake that stands in for the external service the spec names.
+"POST /responses" sets what the fake answers the app for that method and path (reply 204, no body); predict {"status": [204], "body": null, "basis": "convention", "quote": ""} for it.
+"GET /requests" replies 200 with the array of requests the app has sent to the service so far, in order, each {"method", "path" (with query), "headers" (lower-case names), "body" (parsed JSON, else text)}: predict which requests the app sent.
+`
 
 export function predictInstruction(spec: string, app: string, s: Scenario): string {
   return `You are checking how much a spec determines. Below are a SPEC, the EXISTING APP code it extends (may be empty), and a sequence of HTTP requests sent to a FRESH, EMPTY instance of an app built from that spec. Predict each response from the spec and the code only.
@@ -43,7 +51,7 @@ ${app || '(none)'}
 
 REQUESTS (in order; "{{name}}" is a value captured from an earlier response, per that step's "capture": {"name": "dot.path in the JSON body" or "header:<name>"}):
 ${JSON.stringify(requestsOnly(s), null, 1)}
-
+${s.steps.some((st) => st.service) ? SERVICE_NOTE : ''}
 Reply with ONE JSON object: {"steps": [one entry per request, in order]}. Each entry:
 {"status": [<every status code the spec/code allows here>] or null if they do not determine it,
  "body": <the JSON response body as far as it is determined, or null>,
@@ -133,7 +141,7 @@ export function classifyReply(s: Scenario, spec: string, app: string, reply: unk
     return { status, body: x.body ?? null, ...(isObj(x.headers) ? { headers: x.headers } : {}), basis, quote }
   })
   const vars: Record<string, unknown> = {}
-  const checks: Check[] = s.steps.flatMap((st, i) => compareStep(st, preds[i], vars, i + 1).map((c) => ({ step: i + 1, ...c, basis: preds[i].basis })))
+  const checks: Check[] = s.steps.flatMap((st, i) => isSetup(st) ? [] : compareStep(st, preds[i], vars, i + 1).map((c) => ({ step: i + 1, ...c, basis: preds[i].basis })))
   const rank = { convention: 0, code: 1, spec: 2 }
   const label: Label = checks.some((c) => c.result === 'X' && c.basis !== 'convention') ? 'contradicts'
     : checks.some((c) => c.result !== 'M') ? 'unstated' : 'readable'

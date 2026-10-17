@@ -5,6 +5,7 @@
 // network namespace (loopback only): it cannot reach out, and the host reaches it through a bridge.
 import { existsSync, mkdtempSync, openSync, realpathSync, rmSync } from 'node:fs'
 import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from 'node:child_process'
+import type { Duplex } from 'node:stream'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import net from 'node:net'
@@ -91,12 +92,17 @@ export function killTree(child: ChildProcess, graceMs = 2000): void {
 }
 
 // Minimal env for builder-written app code: nothing from the factory's environment leaks in.
-export function appEnv(port: number, dataDir: string): NodeJS.ProcessEnv {
-  return { PATH: SANDBOX_PATH, HOME, PORT: String(port), DATA_DIR: dataDir, NODE_ENV: 'production', npm_config_update_notifier: 'false', npm_config_fund: 'false' }
+export function appEnv(port: number, dataDir: string, servicePort?: number): NodeJS.ProcessEnv {
+  return { PATH: SANDBOX_PATH, HOME, PORT: String(port), DATA_DIR: dataDir, NODE_ENV: 'production', npm_config_update_notifier: 'false', npm_config_fund: 'false',
+    ...(servicePort ? { SERVICE_URL: `http://127.0.0.1:${servicePort}` } : {}) }
 }
 
 // The bridge between host and app is one pipe (fd 3 inside the sandbox) carrying frames:
 // [id u32][len u32][payload]. len 0 closes connection id; id 0 with len 0 means "the app accepts".
+// Ids below REVERSE are connections the host opens to the app; ids from REVERSE up are connections the app
+// opens to the service port (#17), which the host hands to the fake. Only the side that opened an id opens it.
+const REVERSE = 0x80000000
+const RELAY_READY = '/tmp/.factory-relay-ready'
 function frame(id: number, data: Buffer = Buffer.alloc(0)): Buffer {
   const h = Buffer.alloc(8)
   h.writeUInt32BE(id); h.writeUInt32BE(data.length, 4)
@@ -119,7 +125,9 @@ function frameReader(on: (id: number, data: Buffer) => void, onBad: () => void) 
 
 // Runs inside the app's namespace (the app itself gets fd 3 closed). Each new id opens a fresh
 // connection to the app on its loopback. The functions above are inlined (type-stripped source).
-const RELAY = `const net = require('node:net'); const port = Number(process.argv[1])
+// With a service port (argv 2) it also listens there, on the app's loopback, and sends each connection to
+// the host; the ready file (in the sandbox's own /tmp) lets the app start only once that listener is up.
+const RELAY = `const net = require('node:net'); const port = Number(process.argv[1]), sport = Number(process.argv[2]), REVERSE = ${REVERSE}
 ${frame}
 ${frameReader}
 const pipe = new net.Socket({ fd: 3 }), conns = new Map()
@@ -128,13 +136,19 @@ pipe.on('data', frameReader((id, d) => {
   let c = conns.get(id)
   if (!d.length) return c?.end()
   if (!c) {
+    if (id >= REVERSE) return
     c = net.connect(port, '127.0.0.1'); conns.set(id, c)
     c.on('data', (x) => pipe.write(frame(id, x))).on('error', () => {}).on('close', () => { conns.delete(id); pipe.write(frame(id)) })
   }
   c.write(d)
 }, () => process.exit(1)))
 const wait = () => { const c = net.connect(port, '127.0.0.1').on('connect', () => { c.destroy(); pipe.write(frame(0)) }).on('error', () => setTimeout(wait, 100)) }
-wait()`
+wait()
+let rid = REVERSE
+if (sport) net.createServer((c) => {
+  const id = rid++; conns.set(id, c)
+  c.on('data', (x) => pipe.write(frame(id, x))).on('error', () => {}).on('close', () => { if (conns.delete(id)) pipe.write(frame(id)) })
+}).listen(sport, '127.0.0.1', () => require('node:fs').writeFileSync(${JSON.stringify(RELAY_READY)}, ''))`
 
 // App child -> "its host-side port is bound", for waitPort. Readiness is this bridge's own bind,
 // never whatever else might be listening on the port.
@@ -143,13 +157,17 @@ const bridged = new WeakMap<ChildProcess, () => boolean>()
 // Runs the app (`npm start` in appDir) sandboxed: appDir read-only, dataDir writable, no network but
 // loopback. Host 127.0.0.1:port is bridged to the app's 127.0.0.1:port over an inherited pipe: no
 // path, address or socket the app could reach out through.
+// service (#17): the app's 127.0.0.1:service.port (SERVICE_URL) is bridged back to service.connect(), so
+// the app reaches the fake and nothing else; the host never connects anywhere for it.
 // ponytail: no backpressure on the bridge; fine for judge/prod HTTP, add pause/resume if bodies get big.
-export function spawnApp(appDir: string, port: number, dataDir: string, stdio: SpawnOptions['stdio'] = ['ignore', 'ignore', 'pipe']): ChildProcess {
+export function spawnApp(appDir: string, port: number, dataDir: string, stdio: SpawnOptions['stdio'] = ['ignore', 'ignore', 'pipe'], service?: { port: number; connect: () => Duplex }): ChildProcess {
   const base = (stdio as any[]).slice(0, 3)
-  const app = sandboxSpawn('sh', ['-c', 'node -e "$0" "$1" & exec npm start --silent 3>&-', RELAY, String(port)],
-    { workdir: appDir, writable: false, extraRw: [dataDir], isolateNet: true }, { env: appEnv(port, dataDir), stdio: [...base, 'pipe'] })
+  const start = service ? `until [ -e ${RELAY_READY} ]; do sleep 0.05; done; exec npm start --silent 3>&-` : 'exec npm start --silent 3>&-'
+  const app = sandboxSpawn('sh', ['-c', `node -e "$0" "$1" "$2" & ${start}`, RELAY, String(port), String(service?.port ?? 0)],
+    { workdir: appDir, writable: false, extraRw: [dataDir], isolateNet: true }, { env: appEnv(port, dataDir, service?.port), stdio: [...base, 'pipe'] })
   const pipe = app.stdio[3] as net.Socket
-  const conns = new Map<number, net.Socket>()
+  const conns = new Map<number, Duplex>()
+  const opened = new Set<number>() // reverse ids already handed to the fake: a late frame never reopens one
   let next = 1, started = false, listening = false
   const tcp = net.createServer((c) => {
     const id = next++
@@ -160,6 +178,14 @@ export function spawnApp(appDir: string, port: number, dataDir: string, stdio: S
     if (id === 0) {
       if (!started) { started = true; tcp.listen(port, '127.0.0.1', () => { listening = true }) }
       return
+    }
+    if (id >= REVERSE && service && d.length && !opened.has(id)) {
+      opened.add(id)
+      const s = service.connect()
+      conns.set(id, s)
+      // The fake finished: end our half too, so its side closes and leaves its open-connection count.
+      const done = () => { s.end(); if (conns.delete(id)) pipe.write(frame(id)) }
+      s.on('data', (x: Buffer) => pipe.write(frame(id, x))).on('error', () => {}).on('end', done).on('close', done)
     }
     const c = conns.get(id)
     if (!c) return
