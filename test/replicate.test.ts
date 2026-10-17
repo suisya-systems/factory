@@ -1,7 +1,7 @@
 // Lap 5: K independent builds of one approved spec, scored by scenarios and probes; nothing ships.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Model, Task } from '../src/adapter.ts'
 import { main } from '../src/cli.ts'
@@ -82,6 +82,8 @@ test('refused before any model call: other spec, probes outside the vault, a cha
   const outside = join(sd, 'probes.json')
   writeFileSync(outside, JSON.stringify(PROBES))
   await assert.rejects(replicate({ ...o, probesFile: outside }), /must be under/)
+  symlinkSync(outside, join(vaultDir(sd, 'rep-c'), 'link.json'))
+  await assert.rejects(replicate({ ...o, probesFile: join(vaultDir(sd, 'rep-c'), 'link.json') }), /must be under/)
   writeFileSync(join(vaultDir(sd, 'rep-c'), 'bad.json'), JSON.stringify({ decisions: [{ id: 'x', steps: [{ method: 'GET', path: '/' }], observe: ['2:status'], options: { a: [[1]], b: [[2]] } }] }))
   await assert.rejects(replicate({ ...o, probesFile: join(vaultDir(sd, 'rep-c'), 'bad.json') }), /bad observe/)
 
