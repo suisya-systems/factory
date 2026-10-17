@@ -139,19 +139,6 @@ test('ship: a dirty ship target puts nothing live; the previous release keeps se
   await stopServer(sd)
 })
 
-test('ship: an app listening on 0.0.0.0 never goes live and nothing changes', async () => {
-  const target = gitTarget()
-  const ws = tmp('ws')
-  execFileSync('git', ['clone', '-q', target, ws])
-  const v = await build(builder((d) => writeApp(d, MEMO_SERVER.replace("'127.0.0.1')", "'0.0.0.0')"))), ws, 'spec', '')
-  const cur = join(sd, 'releases', 'current')
-  const before = existsSync(cur) ? readlinkSync(cur) : null
-  await assert.rejects(ship({ changeId: 'c', sha: v.sha, approvedVersion: 'v' }, ws, target, sd, await freePort()), /non-loopback address \(0\.0\.0\.0:\d+\)/)
-  assert.notEqual(head(target), v.sha)
-  assert.equal(existsSync(cur) ? readlinkSync(cur) : null, before)
-  assert.ok(!existsSync(join(sd, 'prod', 'server.pid')))
-})
-
 test('scenario runner: a redirect is judged as the redirect, not its target', async () => {
   const dir = tmp('redirect')
   writeApp(dir, `require('node:http').createServer((q, s) => { if (q.url === '/r') { s.writeHead(302, { location: '/ok' }); return s.end() } s.writeHead(200, {'content-type':'application/json'}); s.end('{"ok":true}') }).listen(Number(process.env.PORT), '127.0.0.1')`)

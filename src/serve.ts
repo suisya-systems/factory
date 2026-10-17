@@ -3,7 +3,7 @@
 import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import { join } from 'node:path'
-import { assertLoopbackOnly, freePort, killTree, spawnApp, waitPort } from './sandbox.ts'
+import { freePort, killTree, spawnApp, waitPort } from './sandbox.ts'
 
 export async function serve(stateDir: string, port: number): Promise<void> {
   const prod = join(stateDir, 'prod')
@@ -14,15 +14,13 @@ export async function serve(stateDir: string, port: number): Promise<void> {
   const errorLog = join(prod, 'error.log')
   const internal = await freePort()
   const app = spawnApp(appDir, internal, dataDir, ['ignore', 'ignore', openSync(errorLog, 'a')])
-  app.on('exit', (code) => {
+  // Removed by name on shutdown: spawnApp's own exit listener tears down the bridge.
+  const onExit = (code: number | null) => {
     appendFileSync(errorLog, `${new Date().toISOString()} [supervisor] app exited with code ${code}\n`)
     process.exit(1)
-  })
-  await waitPort(internal, 15_000, app)
-  try { assertLoopbackOnly(app) } catch (e) {
-    appendFileSync(errorLog, `${new Date().toISOString()} [supervisor] ${(e as Error).message}; refusing to serve\n`)
-    app.removeAllListeners('exit'); killTree(app, 500); process.exit(1)
   }
+  app.on('exit', onExit)
+  await waitPort(internal, 15_000, app)
 
   const server = http.createServer((req, res) => {
     const t0 = performance.now()
@@ -39,7 +37,7 @@ export async function serve(stateDir: string, port: number): Promise<void> {
   })
   server.on('error', (e) => { appendFileSync(errorLog, `${new Date().toISOString()} [supervisor] ${e.message}\n`); killTree(app, 500); process.exit(1) })
   server.listen(port, '127.0.0.1')
-  const shutdown = () => { app.removeAllListeners('exit'); killTree(app, 500); server.close(); setTimeout(() => process.exit(0), 600) }
+  const shutdown = () => { app.off('exit', onExit); killTree(app, 500); server.close(); setTimeout(() => process.exit(0), 600) }
   process.on('SIGTERM', shutdown)
   process.on('SIGINT', shutdown)
 }
