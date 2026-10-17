@@ -41,7 +41,7 @@ Reply with ONE JSON object: {"steps": [one entry per request, in order]}. Each e
  "headers": {<response headers a later request relies on (see "capture": "header:<name>"), lower-case name: value or "?"; omit if not determined>},
  "basis": "spec" | "code" | "convention" (where the prediction comes from; "convention" = general HTTP habit, not stated anywhere),
  "quote": "<the exact sentence of the spec or line of code you rely on, copied verbatim; empty for convention>"}
-In "body": leave a field OUT when its presence is not determined; write "?" when the field is present but its value is not determined; an array you write is a claim about ALL its items in order, so use "?" for any item you cannot determine; write "{{name}}" where the value equals a captured value. Do not invent ids or timestamps.`
+In "body": leave a field OUT when its presence is not determined; write "?" when the field is present but its value is not determined; an array you write is a claim about ALL its items in order, so use "?" for any item you cannot determine; write "{{name}}" where the value equals a value captured by an EARLIER step (if this step captures the same name again, "{{name}}" still means the earlier value). Do not invent ids or timestamps.`
 }
 
 const norm = (t: string) => t.replace(/\s+/g, ' ').trim()
@@ -71,18 +71,23 @@ function tri(e: unknown, p: unknown): Tri {
 }
 
 // The checks of one step against one prediction. A capture binds the value the prediction determines,
-// else an opaque marker, so ids nobody can predict still match a later "{{name}}" on either side.
-export function compareStep(st: Step, p: Prediction, vars: Record<string, unknown>): { check: string; result: Tri }[] {
+// else an opaque marker (one per capture step), so ids nobody can predict still match a later "{{name}}"
+// on either side. n: the step number, which keeps a re-capture's marker apart from the earlier one.
+export function compareStep(st: Step, p: Prediction, vars: Record<string, unknown>, n = 0): { check: string; result: Tri }[] {
   const out: { check: string; result: Tri }[] = []
   const e = st.expect
   const expected = e.json === undefined ? undefined : fill(e.json, vars) // as the runner: captures of this step come after its checks
-  for (const name of Object.keys(st.capture ?? {})) vars[name] = `${MARK}${name}`
-  const body = p.body === null ? undefined : fillOpen(p.body, vars) // may echo this step's own capture
+  const marker = (name: string) => `${MARK}${name}@${n}`
+  // A "{{name}}" in the prediction means the value captured EARLIER, as in the expectation; only a name
+  // nothing captured yet may echo this step's own capture.
+  for (const name of Object.keys(st.capture ?? {})) if (!Object.hasOwn(vars, name)) vars[name] = marker(name)
+  const body = p.body === null ? undefined : fillOpen(p.body, vars)
+  const headers = isObj(p.headers) ? fillOpen(p.headers, vars) as Record<string, unknown> : undefined
   // The runner fails a step whose capture is missing: the prediction must establish it.
   for (const [name, path] of Object.entries(st.capture ?? {})) {
-    const v = path.startsWith(HEADER) ? (isObj(p.headers) ? p.headers[path.slice(HEADER.length).toLowerCase()] : undefined) : get(body, path)
+    const v = path.startsWith(HEADER) ? headers?.[path.slice(HEADER.length).toLowerCase()] : get(body, path)
     out.push({ check: `capture ${name}`, result: v === undefined ? 'U' : 'M' }) // as the runner: only a missing value fails
-    if (!open(v) && !(typeof v === 'string' && v.includes(MARK))) vars[name] = v
+    vars[name] = open(v) ? marker(name) : v
   }
   if (e.status !== undefined) {
     const want = ([] as number[]).concat(e.status)
@@ -114,7 +119,7 @@ export function classifyReply(s: Scenario, spec: string, app: string, reply: unk
     return { status, body: x.body ?? null, ...(isObj(x.headers) ? { headers: x.headers } : {}), basis, quote }
   })
   const vars: Record<string, unknown> = {}
-  const checks: Check[] = s.steps.flatMap((st, i) => compareStep(st, preds[i], vars).map((c) => ({ step: i + 1, ...c, basis: preds[i].basis })))
+  const checks: Check[] = s.steps.flatMap((st, i) => compareStep(st, preds[i], vars, i + 1).map((c) => ({ step: i + 1, ...c, basis: preds[i].basis })))
   const rank = { convention: 0, code: 1, spec: 2 }
   const label: Label = checks.some((c) => c.result === 'X' && c.basis !== 'convention') ? 'contradicts'
     : checks.some((c) => c.result !== 'M') ? 'unstated' : 'readable'
