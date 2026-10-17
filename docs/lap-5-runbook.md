@@ -183,7 +183,7 @@ test ! -e "$STATE/lap-ledger.json" && echo "fresh state: $STATE"
 npm test
 ```
 
-期待: `# pass 93`、`# fail 0`、`# skipped 0`。
+期待: `# pass 94`、`# fail 0`、`# skipped 0`。
 
 ### 2. 隔離の確認（実モデル呼び出し、各上限 $1）
 
