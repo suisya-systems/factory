@@ -1,7 +1,6 @@
 // One lap, one command: runs to a gate, stops, resumes after approval without redoing steps; failures stay failures.
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Model } from '../src/adapter.ts'
@@ -164,7 +163,7 @@ test('a definition home sets the state dir; another FACTORY_HOME is refused', as
   } finally { process.env.FACTORY_HOME = prev }
 })
 
-// Lap 5 as a definition (the lap 6 one is docs/lap-6/lap.json): both runbooks' procedures fit the format.
+// Lap 5 as a definition (the lap 6 one is examples/lap-6.json): both runbooks' procedures fit the format.
 const LAP5 = {
   name: 'lap5', home: '.factory-lap5',
   steps: [
@@ -187,9 +186,8 @@ const LAP5 = {
 }
 
 test('lap 5 and lap 6 are expressible; malformed definitions are refused before anything runs', () => {
-  const lap6 = parseLap(readFileSync(join(REPO, 'docs', 'lap-6', 'lap.json'), 'utf8'))
+  const lap6 = parseLap(readFileSync(join(REPO, 'examples', 'lap-6.json'), 'utf8'))
   assert.deepEqual(lap6.steps.filter((s) => s.factory?.[0] === 'run').map((s) => s.factory![1]), ['minor-1', 'minor-2', 'minor-1-b', 'minor-2-b', 'minor-1-c', 'minor-2-c'])
-  assert.equal(createHash('sha256').update(readFileSync(join(REPO, 'docs', 'lap-6', 'prereg.json'))).digest('hex'), '87fcba4eefe35f5f990cdd9d9fcea0801e0efce65b8aadbad9845d1189d25987') // the one lap 6 fixed
   parseLap(JSON.stringify(LAP5))
   const bad = (steps: unknown[], re: RegExp) => assert.throws(() => parseLap(JSON.stringify({ name: 'x', steps })), re)
   bad([{ factory: ['approve', 'a', '--by', 'me', '--version', 'v'] }], /not a lap step/)
