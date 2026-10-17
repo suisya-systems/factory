@@ -1,7 +1,7 @@
 // CLI paths that spend money must record it, and approval binds to the version the owner read.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { main } from '../src/cli.ts'
 import { CAPS } from '../src/limits.ts'
@@ -16,6 +16,9 @@ test('a failed drafter still records its spend', async () => {
   writeFileSync(req, 'a memo api')
   await assert.rejects(main(['draft', 'd1', '--request', req], async () => ({ ok: true, text: 'sorry', costUsd: 2 })), /no parseable JSON/)
   assert.equal(JSON.parse(readFileSync(join(sd, 'runs', 'd1', 'draft-cost.json'), 'utf8')).totalUsd, 4) // the reply and its one repair round
+  const kept = readdirSync(join(sd, 'runs', 'd1')).filter((f) => f.startsWith('rejected-'))
+  assert.equal(kept.length, 1) // both rejected replies, kept for the experimenter
+  assert.deepEqual(JSON.parse(readFileSync(join(sd, 'runs', 'd1', kept[0]), 'utf8')).map((r: { role: string; reply: string }) => [r.role, r.reply]), [['spec-drafter', 'sorry'], ['spec-drafter', 'sorry']])
 })
 
 test('probe-isolation over the cap still writes its result, with its own exit code', async () => {

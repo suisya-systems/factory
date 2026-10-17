@@ -163,6 +163,11 @@ export async function main(argv: string[], model: Model = claudeModel): Promise<
         writeFileSync(join(dir, 'approval-summary.md'), approvalSummary(id, d, version))
         console.log(`drafted ${id} (version ${version}). Factory stopped; waiting for human approval. Summary: ${join(dir, 'approval-summary.md')}`)
         return 0
+      } catch (e) {
+        // Rejected drafter replies carry scenario text: kept in the run dir (hidden like the vault), never printed.
+        const rejected = (e as { rejected?: unknown[] }).rejected
+        if (rejected) { mkdirSync(runDir, { recursive: true }); writeFileSync(join(runDir, `rejected-${new Date().toISOString().replace(/[:.]/g, '-')}.json`), JSON.stringify(rejected, null, 2)) }
+        throw e
       } finally {
         guard.dispose()
         mkdirSync(runDir, { recursive: true }) // spend is recorded even when the drafter failed

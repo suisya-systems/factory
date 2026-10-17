@@ -104,13 +104,20 @@ const strs = (x: unknown, who: string): string[] => {
 
 // A drafter reply that fails validation gets ONE repair round in a fresh session (same role, same
 // inputs, plus its reply and the error). Nothing is relaxed: the repaired reply must pass the same checks.
+// Both rejected replies travel on the final error (`rejected`), so `draft` can keep them in the hidden run dir (lap 5).
+export type Rejected = { role: string; error: string; reply: string }
 async function ask<T>(model: Model, role: string, instruction: string, parse: (j: any) => T): Promise<T> {
   let text = '', err = ''
+  const rejected: Rejected[] = []
   for (const repair of [false, true]) {
     const r = await model(draftTask(role, repair ? `${instruction}\n\nYOUR PREVIOUS REPLY WAS REJECTED: ${err}\nPREVIOUS REPLY:\n${text}\n\nReply again with the whole corrected JSON object.` : instruction))
     if (!r.ok) throw new Error(`${role} failed: ${r.error}`)
     text = r.text
-    try { return parse(extractJson(text)) } catch (e) { if (repair) throw e; err = (e as Error).message }
+    try { return parse(extractJson(text)) } catch (e) {
+      err = (e as Error).message
+      rejected.push({ role, error: err, reply: text })
+      if (repair) throw Object.assign(e as Error, { rejected })
+    }
   }
   throw new Error('unreachable')
 }
