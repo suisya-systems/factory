@@ -204,3 +204,20 @@ test('app-sent bytes and canned answers cannot throw in the factory process; bod
     assert.deepEqual(log[1].body, { name: 'é' })
   } finally { fake.close() }
 })
+
+test('unfinished concurrent requests count as they arrive: the fake cuts them and the scenario fails', async () => {
+  const fill = Buffer.alloc(FAKE_LIMITS.bodyBytes - 1000, 'a') // under the per-body cap, never finished
+  const cases: [string, number, Buffer[]][] = [
+    ['bytes', Math.ceil(FAKE_LIMITS.totalBytes / fill.length) + 1, [Buffer.from(`POST /slow HTTP/1.1\r\nHost: s\r\nContent-Length: ${fill.length + 1}\r\n\r\n`), fill]],
+    ['connections', FAKE_LIMITS.connections + 1, [Buffer.from('POST /slow HTTP/1.1\r\n')]], // headers never finished, no body
+  ]
+  for (const [what, opens, parts] of cases) {
+    const fake = startFake()
+    try {
+      for (let i = 0; i < opens; i++) { const c = fake.connect(); c.on('error', () => {}).resume(); for (const p of parts) c.write(p) }
+      await new Promise((ok) => setTimeout(ok, 200))
+      assert.equal(fake.overflow(), true, what)
+      assert.deepEqual(fake.control('GET', '/requests', undefined).json, [])
+    } finally { fake.close() }
+  }
+})

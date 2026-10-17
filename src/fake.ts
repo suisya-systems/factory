@@ -13,8 +13,9 @@ export const withService = (spec: string) => (usesService(spec) ? spec : `${spec
   'The external service the request names is reachable at process.env.SERVICE_URL, a base URL of the form http://127.0.0.1:<port>. ' +
   'It is the only address on the network the app can reach.\n')
 
-// Bounds on what the app can make the factory hold; going past one fails the scenario.
-export const FAKE_LIMITS = { requests: 100, bodyBytes: 64_000, totalBytes: 512_000 }
+// Bounds on what the app can make the factory hold, counted as bytes and requests arrive (an unfinished
+// request counts too); going past one cuts that connection and fails the scenario.
+export const FAKE_LIMITS = { requests: 100, connections: 20, bodyBytes: 64_000, totalBytes: 512_000 }
 export const CONTROL = { set: 'POST /responses', list: 'GET /requests' }
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
 
@@ -32,16 +33,21 @@ export function startFake(): Fake {
   const canned = new Map<string, Canned>()
   const log: Received[] = []
   const socks = new Set<Duplex>()
-  let total = 0, over = false
+  let total = 0, requests = 0, over = false
   // Everything here is app-sent (builder-written code) and runs in the factory process: nothing may throw out of it.
   const server = http.createServer((req, res) => {
     const chunks: Buffer[] = []
-    let size = 0
-    req.on('data', (d: Buffer) => { size += d.length; if (size <= FAKE_LIMITS.bodyBytes) chunks.push(d) })
+    let size = 0, dropped = false
+    const cut = () => { over = dropped = true; chunks.length = 0; req.socket.destroy() }
+    if (++requests > FAKE_LIMITS.requests) return cut()
+    req.on('data', (d: Buffer) => {
+      size += d.length; total += d.length
+      if (size > FAKE_LIMITS.bodyBytes || total > FAKE_LIMITS.totalBytes) cut()
+      else chunks.push(d)
+    })
     req.on('end', () => {
       try {
-        total += size
-        if (size > FAKE_LIMITS.bodyBytes || total > FAKE_LIMITS.totalBytes || log.length >= FAKE_LIMITS.requests) { over = true; res.writeHead(413).end(); return }
+        if (dropped) return
         const raw = Buffer.concat(chunks).toString('utf8') // decoded once: a character split across chunks stays whole
         let body: unknown = raw || undefined
         try { body = raw ? JSON.parse(raw) : undefined } catch { /* kept as text */ }
@@ -58,6 +64,7 @@ export function startFake(): Fake {
   return {
     connect() {
       const [ours, theirs] = duplexPair()
+      if (socks.size >= FAKE_LIMITS.connections) { over = true; theirs.destroy(); return theirs }
       socks.add(ours)
       ours.on('close', () => socks.delete(ours)).on('error', () => {})
       server.emit('connection', ours)
