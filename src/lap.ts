@@ -4,7 +4,7 @@
 // The definition is trusted code (an `exec` step could run anything); the owner approves it as part of every gate.
 import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, normalize, resolve } from 'node:path'
 import { approve, checkId, hash, loadApproved, stateDir, vaultDir } from './vault.ts'
 
@@ -14,13 +14,26 @@ export type Step = {
   gate?: string; approve?: string[]; fix?: Record<string, string>; read?: string[] // human stop
   newShipTarget?: string // run only: README of a fresh ship target $STATE/ship/<id>
   always?: boolean // exec / tally / observe only: runs even after a failed step (reports)
+  parallel?: Step[]; max?: number // independent runs (or replicates) of one group, at most `max` at once
 }
 export type LapDef = { name: string; home?: string; steps: Step[] }
 
 // Commands a step may run. approve / stop / serve are not steps: approval happens at a gate, by a human.
 const FACTORY_STEPS = ['draft', 'run', 'replicate', 'tally', 'probe-isolation', 'observe']
 const FREE = ['tally', 'observe'] // no model call: may be `always`
-const KEYS: Record<string, string[]> = { factory: ['newShipTarget', 'always'], exec: ['always'], copy: ['from', 'to'], gate: ['approve', 'fix', 'read'] }
+const KEYS: Record<string, string[]> = { factory: ['newShipTarget', 'always'], exec: ['always'], copy: ['from', 'to'], gate: ['approve', 'fix', 'read'], parallel: ['max'] }
+// A group runs side by side only what shares nothing but the lap ledger: each change its own run dir, work dir,
+// ship target and prod port. One command per group: `run x-rep` would share replicate x's work dir.
+const PARALLEL = ['run', 'replicate']
+
+// The value of `--name v` / `--name=v` in an argv (as parseArgs reads it: the last one wins).
+function opt(argv: string[], name: string): string | undefined {
+  let v: string | undefined
+  argv.forEach((a, i) => { if (a === `--${name}`) v = argv[i + 1]; else if (a.startsWith(`--${name}=`)) v = a.slice(name.length + 3) })
+  return v
+}
+// The ship target a run step ships to, before {state} is known for a fresh one.
+const shipTargetOf = (s: Step) => (s.newShipTarget !== undefined ? `{state}/ship/${s.factory![1]}` : opt(s.factory!, 'ship-target'))
 
 const strs = (x: unknown) => Array.isArray(x) && x.length > 0 && x.every((a) => typeof a === 'string')
 export function parseLap(text: string): LapDef {
@@ -31,8 +44,7 @@ export function parseLap(text: string): LapDef {
   if (d.home !== undefined && typeof d.home !== 'string') throw bad('home must be a path')
   if (!Array.isArray(d.steps) || d.steps.length === 0) throw bad('steps missing')
   const seen = new Set<string>(), gates = new Set<string>()
-  d.steps.forEach((s: Step, i: number) => {
-    const at = `step ${i + 1}`
+  const check = (s: Step, at: string) => {
     const kind = Object.keys(KEYS).filter((k) => k in s)
     if (kind.length !== 1) throw bad(`${at}: needs exactly one of ${Object.keys(KEYS).join(', ')}`)
     const k = kind[0]
@@ -62,10 +74,31 @@ export function parseLap(text: string): LapDef {
         if (typeof src !== 'string' || n.startsWith('..') || n.startsWith('/') || n.split('/')[0] === 'laps') throw bad(`${at}: fix "${dest}" must be a path inside the state dir (not laps/) -> a source file`)
       }
     }
+    if (k === 'parallel') {
+      const g = s.parallel!
+      if (!Array.isArray(g) || g.length === 0) throw bad(`${at}: parallel must be a non-empty list of steps`)
+      if (!(Number.isInteger(s.max) && s.max! >= 1)) throw bad(`${at}: parallel needs max, an integer >= 1 (how many run at once)`)
+      g.forEach((t, j) => {
+        check(t, `${at}.${j + 1}`)
+        if (!t.factory || !PARALLEL.includes(t.factory[0])) throw bad(`${at}.${j + 1}: a parallel group holds only factory ${PARALLEL.join(' / ')} steps`)
+      })
+      const one = (what: string, xs: (string | undefined)[]) => { if (new Set(xs).size !== xs.length) throw bad(`${at}: two steps of the group share ${what}; they cannot run side by side`) }
+      if (new Set(g.map((t) => t.factory![0])).size > 1) throw bad(`${at}: a parallel group holds one command (run or replicate), not both`)
+      one('a change id', g.map((t) => checkId(t.factory![1] ?? '')))
+      if (g[0].factory![0] === 'run') {
+        const ports = g.map((t) => opt(t.factory!, 'port') ?? '8787')
+        for (const p of ports) if (!/^\d+$/.test(p) || +p < 1 || +p > 65535) throw bad(`${at}: --port ${p} is not a port`)
+        one('a --port (one prod per port)', ports.map(Number).map(String))
+        const targets = g.map(shipTargetOf)
+        if (targets.includes(undefined)) throw bad(`${at}: a run needs --ship-target or newShipTarget`)
+        one('a ship target (changes to one app stay sequential)', targets.map((t) => resolve(t!)))
+      }
+    }
     const key = JSON.stringify(s)
     if (seen.has(key)) throw bad(`${at}: the same step appears twice (progress is kept per step content)`)
     seen.add(key)
-  })
+  }
+  d.steps.forEach((s: Step, i: number) => check(s, `step ${i + 1}`))
   return d
 }
 
@@ -95,7 +128,7 @@ export async function lap(file: string, o: LapOpts, factory: (argv: string[]) =>
   const stopFile = process.env.FACTORY_STOP_FILE ?? join(sd, 'STOP')
   const resume = `npm run factory -- lap ${file}`
   const stopped = () => existsSync(stopFile) && `emergency stop is active (${stopFile}); delete it by hand to continue`
-  if (!existsSync(progFile) && existsSync(join(sd, 'lap-ledger.json'))) throw new Error(`${sd} is not a fresh state dir (lap-ledger.json exists); a lap starts from a fresh FACTORY_HOME`)
+  for (const f of ['lap-ledger.jsonl', 'lap-ledger.json']) if (!existsSync(progFile) && existsSync(join(sd, f))) throw new Error(`${sd} is not a fresh state dir (${f} exists); a lap starts from a fresh FACTORY_HOME`)
   const prog: Progress = existsSync(progFile) ? JSON.parse(readFileSync(progFile, 'utf8')) : { steps: {}, waiting: null }
   const save = () => { mkdirSync(dir, { recursive: true }); writeFileSync(`${progFile}.tmp`, JSON.stringify(prog, null, 2)); renameSync(`${progFile}.tmp`, progFile) }
   const sub = (argv: string[]) => argv.map((a) => a.replaceAll('{state}', sd))
@@ -182,14 +215,39 @@ export async function lap(file: string, o: LapOpts, factory: (argv: string[]) =>
   }
 
   let failed = ''
-  for (const [i, s] of def.steps.entries()) {
-    const key = JSON.stringify(s), st = prog.steps[key], at = `step ${i + 1}`
-    if (st?.status === 'done') continue
-    if (st) { failed ||= `${at} ${st.status === 'running' ? 'was interrupted (the lap ended during it)' : `failed: ${st.reason}`}`; continue }
+  // A step other than a gate: skipped when done, recorded before any spend, never re-run after a failure.
+  const runStep = async (s: Step, at: string) => {
+    const key = JSON.stringify(s), st = prog.steps[key]
+    if (st?.status === 'done') return
+    if (st) { failed ||= `${at} ${st.status === 'running' ? 'was interrupted (the lap ended during it)' : `failed: ${st.reason}`}`; return }
     // While the STOP file exists only `always` exec steps (the report) run; nothing is recorded for the skipped ones.
-    if (stopped() && !(s.always && s.exec)) { failed ||= stopped() as string; continue }
-    if (failed && !s.always) continue
+    if (stopped() && !(s.always && s.exec)) { failed ||= stopped() as string; return }
+    if (failed && !s.always) return
+    prog.steps[key] = { status: 'running', at: new Date().toISOString() } // recorded before any spend: an interrupted step is never re-run silently
+    save()
+    try {
+      await doStep(s)
+      prog.steps[key] = { status: 'done', at: new Date().toISOString() }
+    } catch (e) {
+      prog.steps[key] = { status: 'failed', reason: (e as Error).message, at: new Date().toISOString() }
+      failed ||= `${at} failed: ${(e as Error).message}`
+    }
+    save()
+  }
+  for (const [i, s] of def.steps.entries()) {
+    const at = `step ${i + 1}`
+    if (s.parallel) {
+      // The same rules per step; after the first failure (or a STOP) no step of the group starts, the running ones finish.
+      const real = (t: string) => (existsSync(t) ? realpathSync(t) : resolve(t)) // two spellings of one checkout are one app
+      const targets = s.parallel.filter((t) => t.factory![0] === 'run').map((t) => real(shipTargetOf(t)!.replaceAll('{state}', sd)))
+      if (new Set(targets).size !== targets.length) { failed ||= `${at}: two runs of the group ship to the same checkout`; continue }
+      const todo = s.parallel.map((t, j) => [t, `${at}.${j + 1}`] as const)
+      await Promise.all(Array.from({ length: Math.min(s.max!, todo.length) }, async () => { while (todo.length) await runStep(...todo.shift()!) }))
+      continue
+    }
     if (s.gate) {
+      if (stopped()) { failed ||= stopped() as string; continue }
+      if (failed) continue
       // Never cached: checked again on every resume against the current definition and files.
       let missing: string[], version: string | undefined, rec
       try {
@@ -218,16 +276,7 @@ export async function lap(file: string, o: LapOpts, factory: (argv: string[]) =>
       console.log(`lap ${def.name}: stopped at gate "${s.gate}" for approval. Read ${summary}; after approving, resume with: ${resume}`)
       return 3
     }
-    prog.steps[key] = { status: 'running', at: new Date().toISOString() } // recorded before any spend: an interrupted step is never re-run silently
-    save()
-    try {
-      await doStep(s)
-      prog.steps[key] = { status: 'done', at: new Date().toISOString() }
-    } catch (e) {
-      prog.steps[key] = { status: 'failed', reason: (e as Error).message, at: new Date().toISOString() }
-      failed ||= `${at} failed: ${(e as Error).message}`
-    }
-    save()
+    await runStep(s, at)
   }
   failed ||= stopped() || '' // a STOP that came during the last step: never report the lap as done
   if (failed) { console.error(`lap ${def.name}: failed (${failed}). A failed or interrupted step is never re-run; change the definition (e.g. a new change id) to go on.`); return 1 }

@@ -1,18 +1,19 @@
 // One lap, one command: runs to a gate, stops, resumes after approval without redoing steps; failures stay failures.
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Model } from '../src/adapter.ts'
 import { main } from '../src/cli.ts'
-import { parseLap } from '../src/lap.ts'
+import { parseLap, type Step } from '../src/lap.ts'
+import { CAPS, lapSpent } from '../src/limits.ts'
 import { freePort } from '../src/sandbox.ts'
-import { stopServer } from '../src/ship.ts'
+import { prodDir, stopServer } from '../src/ship.ts'
 import { approve, hash, writeDraft } from '../src/vault.ts'
-import { freshState, MEMO_SERVER, REPO, SCENARIOS, writeApp } from './helpers.ts'
+import { approvedChange, freshState, gitTarget, MEMO_SERVER, REPO, SCENARIOS, writeApp } from './helpers.ts'
 
 const homes: string[] = []
-after(() => homes.forEach(stopServer))
+after(() => homes.forEach((h) => stopServer(h)))
 const home = () => { const sd = freshState(); homes.push(sd); return sd }
 const scratch = () => mkdtempSync(join(REPO, '.worker-scratch', 'lap-'))
 const count = (f: string) => (existsSync(f) ? readFileSync(f, 'utf8').length : 0)
@@ -201,4 +202,99 @@ test('lap 5 and lap 6 are expressible; malformed definitions are refused before 
   bad([{ gate: 'g', fix: { 'laps/x/gates/g.json': 'f' } }], /inside the state dir/)
   bad([{ copy: 'a', from: 'x', to: ['b'] }], /exactly one of from, to/)
   bad([{ exec: ['true'], gate: 'g' }], /exactly one of/)
+})
+
+// #13: lap 7's 8 runs as one parallel group, each on its own port (lap 7 ran them one after another, all on 8797).
+const LAP7 = parseLap(readFileSync(join(REPO, 'examples', 'lap-7.json'), 'utf8'))
+const lap7Group = (ports: number[], max: number): Step => ({
+  parallel: LAP7.steps.filter((s) => s.factory?.[0] === 'run').map((s, i) => ({ ...s, factory: s.factory!.map((a, j, all) => (all[j - 1] === '--port' ? String(ports[i]) : a)) })), max,
+})
+const ids = lap7Group([], 1).parallel!.map((s) => s.factory![1])
+const builderModel = (spend: number, active = { now: 0, max: 0 }): Model => async (t) => {
+  if (t.role !== 'builder') return { ok: true, text: '{"pass": true, "reason": "fine"}', costUsd: 0.05 }
+  active.max = Math.max(active.max, ++active.now)
+  await new Promise((r) => setTimeout(r, 50))
+  active.now--
+  writeApp(t.workdir, MEMO_SERVER)
+  return { ok: true, text: 'built', costUsd: spend }
+}
+const ports = async (n: number) => { const ps = new Set<number>(); while (ps.size < n) ps.add(await freePort()); return [...ps] }
+
+test('lap 7 runs its 8 independent runs in parallel, each shipping to its own target and port; the lap ledger sums them', async () => {
+  const sd = home(), dir = scratch(), file = join(dir, 'lap.json'), ps = await ports(8)
+  for (const id of ids) approvedChange(sd, id)
+  writeFileSync(file, JSON.stringify({ name: 'lap7p', steps: [lap7Group(ps, 4)] }))
+  const active = { now: 0, max: 0 }
+  const r = await lapOut([file], builderModel(0.2, active))
+  assert.equal(r.code, 0, r.out)
+  assert.ok(active.max > 1 && active.max <= 4, `max concurrent builders ${active.max}`)
+  let sum = 0
+  for (const [i, id] of ids.entries()) {
+    const rec = JSON.parse(readFileSync(join(sd, 'runs', id, 'run.json'), 'utf8'))
+    assert.equal(rec.status, 'shipped', id)
+    sum += rec.totalUsdAllRoles
+    assert.match(readlinkSync(join(prodDir(sd, ps[i]), 'current')), new RegExp(`/prod/${ps[i]}/releases/[0-9a-f]{40}$`))
+    assert.equal((await fetch(`http://127.0.0.1:${ps[i]}/notes`)).status, 200)
+    assert.ok(rec.signals.requests >= 5 && rec.signals.requests <= 6, `${id} sees only its own prod: ${rec.signals.requests}`)
+  }
+  assert.ok(Math.abs(lapSpent(join(sd, 'lap-ledger.jsonl')) - sum) < 1e-9)
+  assert.ok(Math.abs(sum - 8 * (0.2 + 0.05)) < 1e-9)
+})
+
+test('the lap cap holds under concurrent runs; after the first failure no step of the group starts', async () => {
+  const sd = home(), dir = scratch(), file = join(dir, 'lap.json'), ps = await ports(8), cap = CAPS.lapCostUsd
+  for (const id of ids) approvedChange(sd, id)
+  writeFileSync(file, JSON.stringify({ name: 'lap7c', steps: [lap7Group(ps, 8)] }))
+  CAPS.lapCostUsd = 1.5
+  const err = console.error
+  console.error = () => {}
+  try {
+    // Every builder spends its whole budget: the lap runs out while 8 runs are in flight.
+    const m: Model = async (t) => (t.role === 'builder' ? { ...(await builderModel(0)(t)), costUsd: t.maxCostUsd } : builderModel(0)(t))
+    assert.equal((await lapOut([file], m)).code, 1)
+  } finally { CAPS.lapCostUsd = cap; console.error = err }
+  assert.ok(lapSpent(join(sd, 'lap-ledger.jsonl')) <= 1.5 + 1e-9, String(lapSpent(join(sd, 'lap-ledger.jsonl'))))
+  const recs = ids.map((id) => JSON.parse(readFileSync(join(sd, 'runs', id, 'run.json'), 'utf8')))
+  assert.ok(recs.some((x) => /lap cost cap/.test(x.stopReason)), JSON.stringify(recs.map((x) => x.stopReason)))
+
+  // max 1: the first failure stops the group; the later steps never start.
+  const sd2 = home(), file2 = join(dir, 'lap2.json')
+  for (const id of ids) approvedChange(sd2, id)
+  writeFileSync(file2, JSON.stringify({ name: 'lap7s', steps: [lap7Group(ps, 1)] }))
+  console.error = () => {}
+  // A model error (not a used-up retry cap, which is a result) fails the first run.
+  try { assert.equal((await lapOut([file2], async () => { throw new Error('down') })).code, 1) } finally { console.error = err }
+  assert.deepEqual(ids.map((id) => existsSync(join(sd2, 'runs', id, 'run.json'))), [true, false, false, false, false, false, false, false])
+})
+
+test('a parallel group is refused unless its steps are independent: one command, distinct ids, ports and ship targets', async () => {
+  const run = (id: string, port: string, extra: Partial<Step> = { newShipTarget: '#' }): Step => ({ factory: ['run', id, '--port', port], ...extra })
+  const bad = (g: unknown, re: RegExp) => assert.throws(() => parseLap(JSON.stringify({ name: 'x', steps: [g] })), re)
+  parseLap(JSON.stringify({ name: 'x', steps: [lap7Group([1, 2, 3, 4, 5, 6, 7, 8], 3)] }))
+  assert.deepEqual(parseLap(JSON.stringify({ name: 'x', steps: [{ parallel: [run('a', '1'), run('b', '2')], max: 2 }] })).steps.length, 1)
+  bad({ parallel: [run('a', '1'), run('b', '2')] }, /needs max/)
+  bad({ parallel: [run('a', '1')], max: 0 }, /needs max/)
+  bad({ parallel: [], max: 1 }, /non-empty list/)
+  bad({ parallel: [run('a', '1'), run('b', '1')], max: 2 }, /share a --port/)
+  bad({ parallel: [{ factory: ['run', 'a'], newShipTarget: '#' }, { factory: ['run', 'b'], newShipTarget: '#' }], max: 2 }, /share a --port/) // both the default 8787
+  bad({ parallel: [run('a', '1'), run('a', '2')], max: 2 }, /share a change id/)
+  bad({ parallel: [run('a', '1', { factory: ['run', 'a', '--port', '1', '--ship-target', '/t'] }), run('b', '2', { factory: ['run', 'b', '--port=2', '--ship-target', '/x/../t'] })], max: 2 }, /share a ship target/)
+  bad({ parallel: [run('a', '1', {})], max: 1 }, /needs --ship-target or newShipTarget/)
+  bad({ parallel: [run('a', 'x')], max: 1 }, /not a port/)
+  bad({ parallel: [run('a', '1'), { factory: ['replicate', 'b', '--k', '2'] }], max: 2 }, /one command/)
+  bad({ parallel: [{ factory: ['draft', 'a', '--request', 'r'] }], max: 1 }, /only factory run \/ replicate/)
+  bad({ parallel: [{ exec: ['true'] }], max: 1 }, /only factory run/)
+  bad({ parallel: [{ parallel: [run('a', '1')], max: 1 }], max: 1 }, /only factory run/)
+  bad({ parallel: [run('a', '1')], max: 1, always: true }, /does not go with parallel/)
+  assert.throws(() => parseLap(JSON.stringify({ name: 'x', steps: [run('a', '1'), { parallel: [run('a', '1')], max: 1 }] })), /same step appears twice/)
+
+  // Two spellings of one checkout: refused when the group starts, before any run.
+  const sd = home(), dir = scratch(), t = gitTarget(), alias = join(dir, 'alias'), file = join(dir, 'lap.json')
+  symlinkSync(t, alias)
+  writeFileSync(file, JSON.stringify({ name: 'lapa', steps: [{ parallel: [run('a', '1', { factory: ['run', 'a', '--port', '1', '--ship-target', t] }), run('b', '2', { factory: ['run', 'b', '--port', '2', '--ship-target', alias] })], max: 2 }] }))
+  const err = console.error, errs: string[] = []
+  console.error = (...a: unknown[]) => { errs.push(a.join(' ')) }
+  try { assert.equal(await main(['lap', file], async () => { throw new Error('model called') }), 1) } finally { console.error = err }
+  assert.match(errs.join('\n'), /two runs of the group ship to the same checkout/)
+  assert.ok(!existsSync(join(sd, 'runs', 'a')) && !existsSync(join(sd, 'runs', 'b')))
 })

@@ -1,7 +1,9 @@
 // The 3 stop conditions: per-change cost cap, retry cap, emergency stop from outside the process.
 // Any of them ends the change as FAILED. Nobody is asked; nothing is re-enqueued.
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import type { Model } from './adapter.ts'
+import { randomUUID } from 'node:crypto'
+import { appendFileSync, existsSync, readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
+import type { Model, Result } from './adapter.ts'
 
 // The ONE place for caps. Changing them is an owner decision, not something a role can do.
 // maxAttempts: 5 since lap 3 (owner decision 2026-10-17; it was 3). builderCallUsd / judgeCallUsd: per-call
@@ -43,15 +45,52 @@ export type Guard = {
 }
 
 // Lap-wide spend. A lap is one owner-budgeted run of the factory loop; its ledger counts every model call
-// of every change and command in this state dir.
-// ponytail: read-modify-write without a lock; assumes one factory command at a time.
-const readLap = (f: string): { totalUsd: number; byRoleModel?: CostSplit } => (existsSync(f) ? JSON.parse(readFileSync(f, 'utf8')) : { totalUsd: 0 })
-export const lapSpent = (f: string): number => readLap(f).totalUsd
-export function chargeLap(f: string, usd: number, role: string, byModel?: Record<string, number>): void {
-  const l = readLap(f)
-  writeFileSync(f, JSON.stringify({ note: 'lap-wide client-side estimate, all roles and commands; byRoleModel: role -> model -> USD (since lap 4)',
-    totalUsd: l.totalUsd + usd, byRoleModel: addSplit(l.byRoleModel ?? {}, { [role]: modelSplit(usd, byModel) }) }, null, 2))
+// of every change and command in this state dir. Append-only (#13), so parallel runs never lose a charge:
+// before a call a hold line reserves its whole budget, after it a charge line settles it. A hold that was never
+// settled (the process died mid-call, or the charge could not be written) counts in full.
+// A state dir from before #13 has lap-ledger.json (totals); it is still counted, never written.
+type LapLine = { call: string; role: string; hold?: number; usd?: number; byModel?: Record<string, number> }
+const finite = (x: unknown): x is number => typeof x === 'number' && Number.isFinite(x)
+const usdOk = (x: unknown): x is number => finite(x) && x >= 0
+export function lapTotals(f: string): { totalUsd: number; byRoleModel: CostSplit } {
+  const bad = (m: string) => new Error(`lap ledger ${f}: ${m}; refusing to guess what was spent`)
+  const legacy = f.replace(/\.jsonl$/, '.json')
+  const old = legacy !== f && existsSync(legacy) ? JSON.parse(readFileSync(legacy, 'utf8')) : { totalUsd: 0 }
+  if (!usdOk(old.totalUsd)) throw bad(`${legacy} has no valid totalUsd`)
+  const byRoleModel = addSplit({}, old.byRoleModel ?? {})
+  const held = new Map<string, LapLine>(), settled = new Set<string>()
+  let totalUsd = old.totalUsd
+  for (const [i, l] of (existsSync(f) ? readFileSync(f, 'utf8').split('\n').filter(Boolean) : []).entries()) {
+    let x: LapLine
+    try { x = JSON.parse(l) } catch { throw bad(`line ${i + 1} is not JSON`) }
+    if (typeof x?.call !== 'string' || typeof x.role !== 'string' || (x.hold === undefined) === (x.usd === undefined)) throw bad(`line ${i + 1} is neither a hold nor a charge`)
+    if (x.hold !== undefined) { if (!usdOk(x.hold)) throw bad(`line ${i + 1}: bad hold`); held.set(x.call, x); continue }
+    if (!usdOk(x.usd) || !Object.values(x.byModel ?? {}).every(finite)) throw bad(`line ${i + 1}: bad charge`)
+    settled.add(x.call)
+    totalUsd += x.usd
+    addSplit(byRoleModel, { [x.role]: x.byModel ?? {} })
+  }
+  for (const [call, h] of held) if (!settled.has(call)) { totalUsd += h.hold!; addSplit(byRoleModel, { [h.role]: { [UNATTRIBUTED]: h.hold! } }) }
+  return { totalUsd, byRoleModel }
 }
+// ponytail: re-reads and sums the whole file on every call (O(lines)); a lap has hundreds of calls.
+export const lapSpent = (f: string): number => lapTotals(f).totalUsd
+const line = (f: string, l: LapLine) => appendFileSync(f, `${JSON.stringify({ at: new Date().toISOString(), ...l })}\n`) // one write: O_APPEND keeps lines whole
+export function holdLap(f: string, usd: number, role: string): string {
+  const call = randomUUID()
+  line(f, { call, role, hold: usd })
+  return call
+}
+export function chargeLap(f: string, usd: number, role: string, byModel?: Record<string, number>, call: string = randomUUID()): void {
+  line(f, { call, role, usd, byModel: modelSplit(usd, byModel) })
+}
+// Calls of THIS process holding lap budget right now. They settle soon, so a call that would get less than
+// it would with them settled waits for them instead of starting short.
+// ponytail: per process; another factory command on the same state dir is only seen through its hold lines.
+const inFlight = new Map<string, number>()
+const flying = (f: string, d: number) => inFlight.set(resolve(f), (inFlight.get(resolve(f)) ?? 0) + d)
+// CLI budgets have 4 decimals: round down, so a call is never allowed more than was reserved for it.
+const floor4 = (x: number) => Math.floor(x * 1e4 + 1e-9) / 1e4
 
 export function mergeLedger(a: Ledger | null, b: Ledger): Ledger {
   if (!a) return b
@@ -62,7 +101,7 @@ export function mergeLedger(a: Ledger | null, b: Ledger): Ledger {
 }
 
 // spentUsd: already spent on this change elsewhere (the drafter), counted against capUsd.
-// lapFile: the lap ledger; each call also gets at most what is left of CAPS.lapCostUsd.
+// lapFile: the lap ledger; each call also gets at most what is left of CAPS.lapCostUsd (minus what calls in flight hold).
 export function startGuard(capUsd: number, stopFile: string, o: { spentUsd?: number; lapFile?: string } = {}): Guard {
   if (!(Number.isFinite(capUsd) && capUsd > 0)) throw new Error(`cost cap must be a positive number, got ${capUsd}`)
   const ac = new AbortController()
@@ -89,20 +128,35 @@ export function startGuard(capUsd: number, stopFile: string, o: { spentUsd?: num
     model: (m) => async (task) => {
       check()
       const spent = (o.spentUsd ?? 0) + ledger.totalUsd
-      const lapLeft = o.lapFile ? CAPS.lapCostUsd - lapSpent(o.lapFile) : Infinity
+      const want = Math.min(task.maxCostUsd, capUsd - spent)
+      let lapLeft = Infinity
+      // Read and reserve with no await between: no other call of this process can take the same room.
+      if (o.lapFile) for (;;) {
+        lapLeft = CAPS.lapCostUsd - lapSpent(o.lapFile)
+        if (lapLeft >= want || !inFlight.get(resolve(o.lapFile))) break
+        await new Promise((r) => setTimeout(r, CAPS.pollMs))
+        check()
+      }
       if (lapLeft <= 0) throw new Stop(`lap cost cap reached ($${CAPS.lapCostUsd})`)
       if (capUsd - spent <= 0) throw new Stop(`cost cap reached ($${spent.toFixed(4)} of $${capUsd})`)
-      const remaining = Math.min(task.maxCostUsd, capUsd - spent, lapLeft) // a call's own ceiling (e.g. classifier) binds too
-      const r = await m({ ...task, maxCostUsd: remaining, signal: ac.signal })
-      // No reported cost (e.g. killed on timeout): money may still have been spent. Charge the whole
-      // budget the call was allowed, so the cap still binds (the next call then gets nothing).
+      const remaining = floor4(Math.min(want, lapLeft)) // a call's own ceiling (e.g. classifier) binds too
+      if (remaining <= 0) throw new Stop(`cost cap reached (less than $0.0001 left)`)
+      const call = o.lapFile ? holdLap(o.lapFile, remaining, task.role) : ''
+      if (o.lapFile) flying(o.lapFile, 1)
+      let r: Result, thrown: unknown
+      try { r = await m({ ...task, maxCostUsd: remaining, signal: ac.signal }) } catch (e) { thrown = e; r = { ok: false, text: '', costUsd: null, error: `model threw: ${(e as Error).message}` } }
+      // No reported cost (e.g. killed on timeout, or the model threw): money may still have been spent. Charge
+      // the whole budget the call was allowed, so the cap still binds (the next call then gets nothing).
       const cost = r.costUsd ?? remaining
-      if (r.costUsd === null) ledger.uncounted.push({ role: task.role, reason: r.error ?? 'no cost reported', chargedUsd: remaining })
-      ledger.byRole[task.role] = (ledger.byRole[task.role] ?? 0) + cost
-      if (r.model) ledger.modelByRole![task.role] = r.model
-      addSplit(ledger.byRoleModel!, { [task.role]: modelSplit(cost, r.costByModel) })
-      ledger.totalUsd += cost
-      if (o.lapFile) chargeLap(o.lapFile, cost, task.role, r.costByModel)
+      try {
+        if (r.costUsd === null) ledger.uncounted.push({ role: task.role, reason: r.error ?? 'no cost reported', chargedUsd: remaining })
+        ledger.byRole[task.role] = (ledger.byRole[task.role] ?? 0) + cost
+        if (r.model) ledger.modelByRole![task.role] = r.model
+        addSplit(ledger.byRoleModel!, { [task.role]: modelSplit(cost, r.costByModel) })
+        ledger.totalUsd += cost
+        if (o.lapFile) chargeLap(o.lapFile, cost, task.role, r.costByModel, call) // if this throws, the hold still counts in full
+      } finally { if (o.lapFile) flying(o.lapFile, -1) } // after the charge: a waiting call never sees neither
+      if (thrown) throw thrown
       check()
       if (spent + cost > capUsd) throw new Stop(`cost cap exceeded ($${(spent + cost).toFixed(4)} of $${capUsd})`)
       if (o.lapFile && lapSpent(o.lapFile) > CAPS.lapCostUsd) throw new Stop(`lap cost cap exceeded ($${CAPS.lapCostUsd})`)

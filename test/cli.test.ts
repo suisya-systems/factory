@@ -93,19 +93,21 @@ test('probe-isolation: a canary the model wrote into its workdir counts as found
   assert.ok(!existsSync(join(vaultDir(sd, 'p2'), 'probe-canary.txt')))
 })
 
-test('lap-wide cap: once the lap ledger reaches it, no command starts another model call', async () => {
-  const lap = join(sd, 'lap-ledger.json')
-  const saved = existsSync(lap) ? readFileSync(lap, 'utf8') : null
-  writeFileSync(lap, JSON.stringify({ totalUsd: CAPS.lapCostUsd }))
-  let calls = 0
-  const m = async () => { calls++; return { ok: true, text: '', costUsd: 0.1 } }
-  try {
-    assert.equal(await main(['probe-isolation', 'p3'], m), 3)
-    const req = join(tmp('req3'), 'req.txt')
-    writeFileSync(req, 'x')
-    await assert.rejects(main(['draft', 'd3', '--request', req], m), /lap cost cap/)
-    assert.equal(calls, 0)
-  } finally { saved === null ? writeFileSync(lap, '{"totalUsd":0}') : writeFileSync(lap, saved) }
+test('lap-wide cap: once the lap ledger reaches it, no command starts another model call (also a pre-#13 lap-ledger.json)', async () => {
+  for (const [f, full] of [['lap-ledger.jsonl', `${JSON.stringify({ call: 'c', role: 'builder', usd: CAPS.lapCostUsd })}\n`], ['lap-ledger.json', JSON.stringify({ totalUsd: CAPS.lapCostUsd })]]) {
+    const lap = join(sd, f)
+    const saved = existsSync(lap) ? readFileSync(lap, 'utf8') : ''
+    writeFileSync(lap, full)
+    let calls = 0
+    const m = async () => { calls++; return { ok: true, text: '', costUsd: 0.1 } }
+    try {
+      assert.equal(await main(['probe-isolation', 'p3'], m), 3)
+      const req = join(tmp('req3'), 'req.txt')
+      writeFileSync(req, 'x')
+      await assert.rejects(main(['draft', 'd3', '--request', req], m), /lap cost cap/)
+      assert.equal(calls, 0, f)
+    } finally { saved ? writeFileSync(lap, saved) : unlinkSync(lap) }
+  }
 })
 
 test('with the STOP file present every command but stop, serve (internal) and help refuses before doing anything', async () => {
@@ -115,7 +117,7 @@ test('with the STOP file present every command but stop, serve (internal) and he
     for (const argv of [['approve', 'v1', '--by', 'o', '--version', 'x'], ['observe'], ['probe-isolation', 'p9']]) {
       assert.equal(await main(argv, async () => { throw new Error('model called') }), 1, argv[0])
     }
-    assert.ok(!existsSync(join(sd, 'prod', 'signals.json')), 'observe ran')
+    assert.ok(!existsSync(join(sd, 'prod', '8787', 'signals.json')), 'observe ran')
     await assert.rejects(main(['serve', '--port', '1']), /ENOENT/) // got past the stop check (no release to serve)
     assert.equal(await main(['--help']), 0)
     assert.equal(await main(['stop']), 0)
