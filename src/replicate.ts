@@ -64,13 +64,14 @@ export async function replicate(o: ReplicateOpts): Promise<Replicate[]> {
     probes = validateProbes(JSON.parse(raw.toString('utf8')))
     probesSha256 = createHash('sha256').update(raw).digest('hex')
   }
+  // The replicates dir marks the change as replicated (run refuses it): made only once builds really start.
   const dir = replicatesDir(o.stateDir, id)
-  mkdirSync(dir, { recursive: true })
 
   const stopFile = o.stopFile ?? process.env.FACTORY_STOP_FILE ?? join(o.stateDir, 'STOP')
   if (o.rescore) {
     const guard = startGuard(CAPS.maxCostUsd, stopFile) // no model call; only the emergency stop
     const out: Replicate[] = []
+    if (!existsSync(dir)) return out
     try {
       for (const f of readdirSync(dir).filter((f) => f.endsWith('.json')).sort()) {
         guard.check()
@@ -85,6 +86,8 @@ export async function replicate(o: ReplicateOpts): Promise<Replicate[]> {
 
   if (!(Number.isInteger(o.k) && o.k >= 1)) throw new Error(`--k must be an integer >= 1, got ${o.k}`)
   const capUsd = o.maxCostUsd ?? CAPS.maxCostUsd
+  if (!(Number.isFinite(capUsd) && capUsd > 0)) throw new Error(`max cost must be a positive number, got ${capUsd}`)
+  mkdirSync(dir, { recursive: true })
   const costFile = join(runDir, 'replicate-cost.json')
   const draftFile = join(runDir, 'draft-cost.json')
   const before: Ledger | null = existsSync(costFile) ? readJson(costFile) : null
