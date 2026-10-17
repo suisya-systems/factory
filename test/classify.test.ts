@@ -250,6 +250,32 @@ test('a rejected drafter reply gets one repair round with the error, in a fresh 
   assert.equal(bad.seen.filter((t) => t.role === 'scenario-drafter').length, 2)
 })
 
+test('lap 6: --minority asks for marked minority choices; a reply without a well-formed one citing real ids is repaired, then fails', async () => {
+  const ok = `[minority] leftover yen: goes to non-payers in turn (most would: everyone in turn); scenarios: ${createGet.id}`
+  const run = async (minority: boolean, ...replies: string[][]) => {
+    const seen: Task[] = []
+    const m: Model = async (t) => {
+      seen.push(t)
+      const reply = t.role === 'spec-drafter' ? { spec: SPEC, interface: IFACE, assumptions: [] }
+        : t.role === 'scenario-drafter' ? { scenarios: [createGet], assumptions: replies.shift() }
+          : { steps: [{ status: null, body: null, basis: 'convention', quote: '' }, { status: null, body: null, basis: 'convention', quote: '' }] }
+      return { ok: true, costUsd: 0.1, text: JSON.stringify(reply) }
+    }
+    return { seen, d: await draft(m, 'x', { minority }).catch((e: Error) => e) }
+  }
+  const plain = await run(false, ['titles are short'])
+  assert.ok(!(plain.d instanceof Error) && !plain.seen[1].instruction.includes('MINORITY'))
+  const good = await run(true, ['titles are short'], [ok])
+  assert.match(good.seen[1].instruction, /MINORITY CHOICES/)
+  assert.match(good.seen[2].instruction, /REJECTED: scenario drafter: no "\[minority\]/)
+  assert.ok(!(good.d instanceof Error))
+  assert.match(approvalSummary('x', good.d, 'v'), /## Minority choices[^\n]*\n- \(scenario writer\) \[minority\] leftover yen: goes to non-payers/)
+  for (const [bad, why] of [[ok.replace(createGet.id, 'nope'), /unknown scenario "nope"/], [ok.replace(' (most would: everyone in turn)', ''), /malformed/]] as const) {
+    const r = await run(true, [bad], [bad])
+    assert.ok(r.d instanceof Error && why.test(r.d.message), String(r.d))
+  }
+})
+
 test('lap 3: the spec drafter must leave open points under "## Undecided"; the builder and the approver see them', async () => {
   const noUndecided: Model = async (t) => ({ ok: true, costUsd: 0, text: JSON.stringify(t.role === 'spec-drafter' ? { spec: '# Memo API\n- all rules decided', interface: IFACE, assumptions: [] } : {}) })
   await assert.rejects(draft(noUndecided, 'x'), /Undecided/)
