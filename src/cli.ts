@@ -71,6 +71,7 @@ export async function main(argv: string[], model: Model = claudeModel): Promise<
   switch (cmd) {
     case 'draft': {
       if (!id || !v.request) break
+      if (existsSync(join(vaultDir(sd, id), 'approval.json'))) { console.error(`factory: ${id} is already approved; its version is fixed. Draft a new change instead.`); return 1 } // before any spend
       const runDir = join(sd, 'runs', checkId(id))
       const costFile = join(runDir, 'draft-cost.json')
       const before: Ledger | null = existsSync(costFile) ? JSON.parse(readFileSync(costFile, 'utf8')) : null // earlier (re-)drafts of this id
