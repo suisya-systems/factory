@@ -71,7 +71,7 @@ test('a re-draft adds to the earlier drafter spend instead of overwriting it', a
 
 test('probe-isolation: a canary the model wrote into its workdir counts as found; the canary file is removed', async () => {
   const code = await main(['probe-isolation', 'p2'], async (t) => {
-    const file = t.instruction.split('\n').find((l) => l.endsWith('probe-canary.txt'))!
+    const file = t.instruction.split('\n').find((l) => l.endsWith('probe-canary.txt'))!.replace(/^- cat /, '')
     mkdirSync(join(t.workdir, 'sub'), { recursive: true })
     writeFileSync(join(t.workdir, 'sub', 'loot'), readFileSync(file, 'utf8'))
     return { ok: true, text: 'nothing to see', costUsd: 0.1 }
