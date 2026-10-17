@@ -5,7 +5,7 @@
 - 依頼は新規作成ではなく、1 周目で出荷したメモ API の拡張（[requests/memo-tags.md](../requests/memo-tags.md)）
 - 下書きは 3 段で、それぞれ別セッションになる
   1. 仕様の下書き役
-  2. シナリオの下書き役（仕様を見ない）
+  2. シナリオの下書き役（仕様も仕様の下書き役の仮定も見ない。見るのは依頼文・既存アプリ・インタフェース（名前と形）だけ）
   3. 分類（シナリオ 1 本ごとに、仕様だけを見たセッションが応答を予測する）
 - 入口の要約に、分類の結果と「食い違い一覧」が載る
 
@@ -83,17 +83,19 @@ npm run factory -- probe-isolation lap2-probe; echo "exit=$?"
 
 ### 4. 下書き（実モデル呼び出し、上限 $10）
 
+2026-10-17 の 2 周目では、この段を最初は変更 id `memo-tags-1` で実行した。そのときシナリオの下書き役には、仕様の下書き役の仮定も渡していた。仮定に仕様の規則がほぼすべて入っていたため、オーナーは memo-tags-1 を承認しなかった。そのうえで、シナリオの下書き役には依頼文・既存アプリ・インタフェースだけを渡すように工場を直し、`memo-tags-2` で下書きし直すと決めた。経緯は [lap-2-report.md](lap-2-report.md) にある。以下は直した後の手順である。
+
 ```bash
-npm run factory -- draft memo-tags-1 --request requests/memo-tags.md --base "$STATE/ship/factory-practice-memo"; echo "exit=$?"
+npm run factory -- draft memo-tags-2 --request requests/memo-tags.md --base "$STATE/ship/factory-practice-memo"; echo "exit=$?"
 ```
 
-- 期待: `drafted memo-tags-1 (version <hash>). Factory stopped; waiting for human approval. Summary: <path>`、`exit=0`
+- 期待: `drafted memo-tags-2 (version <hash>). Factory stopped; waiting for human approval. Summary: <path>`、`exit=0`
 - 所要時間の目安: 下書き 2 回で数分、分類はシナリオ 1 本ごとに数十秒〜数分
-- 失敗時（`exit=1`）: 出力を作成担当へ送る。費用は `$STATE/runs/memo-tags-1/draft-cost.json` に残る
+- 失敗時（`exit=1`）: 出力を作成担当へ送る。費用は `$STATE/runs/memo-tags-2/draft-cost.json` に残る
 
 **停止点 B（入口の承認、必須の人間ゲート）**: 工場はここで止まる。
 
-1. 作成担当が `$STATE/vault/memo-tags-1/approval-summary.md` を読み、オーナー向けの 1 画面要約を作る。形は 1 周目を踏襲し、「食い違い一覧」を加える。
+1. 作成担当が `$STATE/vault/memo-tags-2/approval-summary.md` を読み、オーナー向けの 1 画面要約を作る。形は 1 周目を踏襲し、「食い違い一覧」を加える。
 2. 実行担当がその要約をオーナーに渡す。
 3. オーナーの承認を得るまで次へ進まない。
 
@@ -105,19 +107,19 @@ npm run factory -- draft memo-tags-1 --request requests/memo-tags.md --base "$ST
 ### 5. 承認（オーナーの判断を実行担当が記録する）
 
 ```bash
-npm run factory -- approve memo-tags-1 --by <承認者名> --version <要約に書かれた version>
+npm run factory -- approve memo-tags-2 --by <承認者名> --version <要約に書かれた version>
 ```
 
-期待: `approved memo-tags-1 by <name>; version <hash>`
+期待: `approved memo-tags-2 by <name>; version <hash>`
 
 ### 6. 作る → 確かめる → 出す → 本番を見る（実モデル呼び出し、上限は下書きと合わせて $28）
 
 ```bash
-npm run factory -- run memo-tags-1 --ship-target "$STATE/ship/factory-practice-memo" --max-cost 28 --port 8787; echo "exit=$?"
+npm run factory -- run memo-tags-2 --ship-target "$STATE/ship/factory-practice-memo" --max-cost 28 --port 8787; echo "exit=$?"
 ```
 
-- 合格して出荷した場合: `memo-tags-1: shipped; attempts N`、`exit=0`。アプリは `http://127.0.0.1:8787` で動き続ける。
-- 失敗した場合（費用上限・やり直し上限・緊急停止・出荷先の HEAD が変わった・エラー）: `memo-tags-1: failed (<理由>); attempts N`、`exit=1`。
+- 合格して出荷した場合: `memo-tags-2: shipped; attempts N`、`exit=0`。アプリは `http://127.0.0.1:8787` で動き続ける。
+- 失敗した場合（費用上限・やり直し上限・緊急停止・出荷先の HEAD が変わった・エラー）: `memo-tags-2: failed (<理由>); attempts N`、`exit=1`。
   - これも正しい結果の 1 つ。人に聞かず、自動で再投入もしない。
   - 2 周目は、前提 2（やり直しで収束するか）を試す周である。失敗で終わっても、その記録が成果になる。
 - 所要時間の目安: 作る役の呼び出し 1 回で数分〜20 分（上限 20 分）、最大 3 回。
@@ -126,9 +128,9 @@ npm run factory -- run memo-tags-1 --ship-target "$STATE/ship/factory-practice-m
 
 記録は次の場所にある。作成担当がこれを読んで `docs/lap-2-report.md` を書く。
 
-- `$STATE/runs/memo-tags-1/run.json`
-- `$STATE/runs/memo-tags-1/draft-cost.json`
-- `$STATE/vault/memo-tags-1/`（`classification.json` を含む）
+- `$STATE/runs/memo-tags-2/run.json`
+- `$STATE/runs/memo-tags-2/draft-cost.json`
+- `$STATE/vault/memo-tags-2/`（`classification.json` を含む）
 - `$STATE/prod/signals.json`
 - `$STATE/lap-ledger.json`
 

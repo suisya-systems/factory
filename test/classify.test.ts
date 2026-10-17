@@ -41,8 +41,8 @@ test('draft: spec and scenarios come from separate sessions; the scenario writer
   assert.ok(!sc.includes('POST /notes creates a note'), 'scenario writer saw the spec')
   assert.match(sc, /a memo api/)
   assert.match(sc, /existing code/)
-  assert.match(sc, /Interface \(names and shapes only\): .*"POST \/notes"/) // shared vocabulary, as an assumption
-  assert.match(sc, /- no auth/)
+  assert.match(sc, /INTERFACE [^\n]*\n\{"endpoints":\["POST \/notes"/) // shared vocabulary
+  assert.ok(!sc.includes('no auth'), 'scenario writer saw the spec writer\'s assumptions')
   assert.match(d.spec, /## Interface/) // the builder gets the same names
   assert.deepEqual(d.assumptions.slice(1), ['no auth', '(scenario writer) titles are short'])
   assert.deepEqual(seen.map((t) => t.maxCostUsd), [1, 1, 0.5])
