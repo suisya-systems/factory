@@ -70,7 +70,7 @@ export function startGuard(capUsd: number, stopFile: string, o: { spentUsd?: num
       const lapLeft = o.lapFile ? CAPS.lapCostUsd - lapSpent(o.lapFile) : Infinity
       if (lapLeft <= 0) throw new Stop(`lap cost cap reached ($${CAPS.lapCostUsd})`)
       if (capUsd - spent <= 0) throw new Stop(`cost cap reached ($${spent.toFixed(4)} of $${capUsd})`)
-      const remaining = Math.min(capUsd - spent, lapLeft)
+      const remaining = Math.min(task.maxCostUsd, capUsd - spent, lapLeft) // a call's own ceiling (e.g. classifier) binds too
       const r = await m({ ...task, maxCostUsd: remaining, signal: ac.signal })
       // No reported cost (e.g. killed on timeout): money may still have been spent. Charge the whole
       // budget the call was allowed, so the cap still binds (the next call then gets nothing).

@@ -3,8 +3,9 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import type { Classification } from '../src/classify.ts'
 import type { Scenario } from '../src/scenario.ts'
-import { approve, hash, stateDir, writeDraft } from '../src/vault.ts'
+import { approve, hash, stateDir, writeDraft, type Base } from '../src/vault.ts'
 
 export const REPO = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -44,8 +45,16 @@ export const SCENARIOS: Scenario[] = [
     steps: [{ method: 'GET', path: '/notes/quokka-missing-42', expect: { status: 404 } }] },
 ]
 
-export function approvedChange(sd: string, id: string, scenarios = SCENARIOS): string {
-  const dir = writeDraft(sd, id, { spec: '# Memo API\n- CRUD on /notes\n', scenarios, assumptions: ['ids are strings'] })
+// Independent labels for SCENARIOS, one of each kind of outcome.
+export const CLASSIFICATION: Classification[] = [
+  { id: 'create-get', label: 'readable', basis: 'spec', checks: [] },
+  { id: 'list-empty', label: 'readable', basis: 'code', checks: [] },
+  { id: 'update-title', label: 'unstated', checks: [] },
+  { id: 'missing-404', label: 'contradicts', checks: [] },
+]
+
+export function approvedChange(sd: string, id: string, scenarios = SCENARIOS, base?: Base): string {
+  const dir = writeDraft(sd, id, { spec: '# Memo API\n- CRUD on /notes\n', scenarios, assumptions: ['ids are strings'], classification: CLASSIFICATION, base })
   return approve(sd, id, { by: 'test', version: hash(dir) })
 }
 

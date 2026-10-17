@@ -66,7 +66,7 @@ test('a re-draft adds to the earlier drafter spend instead of overwriting it', a
   await assert.rejects(main(['draft', 'd2', '--request', req], m(3)))
   const l = JSON.parse(readFileSync(join(sd, 'runs', 'd2', 'draft-cost.json'), 'utf8'))
   assert.equal(l.totalUsd, 5)
-  assert.deepEqual(l.byRole, { drafter: 5 })
+  assert.deepEqual(l.byRole, { 'spec-drafter': 5 })
 })
 
 test('probe-isolation: a canary the model wrote into its workdir counts as found; the canary file is removed', async () => {

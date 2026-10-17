@@ -49,8 +49,11 @@ test('full lap ships a passing build and records signals; builder never sees sce
   assert.equal(r.approvedVersion, version)
   assert.ok(r.attempts.every((a) => a.approvedVersion === version))
   const a1 = r.attempts[0]
-  assert.deepEqual(a1.passRate, { inSpec: { passed: 2, total: 3 }, notInSpec: { passed: 0, total: 1 } })
-  assert.deepEqual(r.attempts[1].passRate, { inSpec: { passed: 3, total: 3 }, notInSpec: { passed: 1, total: 1 } })
+  const one = (passed: number) => ({ passed, total: 1 })
+  assert.deepEqual(a1.passRate, { inSpec: { passed: 2, total: 3 }, notInSpec: { passed: 0, total: 1 },
+    byLabel: { 'readable-spec': one(1), 'readable-code': one(1), unstated: one(0), contradicts: one(0) } })
+  assert.deepEqual(r.attempts[1].passRate, { inSpec: { passed: 3, total: 3 }, notInSpec: { passed: 1, total: 1 },
+    byLabel: { 'readable-spec': one(1), 'readable-code': one(1), unstated: one(1), contradicts: one(1) } })
   assert.deepEqual(r.cost.byRole, { builder: 1.5, judge: 0.30000000000000004 })
 
   // retry feedback = summaries only
@@ -82,4 +85,14 @@ test('full lap ships a passing build and records signals; builder never sees sce
     const txt = readFileSync(f, 'utf8')
     for (const m of CLI_MARKERS) assert.ok(!m.test(txt), `${f} contains ${m}`)
   }
+})
+
+test('a ship target that moved since the draft is refused before any build', async () => {
+  const target = gitTarget()
+  approvedChange(sd, 'memo-moved', SCENARIOS, { baseSha: 'f'.repeat(40), requestSha256: null })
+  let calls = 0
+  const r = await runChange({ changeId: 'memo-moved', shipTarget: target, model: async () => { calls++; return { ok: true, text: '', costUsd: 0 } }, stateDir: sd, port: await freePort(), stopFile: join(sd, 'NOSTOP') })
+  assert.equal(r.status, 'failed')
+  assert.match(r.stopReason, /no longer at the approved base/)
+  assert.equal(calls, 0)
 })

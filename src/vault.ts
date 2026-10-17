@@ -6,13 +6,17 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'n
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { protect } from './sandbox.ts'
+import type { Classification } from './classify.ts'
 import { validateScenarios, type Scenario } from './scenario.ts'
 
 const REPO = dirname(dirname(fileURLToPath(import.meta.url)))
-const FILES = ['spec.md', 'scenarios.json', 'assumptions.json'] as const
+// Everything the owner's approval covers. classification.json: the independent readable-from-spec labels
+// shown in the summary. base.json: the app version the drafters saw and the request text's hash.
+const FILES = ['spec.md', 'scenarios.json', 'assumptions.json', 'classification.json', 'base.json'] as const
 
-export type Draft = { spec: string; scenarios: Scenario[]; assumptions: string[] }
-export type Approved = Draft & { version: string }
+export type Base = { baseSha: string | null; requestSha256: string | null }
+export type Draft = { spec: string; scenarios: Scenario[]; assumptions: string[]; classification?: Classification[]; base?: Base }
+export type Approved = Required<Draft> & { version: string }
 
 export function checkId(id: string): string {
   if (!/^[a-z0-9][a-z0-9-]{0,63}$/i.test(id)) throw new Error(`bad change id: ${id}`)
@@ -44,6 +48,8 @@ export function writeDraft(sd: string, id: string, d: Draft): string {
   writeFileSync(join(dir, 'spec.md'), d.spec)
   writeFileSync(join(dir, 'scenarios.json'), JSON.stringify(validateScenarios(d.scenarios), null, 2))
   writeFileSync(join(dir, 'assumptions.json'), JSON.stringify(d.assumptions, null, 2))
+  writeFileSync(join(dir, 'classification.json'), JSON.stringify(d.classification ?? [], null, 2))
+  writeFileSync(join(dir, 'base.json'), JSON.stringify(d.base ?? { baseSha: null, requestSha256: null }, null, 2))
   return dir
 }
 
@@ -71,5 +77,7 @@ export function loadApproved(sd: string, id: string): Approved {
     spec: readFileSync(join(dir, 'spec.md'), 'utf8'),
     scenarios: validateScenarios(JSON.parse(readFileSync(join(dir, 'scenarios.json'), 'utf8'))),
     assumptions: JSON.parse(readFileSync(join(dir, 'assumptions.json'), 'utf8')),
+    classification: JSON.parse(readFileSync(join(dir, 'classification.json'), 'utf8')),
+    base: JSON.parse(readFileSync(join(dir, 'base.json'), 'utf8')),
   }
 }
