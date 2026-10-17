@@ -26,7 +26,8 @@ export function extractJson(text: string): any {
 // ---- drafters ----
 // Two separate sessions from the same request. The spec drafter writes the spec; the scenario drafter
 // writes the hidden scenarios WITHOUT seeing the spec: it gets the request, the existing app and the
-// spec drafter's assumptions (incl. the interface: names and shapes only, so both use one vocabulary).
+// interface (names and shapes only, so both use one vocabulary). Not the spec drafter's assumptions:
+// in lap 2 they carried nearly every rule of the spec (owner decision 2026-10-17: pass the interface only).
 // Then every scenario is classified by a third, spec-only procedure (classify.ts).
 export const INTERFACE_KEYS = ['endpoints', 'queryParams', 'fields', 'listShape', 'conflictToken']
 
@@ -40,16 +41,16 @@ defaults, limits or page boundaries). It is given to a separate scenario writer 
 You cannot ask questions: record every guess in assumptions.`
 
 const SCENARIO_FORMAT = `Reply with ONE JSON object and nothing else:
-{"assumptions": ["<one line each: anything YOU assumed beyond the given assumptions>"],
+{"assumptions": ["<one line each: anything you assumed because the request did not say>"],
  "scenarios": [{"id": "kebab-id", "title": "...", "summary": "<one line, plain words; this is all the builder sees if it fails. It must NOT contain any path, any status code, or any string value (3+ chars) used in that scenario's steps>",
-   "inSpec": <true if the REQUEST or the GIVEN ASSUMPTIONS state this behaviour, false if it is an unstated but reasonable expectation>, "kind": "<crud|validation|not-found|paging|filter|conflict|...>",
+   "inSpec": <true if the REQUEST states this behaviour, false if it is an unstated but reasonable expectation>, "kind": "<crud|validation|not-found|paging|filter|conflict|...>",
    "steps": [{"method": "GET|POST|PUT|PATCH|DELETE", "path": "/...", "body": <json, optional, not on GET>, "headers": {<optional>},
      "expect": {"status": <int or [ints]>, "json": <partial deep subset, optional>, "jsonHas": ["dot.path", ...], "isArray": <bool>, "length": <int, or {"dot.path": int} for arrays inside the body>},
      "capture": {"name": "dot.path", "name2": "header:<response header name>"}}]}]}
 "{{name}}" in a later path/body/headers/json is replaced by a captured value (a value that is exactly "{{name}}" keeps the captured type).
 Every expect needs at least one check. Arrays in "json" match by position (a prefix), so only list items whose order is fixed;
 use "length" to check that a list holds exactly the expected items.
-Use ONLY the endpoint, parameter and field names in the interface assumption. Where neither the request nor the assumptions fix a status code, accept every reasonable one (e.g. [409, 412]).
+Use ONLY the endpoint, parameter and field names in the INTERFACE. Where the request does not fix a status code, accept every reasonable one (e.g. [409, 412]).
 Each scenario starts from an EMPTY app.
 Write 8-15 scenarios, a mix of inSpec true and false. You cannot ask questions: record every guess in assumptions.`
 
@@ -93,7 +94,7 @@ export async function draft(model: Model, request: string, o: { signals?: string
   const spec = `${j.spec.trimEnd()}\n\n## Interface (names and shapes, shared with the scenario writer)\n\n\`\`\`json\n${j.iface}\n\`\`\`\n`
 
   const k = await ask(model, 'scenario-drafter', `You are the scenario writer of a software factory. Write hidden acceptance scenarios (HTTP JSON API) for the request. ` +
-    `A builder will implement a spec you do not see; your scenarios judge it.\n\n${req}\nASSUMPTIONS (made by the spec writer; follow them):\n${assumptions.map((x) => `- ${x}`).join('\n')}\n\n${SCENARIO_FORMAT}`,
+    `A builder will implement a spec you do not see; your scenarios judge it.\n\n${req}\nINTERFACE (names and shapes the builder uses; it says nothing about behaviour):\n${j.iface}\n\n${SCENARIO_FORMAT}`,
   (k) => ({ scenarios: validateScenarios(k.scenarios), more: k.assumptions === undefined ? [] : strs(k.assumptions, 'scenario drafter') }))
   return { spec, scenarios: k.scenarios, assumptions: [...assumptions, ...k.more.map((x) => `(scenario writer) ${x}`)], classification: await classify(model, spec, o.app ?? '', k.scenarios, extractJson) }
 }

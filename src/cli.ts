@@ -81,7 +81,7 @@ export function approvalSummary(id: string, d: Draft, version: string): string {
     '## Spec key points', ...keyPoints, '',
     ...(d.base?.baseSha ? [`Extends: ${d.base.baseSha} (the ship target must still be at this commit when the change runs)`, ''] : []),
     `## Scenarios: ${d.scenarios.length} total`,
-    'Self-report = the scenario writer\'s own claim that the request or the given assumptions state the behaviour (it never saw the spec).', '',
+    'Self-report = the scenario writer\'s own claim that the request states the behaviour (it never saw the spec or the spec writer\'s assumptions).', '',
     '| kind | self-report: stated | self-report: unstated |', '|---|---|---|',
     ...Object.entries(counts).map(([k, c]) => `| ${k} | ${c.inSpec} | ${c.notInSpec} |`), '',
     'Readable from the spec, decided independently (a spec-only session predicted each response; the scenario\'s checks were compared with the prediction):', '',
