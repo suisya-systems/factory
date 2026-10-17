@@ -47,20 +47,21 @@ Reply with ONE JSON object and nothing else:
 "interface" holds NAMES AND SHAPES ONLY, and must match the spec: no status codes, no rules (no AND/OR, matching, ordering,
 defaults, limits or page boundaries) and no values: never list the values a field or parameter may take (no enumerations), no examples.
 Every name is a bare identifier (letters, digits, _; "." for a nested field, "[]" for the items of an array).
+Every interface key is optional: leave out a key that does not apply.
 It is given to a separate scenario writer who never sees your spec.
 You cannot ask questions: record every guess in assumptions.`
 
 const SCENARIO_FORMAT = `Reply with ONE JSON object and nothing else:
 {"assumptions": ["<one line each: anything you assumed because the request did not say>"],
- "scenarios": [{"id": "kebab-id", "title": "...", "summary": "<one line, plain words; this is all the builder sees if it fails. It must NOT contain any path, any status code, or any string value (3+ chars) used in that scenario's steps>",
-   "inSpec": <true if the REQUEST states this behaviour, false if it is an unstated but reasonable expectation>, "kind": "<crud|validation|not-found|paging|filter|conflict|...>",
+ "scenarios": [{"id": "kebab-id", "title": "...", "summary": "<one line, plain words; this is all the builder sees if it fails. It must NOT contain any path, any status code, or any string value (3+ chars) or number (3+ digits) used in that scenario's steps>",
+   "inSpec": <true if the REQUEST states this behaviour, false if it is an unstated but reasonable expectation>, "kind": "<a short kebab-case category>",
    "steps": [{"method": "GET|POST|PUT|PATCH|DELETE", "path": "/...", "body": <json, optional, not on GET>, "headers": {<optional>},
      "expect": {"status": <int or [ints]>, "json": <partial deep subset, optional>, "jsonHas": ["dot.path", ...], "isArray": <bool>, "length": <int, or {"dot.path": int} for arrays inside the body>},
      "capture": {"name": "dot.path", "name2": "header:<response header name>"}}]}]}
 "{{name}}" in a later path/body/headers/json is replaced by a captured value (a value that is exactly "{{name}}" keeps the captured type).
 Every expect needs at least one check. Arrays in "json" match by position (a prefix), so only list items whose order is fixed;
 use "length" to check that a list holds exactly the expected items.
-Use ONLY the endpoint, parameter and field names in the INTERFACE. Where the request does not fix a status code, accept every reasonable one (e.g. [409, 412]).
+Use ONLY the endpoint, parameter and field names in the INTERFACE. Where the request does not fix a status code, accept every reasonable one (e.g. [400, 422]).
 Each scenario starts from an EMPTY app.
 Write 8-15 scenarios, a mix of inSpec true and false. You cannot ask questions: record every guess in assumptions.`
 
@@ -68,14 +69,18 @@ const appBlock = (app: string) => (app ? `\nEXISTING APP (the current code; the 
 // Each drafter gets at most $1 so the classifier calls (CLASSIFIER_BUDGET each, about 15) still fit in the draft cap.
 const draftTask = (role: string, instruction: string) => ({ ...base, maxCostUsd: 1, role, instruction, workdir: mkdtempSync(join(tmpdir(), 'factory-draft-')), access: 'none' as const })
 
-// Enforced, not only asked for: every entry is a bare name, so the interface has no room for a value.
+// Every entry must be a bare name, so a value cannot be written in the lap-3 form ("action: create|update").
+// ponytail: syntax only; values spelled as names (a field "listing" its values) still pass, so the
+// approver reads the interface at the entrance (runbook, stop point B).
 const NAME = /^[A-Za-z_]\w*(\[\])?(\.[A-Za-z_]\w*(\[\])?)*$/
 const ENDPOINT = /^(GET|POST|PUT|PATCH|DELETE) \/[\w.:{}\/-]*$/
 const HEADER_NAME = /^[A-Za-z][A-Za-z0-9-]*$/
-function checkInterface(x: unknown): Record<string, unknown> {
+function checkInterface(raw: unknown): Record<string, unknown> {
   const bad = (what: string) => new Error(`spec drafter: interface ${what} (names and shapes only, no values or enumerations)`)
   const list = (v: unknown, re: RegExp, what: string) => { if (!Array.isArray(v) || !v.every((n) => typeof n === 'string' && re.test(n))) throw bad(what) }
-  if (!isObj(x) || Object.keys(x).length === 0) throw new Error('spec drafter: interface missing')
+  if (!isObj(raw)) throw new Error('spec drafter: interface missing')
+  const x = Object.fromEntries(Object.entries(raw).filter(([, v]) => v !== null)) // a key sent as null is a key left out
+  if (Object.keys(x).length === 0) throw new Error('spec drafter: interface missing')
   for (const k of Object.keys(x)) if (!INTERFACE_KEYS.includes(k)) throw new Error(`spec drafter: unknown interface field "${k}"`)
   if (/\b[1-5]\d\d\b/.test(JSON.stringify(x))) throw new Error('spec drafter: interface must not carry status codes')
   if (x.endpoints !== undefined) list(x.endpoints, ENDPOINT, 'endpoints must be "METHOD /path" strings')
@@ -88,7 +93,7 @@ function checkInterface(x: unknown): Record<string, unknown> {
   if (x.listShape !== undefined && x.listShape !== 'bare array') list(x.listShape, NAME, 'listShape must be "bare array" or a list of key names')
   const t = x.conflictToken
   if (t !== undefined && !(isObj(t) && Object.keys(t).length === 2 && typeof t.name === 'string'
-    && ((t.in === 'body' && NAME.test(t.name)) || (t.in === 'header' && HEADER_NAME.test(t.name))))) throw bad('conflictToken must be {"in": "body" or "header", "name": <name>}')
+    && ((t.in === 'body' && NAME.test(t.name)) || (t.in === 'header' && HEADER_NAME.test(t.name))))) throw bad('conflictToken must be {"in": "body" or "header", "name": <name>}, or left out if there is none')
   return x
 }
 

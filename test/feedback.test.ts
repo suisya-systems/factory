@@ -38,6 +38,11 @@ test('scenario validation rejects malformed drafter output and value-carrying su
   assert.throws(() => validateScenarios(step({ expect: { status: [] } })), /expect.status/)
   assert.throws(() => validateScenarios(bad({ summary: 'missing title says Title Is Required', steps: [{ method: 'POST', path: '/x', body: {}, expect: { json: { error: 'title is required' } } }] })), /concrete value/)
   assert.throws(() => validateScenarios(bad({ summary: 'missing title gives 422' , steps: [{ method: 'POST', path: '/x', body: {}, expect: { status: 422 } }] })), /concrete value/)
+  // lap 4: amounts (3+ digits) in the body or the expected json are values too; small counts are not
+  const split = (summary: string) => validateScenarios(bad({ summary, steps: [{ method: 'POST', path: '/x', body: { amount: 1000 }, expect: { json: { shares: [334, 333, 333], members: 3 } } }] }))
+  for (const leak of ['the payer of 1000 is owed by two', 'one share gets 334 and the rest less']) assert.throws(() => split(leak), /concrete value/)
+  assert.doesNotThrow(() => split('a shared expense is split among 3 members, the remainder going to one of them'))
+  assert.doesNotThrow(() => split('amounts like 10000 are fine when the steps do not use them'))
 })
 
 test('combineVerdict defaults to AND; extractJson handles fenced and embedded JSON', () => {

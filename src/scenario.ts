@@ -15,12 +15,15 @@ export const isObj = (x: unknown): x is Record<string, any> => typeof x === 'obj
 function keys(o: Record<string, unknown>, allowed: string[], where: string) {
   for (const k of Object.keys(o)) if (!allowed.includes(k)) throw new Error(`${where}: unknown field "${k}"`)
 }
-function strings(x: unknown, out: string[] = []): string[] {
-  if (typeof x === 'string') out.push(x)
-  else if (Array.isArray(x)) x.forEach((v) => strings(v, out))
-  else if (isObj(x)) Object.values(x).forEach((v) => strings(v, out))
+function leaves<T>(x: unknown, is: (v: unknown) => v is T, out: T[] = []): T[] {
+  if (is(x)) out.push(x)
+  else if (Array.isArray(x)) x.forEach((v) => leaves(v, is, out))
+  else if (isObj(x)) Object.values(x).forEach((v) => leaves(v, is, out))
   return out
 }
+const strings = (x: unknown) => leaves(x, (v): v is string => typeof v === 'string')
+// Lap 4: amounts (yen) are this app's expected values, so numbers count too.
+const numbers = (x: unknown) => leaves(x, Number.isInteger as (v: unknown) => v is number)
 
 export function validateScenarios(x: unknown): Scenario[] {
   if (!Array.isArray(x) || x.length === 0) throw new Error('scenarios must be a non-empty array')
@@ -56,7 +59,7 @@ export function validateScenarios(x: unknown): Scenario[] {
       const lits = [st.path.split('?')[0].replace(/\{\{\w+\}\}/g, ''), ...strings(st.body), ...strings(e.json), ...strings(st.headers)]
         .filter((v) => v.length >= 3 && v !== '/').map((v) => v.toLowerCase())
       const leaked = lits.find((v) => s.summary.toLowerCase().includes(v))
-        ?? [e.status ?? []].flat().find((c: number) => new RegExp(`\\b${c}\\b`).test(s.summary))
+        ?? [e.status ?? [], ...numbers(st.body), ...numbers(e.json)].flat().find((c: number) => Math.abs(c) >= 100 && new RegExp(`(?<!\\d)${c}(?!\\d)`).test(s.summary))
       if (leaked !== undefined) throw new Error(`${w}: summary contains a concrete value from the steps (${JSON.stringify(String(leaked))})`)
     }
   }

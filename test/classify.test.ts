@@ -196,6 +196,8 @@ test('spec drafter: a names-and-shapes interface passes as is', async () => {
   const withIface = (i: object): Model => async (t) => ({ ok: true, costUsd: 0, text: JSON.stringify(t.role === 'spec-drafter' ? { spec: SPEC, interface: i, assumptions: [] } : t.role === 'scenario-drafter' ? { scenarios: [createGet] } : { steps: [] }) })
   assert.match((await draft(withIface(iface), 'x')).assumptions[0], /shares\[\]\.member/)
   for (const listShape of ['bare array', ['items']]) await draft(withIface({ ...iface, listShape }), 'x')
+  const d = await draft(withIface({ endpoints: ['POST /groups'], conflictToken: null, listShape: null }), 'x') // an unused key sent as null is left out
+  assert.match(d.assumptions[0], /^Interface \(names and shapes only\): \{"endpoints":\["POST \/groups"\]\}$/)
 })
 
 test('approval summary (b): a convention-only mismatch is listed with its step', () => {
