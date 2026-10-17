@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, relative, resolve } from 'node:path'
-import type { Model } from './adapter.ts'
+import type { Model, Result } from './adapter.ts'
 import { CAPS, mergeLedger, startGuard, type Ledger } from './limits.ts'
 import { build } from './roles.ts'
 import { exportTree, removeTree } from './sandbox.ts'
@@ -23,6 +23,7 @@ export type ReplicateOpts = {
 export type Replicate = {
   changeId: string; n: number; builderModel: string; requestedModels: Record<string, string>; approvedVersion: string
   sha: string; builderOk: boolean; builderError: string | null; costUsd: number
+  answeredBy: string | null; costByModel: Record<string, number> | null // as the builder call reported them
   results: Record<string, ScenarioResult[]>; passed: Record<string, number> // per scored change id
   probes: ProbeResult[]; probesSha256: string | null; at: string; rescoredAt?: string
 }
@@ -91,7 +92,9 @@ export async function replicate(o: ReplicateOpts): Promise<Replicate[]> {
   // One cap per change: its drafts and every replicate command so far count against it.
   const guard = startGuard(capUsd, stopFile,
     { spentUsd: drafted + (before?.totalUsd ?? 0), lapFile: join(o.stateDir, 'lap-ledger.json') })
-  const model = guard.model(o.model)
+  let last: Result | null = null
+  const guarded = guard.model(o.model)
+  const model: Model = async (t) => (last = await guarded(t))
   const saveCost = () => writeFileSync(costFile, JSON.stringify(mergeLedger(before, guard.ledger), null, 2)) // after every call: a stop keeps the spend
   const prefix = `${o.builderModel}-`
   const wsRoot = join(o.stateDir, 'work', `${id}-rep`)
@@ -106,12 +109,14 @@ export async function replicate(o: ReplicateOpts): Promise<Replicate[]> {
       mkdirSync(ws)
       execFileSync('git', ['init', '-q', '-b', 'main', ws], { stdio: 'pipe' }) // empty: no earlier answer to read
       const spent = guard.ledger.totalUsd
+      last = null
       let b
       try { b = await build(model, ws, approved.spec, '', guard.signal) } finally { saveCost() }
       guard.check()
       const r: Replicate = {
         changeId: id, n, builderModel: o.builderModel, requestedModels: o.requestedModels ?? {}, approvedVersion: approved.version,
         sha: b.sha, builderOk: b.ok, builderError: b.error ?? null, costUsd: guard.ledger.totalUsd - spent,
+        answeredBy: (last as Result | null)?.model ?? null, costByModel: (last as Result | null)?.costByModel ?? null,
         ...(await evaluate(ws, b.sha, scored, probes, guard.signal)), probesSha256, at: new Date().toISOString(),
       }
       writeFileSync(join(dir, `${prefix}${n}.json`), JSON.stringify(r, null, 2))
@@ -132,8 +137,9 @@ export function tally(sd: string, id: string): string {
   if (!rs.length) return `${id}: no replicates`
   const models = [...new Set(rs.map((r) => r.builderModel))].sort()
   const of = (m: string) => rs.filter((r) => r.builderModel === m)
-  const lines = [`# Replicates of ${id}`, '', `| builder model | builds | builder failed | cost (USD) | probes sha256 |`, '|---|---|---|---|---|',
-    ...models.map((m) => `| ${m} | ${of(m).length} | ${of(m).filter((r) => !r.builderOk).length} | ${of(m).reduce((a, r) => a + r.costUsd, 0).toFixed(4)} | ${[...new Set(of(m).map((r) => r.probesSha256 ?? '-'))].join(', ')} |`), '']
+  // answered by: the models the builder calls reported, so a build another model answered is visible before reading the tables.
+  const lines = [`# Replicates of ${id}`, '', `| builder model | builds | builder failed | answered by | cost (USD) | probes sha256 |`, '|---|---|---|---|---|---|',
+    ...models.map((m) => `| ${m} | ${of(m).length} | ${of(m).filter((r) => !r.builderOk).length} | ${[...new Set(of(m).map((r) => r.answeredBy ?? '(unreported)'))].join('; ')} | ${of(m).reduce((a, r) => a + r.costUsd, 0).toFixed(4)} | ${[...new Set(of(m).map((r) => r.probesSha256 ?? '-'))].join(', ')} |`), '']
   for (const pid of [...new Set(rs.flatMap((r) => r.probes.map((p) => p.id)))]) {
     const answers = [...new Set(rs.flatMap((r) => r.probes.filter((p) => p.id === pid).map((p) => p.answer)))].sort((a, b) => Number([OTHER, BLOCKED].includes(a)) - Number([OTHER, BLOCKED].includes(b)) || a.localeCompare(b))
     lines.push(`## Decision ${pid}`, '', `| builder model | ${answers.join(' | ')} |`, `|---|${answers.map(() => '---|').join('')}`,
