@@ -47,7 +47,7 @@ export function cliSandbox(t: Task): SandboxOpts {
 // The keys are the role names the factory really calls with (until lap 4 they were drafter/builder/judge, so the
 // two drafters and the classifier silently got the fallback). A role missing here is an error, never a default.
 export const MODEL_BY_ROLE: Record<string, string> = {
-  'spec-drafter': 'claude-opus-5-5', 'scenario-drafter': 'claude-opus-5-5', classifier: 'claude-opus-5-5', builder: 'claude-opus-5-5', judge: 'claude-opus-5-5',
+  splitter: 'claude-opus-5-5', 'spec-drafter': 'claude-opus-5-5', 'scenario-drafter': 'claude-opus-5-5', classifier: 'claude-opus-5-5', builder: 'claude-opus-5-5', judge: 'claude-opus-5-5',
 }
 // The models a `--model` override may name (lap 5 compares these two).
 export const MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5']
