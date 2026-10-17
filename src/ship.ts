@@ -22,6 +22,11 @@ export async function ship(mark: PassMark, workspace: string, target: string, st
   // An aborted git/export reports a plain failure: name the stop instead of a misleading git error.
   const git = async (...a: Parameters<typeof sandboxGit>) => { const r = await sandboxGit(...a); stopped(); return r }
   if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error('pass mark has no valid sha')
+  // Before #13 a state dir had one prod (prod/server.pid, prod/data, releases/current): refuse rather than start a
+  // second, empty prod beside a live one. Not migrated: stop that server and move it to prod/<port>/ by hand.
+  for (const old of [join(stateDir, 'prod', 'server.pid'), join(stateDir, 'prod', 'data'), join(stateDir, 'releases', 'current')]) {
+    if (existsSync(old)) throw new Error(`${old} is the prod layout from before #13 (one prod per state dir, now $STATE/prod/<port>/); stop that server and move it by hand`)
+  }
   if ((await git(workspace, ['cat-file', '-e', `${sha}^{commit}`], false, [], signal)).code !== 0) throw new Error(`sha ${sha} not in workspace`)
 
   const prod = prodDir(stateDir, port)

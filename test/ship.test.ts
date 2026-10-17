@@ -37,6 +37,13 @@ test('judge tests the exported commit: files git ignores do not count', async ()
   assert.equal(v.testsAllPass, false, 'the live workspace would pass; the shipped commit cannot start')
 })
 
+test('ship: a state dir with the prod layout from before #13 is refused before anything goes live', async () => {
+  const old = tmp('oldprod')
+  mkdirSync(join(old, 'prod', 'data'), { recursive: true })
+  await assert.rejects(ship({ changeId: 'c', sha: 'a'.repeat(40), approvedVersion: 'v' }, tmp('ws'), gitTarget(), old, 1), /prod layout from before #13/)
+  assert.ok(!existsSync(join(old, 'prod', '1')))
+})
+
 test('ship: a release that cannot start changes nothing (target, current)', async () => {
   const target = gitTarget()
   const ws = tmp('ws')
