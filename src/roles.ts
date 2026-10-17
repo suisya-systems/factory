@@ -5,11 +5,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Model } from './adapter.ts'
 import { CAPS } from './limits.ts'
+import { classify } from './classify.ts'
 import { exportTree, removeTree, sandboxGit } from './sandbox.ts'
 import { runScenarios, validateScenarios, type Scenario, type ScenarioResult } from './scenario.ts'
 import type { Draft } from './vault.ts'
 
-const base = { maxCostUsd: CAPS.maxCostUsd, timeoutMs: CAPS.modelTimeoutMs }
+// No per-call ceiling of their own: the guard gives each call what is left of the change / lap caps.
+// Always call these roles through a guard (an unguarded Infinity budget is not a valid CLI budget).
+const base = { maxCostUsd: Infinity, timeoutMs: CAPS.modelTimeoutMs }
 
 export function extractJson(text: string): any {
   const tries = [text, text.match(/```(?:json)?\s*([\s\S]*?)```/)?.[1], text.slice(text.indexOf('{'), text.lastIndexOf('}') + 1)]
@@ -20,28 +23,80 @@ export function extractJson(text: string): any {
   throw new Error('model reply contained no parseable JSON object')
 }
 
-// ---- drafter ----
-const DRAFT_FORMAT = `Reply with ONE JSON object and nothing else:
-{"spec": "<markdown spec for the builder>", "assumptions": ["<each thing you assumed because the request did not say>"],
- "scenarios": [{"id": "kebab-id", "title": "...", "summary": "<one line, NO concrete paths/values; this is all the builder sees if it fails>",
-   "inSpec": <true if the spec states this behaviour, false if it is an unstated but reasonable expectation>, "kind": "<crud|validation|not-found|persistence|...>",
+// ---- drafters ----
+// Two separate sessions from the same request. The spec drafter writes the spec; the scenario drafter
+// writes the hidden scenarios WITHOUT seeing the spec: it gets the request, the existing app and the
+// interface (names and shapes only, so both use one vocabulary). Not the spec drafter's assumptions:
+// in lap 2 they carried nearly every rule of the spec (owner decision 2026-10-17: pass the interface only).
+// Then every scenario is classified by a third, spec-only procedure (classify.ts).
+export const INTERFACE_KEYS = ['endpoints', 'queryParams', 'fields', 'listShape', 'conflictToken']
+
+const SPEC_FORMAT = `Reply with ONE JSON object and nothing else:
+{"spec": "<markdown spec for the builder>",
+ "interface": {"endpoints": ["METHOD /path", ...], "queryParams": {"METHOD /path": ["name", ...]}, "fields": {"<resource>": ["name", ...]},
+   "listShape": "<'bare array', or the envelope's key names; say that a missing next page is null>", "conflictToken": {"in": "body|header", "name": "..."}},
+ "assumptions": ["<one line each: what you assumed because the request did not say>"]}
+"interface" holds NAMES AND SHAPES ONLY, and must match the spec: no status codes and no rules (no AND/OR, matching, ordering,
+defaults, limits or page boundaries). It is given to a separate scenario writer who never sees your spec.
+You cannot ask questions: record every guess in assumptions.`
+
+const SCENARIO_FORMAT = `Reply with ONE JSON object and nothing else:
+{"assumptions": ["<one line each: anything you assumed because the request did not say>"],
+ "scenarios": [{"id": "kebab-id", "title": "...", "summary": "<one line, plain words; this is all the builder sees if it fails. It must NOT contain any path, any status code, or any string value (3+ chars) used in that scenario's steps>",
+   "inSpec": <true if the REQUEST states this behaviour, false if it is an unstated but reasonable expectation>, "kind": "<crud|validation|not-found|paging|filter|conflict|...>",
    "steps": [{"method": "GET|POST|PUT|PATCH|DELETE", "path": "/...", "body": <json, optional, not on GET>, "headers": {<optional>},
-     "expect": {"status": <int or [ints]>, "json": <partial deep subset, optional>, "jsonHas": ["dot.path", ...], "isArray": <bool>, "length": <int>},
-     "capture": {"name": "dot.path"}}]}]}
-"{{name}}" in a later path/body/json is replaced by a captured value (a value that is exactly "{{name}}" keeps the captured type).
-Every expect needs at least one check. Arrays in "json" match by position (a prefix), so only list items whose order the spec fixes.
+     "expect": {"status": <int or [ints]>, "json": <partial deep subset, optional>, "jsonHas": ["dot.path", ...], "isArray": <bool>, "length": <int, or {"dot.path": int} for arrays inside the body>},
+     "capture": {"name": "dot.path", "name2": "header:<response header name>"}}]}]}
+"{{name}}" in a later path/body/headers/json is replaced by a captured value (a value that is exactly "{{name}}" keeps the captured type).
+Every expect needs at least one check. Arrays in "json" match by position (a prefix), so only list items whose order is fixed;
+use "length" to check that a list holds exactly the expected items.
+Use ONLY the endpoint, parameter and field names in the INTERFACE. Where the request does not fix a status code, accept every reasonable one (e.g. [409, 412]).
 Each scenario starts from an EMPTY app.
 Write 8-15 scenarios, a mix of inSpec true and false. You cannot ask questions: record every guess in assumptions.`
 
-export async function draft(model: Model, request: string, signals?: string): Promise<Draft> {
-  const instruction = `You are the drafter of a software factory. Turn the request into a spec for a builder and hidden acceptance scenarios (HTTP JSON API).\n\nREQUEST:\n${request}\n` +
-    (signals ? `\nPRODUCTION SIGNALS (observed from the running app):\n${signals}\n` : '') + `\n${DRAFT_FORMAT}`
-  const r = await model({ ...base, role: 'drafter', instruction, workdir: mkdtempSync(join(tmpdir(), 'factory-draft-')), access: 'none' })
-  if (!r.ok) throw new Error(`drafter failed: ${r.error}`)
-  const j = extractJson(r.text)
-  if (typeof j.spec !== 'string' || !j.spec.trim()) throw new Error('drafter: spec missing')
-  if (!Array.isArray(j.assumptions) || !j.assumptions.every((a: unknown) => typeof a === 'string')) throw new Error('drafter: assumptions must be strings')
-  return { spec: j.spec, scenarios: validateScenarios(j.scenarios), assumptions: j.assumptions }
+const appBlock = (app: string) => (app ? `\nEXISTING APP (the current code; the request extends it):\n${app}\n` : '')
+// Each drafter gets at most $1 so the classifier calls (CLASSIFIER_BUDGET each, about 15) still fit in the draft cap.
+const draftTask = (role: string, instruction: string) => ({ ...base, maxCostUsd: 1, role, instruction, workdir: mkdtempSync(join(tmpdir(), 'factory-draft-')), access: 'none' as const })
+
+function checkInterface(x: unknown): Record<string, unknown> {
+  if (typeof x !== 'object' || x === null || Array.isArray(x) || Object.keys(x).length === 0) throw new Error('spec drafter: interface missing')
+  for (const k of Object.keys(x)) if (!INTERFACE_KEYS.includes(k)) throw new Error(`spec drafter: unknown interface field "${k}"`)
+  if (/\b[1-5]\d\d\b/.test(JSON.stringify(x))) throw new Error('spec drafter: interface must not carry status codes')
+  return x as Record<string, unknown>
+}
+
+const strs = (x: unknown, who: string): string[] => {
+  if (!Array.isArray(x) || !x.every((a) => typeof a === 'string')) throw new Error(`${who}: assumptions must be strings`)
+  return x
+}
+
+// A drafter reply that fails validation gets ONE repair round in a fresh session (same role, same
+// inputs, plus its reply and the error). Nothing is relaxed: the repaired reply must pass the same checks.
+async function ask<T>(model: Model, role: string, instruction: string, parse: (j: any) => T): Promise<T> {
+  let text = '', err = ''
+  for (const repair of [false, true]) {
+    const r = await model(draftTask(role, repair ? `${instruction}\n\nYOUR PREVIOUS REPLY WAS REJECTED: ${err}\nPREVIOUS REPLY:\n${text}\n\nReply again with the whole corrected JSON object.` : instruction))
+    if (!r.ok) throw new Error(`${role} failed: ${r.error}`)
+    text = r.text
+    try { return parse(extractJson(text)) } catch (e) { if (repair) throw e; err = (e as Error).message }
+  }
+  throw new Error('unreachable')
+}
+
+export async function draft(model: Model, request: string, o: { signals?: string; app?: string } = {}): Promise<Omit<Draft, 'base'>> {
+  const req = `REQUEST:\n${request}\n` + (o.signals ? `\nPRODUCTION SIGNALS (observed from the running app):\n${o.signals}\n` : '') + appBlock(o.app ?? '')
+  const j = await ask(model, 'spec-drafter', `You are the spec drafter of a software factory. Turn the request into a spec for a builder (HTTP JSON API).\n\n${req}\n${SPEC_FORMAT}`, (j) => {
+    if (typeof j.spec !== 'string' || !j.spec.trim()) throw new Error('spec drafter: spec missing')
+    return { spec: j.spec as string, iface: JSON.stringify(checkInterface(j.interface)), assumptions: strs(j.assumptions, 'spec drafter') }
+  })
+  const assumptions = [`Interface (names and shapes only): ${j.iface}`, ...j.assumptions]
+  // The builder sees the same names the scenarios use.
+  const spec = `${j.spec.trimEnd()}\n\n## Interface (names and shapes, shared with the scenario writer)\n\n\`\`\`json\n${j.iface}\n\`\`\`\n`
+
+  const k = await ask(model, 'scenario-drafter', `You are the scenario writer of a software factory. Write hidden acceptance scenarios (HTTP JSON API) for the request. ` +
+    `A builder will implement a spec you do not see; your scenarios judge it.\n\n${req}\nINTERFACE (names and shapes the builder uses; it says nothing about behaviour):\n${j.iface}\n\n${SCENARIO_FORMAT}`,
+  (k) => ({ scenarios: validateScenarios(k.scenarios), more: k.assumptions === undefined ? [] : strs(k.assumptions, 'scenario drafter') }))
+  return { spec, scenarios: k.scenarios, assumptions: [...assumptions, ...k.more.map((x) => `(scenario writer) ${x}`)], classification: await classify(model, spec, o.app ?? '', k.scenarios, extractJson) }
 }
 
 // ---- builder ----
@@ -52,6 +107,7 @@ export const RUN_CONTRACT = `RUN CONTRACT (fixed, non-negotiable):
 - JSON request and response bodies.
 - Work only inside the current directory. The factory commits your work when you finish.`
 
+// The builder gets the spec only. assumptions.json carries scenario-writer text: never pass it here.
 export async function build(model: Model, workspace: string, spec: string, feedback: string, signal?: AbortSignal): Promise<{ sha: string; ok: boolean; error?: string }> {
   const instruction = `You are the builder of a software factory. Implement the spec below in the current directory.\n\nSPEC:\n${spec}\n\n${RUN_CONTRACT}\n` +
     (feedback ? `\nYOUR PREVIOUS ATTEMPT WAS REJECTED. Feedback:\n${feedback}\n` : '')

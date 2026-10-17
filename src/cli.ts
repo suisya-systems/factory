@@ -1,17 +1,22 @@
 // factory CLI. Humans touch exactly two things: `approve` (entrance) and `stop` (emergency).
-import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, relative, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
 import { claudeModel, type Model } from './adapter.ts'
 import { CAPS, chargeLap, lapSpent, mergeLedger, startGuard, type Ledger } from './limits.ts'
 import { draft } from './roles.ts'
 import { runChange } from './run.ts'
+import type { Classification } from './classify.ts'
+import { exportTree, removeTree, sandboxGit } from './sandbox.ts'
 import { observe, serve } from './serve.ts'
 import { approve, checkId, hash, stateDir, vaultDir, writeDraft, type Draft } from './vault.ts'
 
 const USAGE = `usage: factory <command>
-  draft <id> --request <file> [--signals <file>]   draft spec + hidden scenarios, then STOP for approval
+  draft <id> --request <file> [--base <repo>] [--signals <file>]   draft spec + hidden scenarios (two sessions),
+                                                   classify them against the spec, then STOP for approval
+                                                   (--base: the app being extended; run then requires the same HEAD)
   approve <id> --by <name> --version <hash> [--note <text>]   human entrance approval of the version you read
   run <id> --ship-target <repo> [--max-cost N (per change, drafter included)] [--max-attempts N] [--port N] [--traffic-base /memos]
   observe                                          read prod logs into signals.json
@@ -30,23 +35,65 @@ function canaryIn(dir: string, canary: string): boolean {
     .some((e) => e.isFile() && readFileSync(join(e.parentPath, e.name), 'latin1').includes(canary))
 }
 
+// The app being extended, as the drafters and the classifier see it: the tracked text files at HEAD,
+// exported the same way the judge and the shipper export a commit.
+// ponytail: pasted whole into the prompts (capped); give the drafters read access instead if apps grow.
+const APP_MAX_CHARS = 200_000
+export async function appSnapshot(repo: string): Promise<{ sha: string; text: string }> {
+  const head = await sandboxGit(repo, ['rev-parse', 'HEAD'], false)
+  const sha = head.out.trim()
+  if (head.code !== 0 || !/^[0-9a-f]{40}$/.test(sha)) throw new Error(`--base ${repo}: no readable HEAD`)
+  const dir = mkdtempSync(join(tmpdir(), 'factory-base-'))
+  try {
+    await exportTree(repo, sha, dir)
+    let text = ''
+    for (const e of readdirSync(dir, { recursive: true, withFileTypes: true }).filter((e) => e.isFile()).sort((a, b) => join(a.parentPath, a.name).localeCompare(join(b.parentPath, b.name)))) {
+      const body = readFileSync(join(e.parentPath, e.name), 'utf8')
+      if (body.includes('\0')) continue // binary
+      text += `=== ${relative(dir, join(e.parentPath, e.name))}\n${body}\n`
+    }
+    if (text.length > APP_MAX_CHARS) throw new Error(`--base ${repo}: app is larger than ${APP_MAX_CHARS} characters`)
+    return { sha, text }
+  } finally { removeTree(dir) }
+}
+
+const SELF = (inSpec: boolean) => (inSpec ? 'stated' : 'unstated')
+const labelOf = (c: Classification | undefined) => (c ? (c.label === 'readable' ? `readable (${c.basis})` : c.label) : 'unknown')
+
 export function approvalSummary(id: string, d: Draft, version: string): string {
   const counts: Record<string, { inSpec: number; notInSpec: number }> = {}
   for (const s of d.scenarios) {
     const c = (counts[s.kind] ??= { inSpec: 0, notInSpec: 0 })
     s.inSpec ? c.inSpec++ : c.notInSpec++
   }
+  const cls = new Map((d.classification ?? []).map((c) => [c.id, c]))
+  const cross: Record<string, { stated: number; unstated: number }> = {}
+  for (const s of d.scenarios) (cross[labelOf(cls.get(s.id))] ??= { stated: 0, unstated: 0 })[SELF(s.inSpec)]++
+  const notM = (c: Classification, r: 'X' | 'U') => c.checks.filter((k) => (r === 'X' ? k.result === 'X' && k.basis !== 'convention' : k.result === 'U' || (k.result === 'X' && k.basis === 'convention')))
+    .map((k) => `step ${k.step} ${d.scenarios.find((s) => s.id === c.id)!.steps[k.step - 1].method} ${k.check}`).join('; ')
+  const disagree = (r: Classification['label']) => d.scenarios.filter((s) => cls.get(s.id)?.label === r).map((s) => `- ${s.id}: ${s.summary} -- ${notM(cls.get(s.id)!, r === 'contradicts' ? 'X' : 'U')}`)
+  const contra = disagree('contradicts'), silent = disagree('unstated')
   const keyPoints = d.spec.split('\n').filter((l) => /^\s*(#|[-*]|\d+\.)/.test(l)).slice(0, 25)
   return [
     `# Approval request: ${id}`, '',
     `Version: ${version}`, '',
     `Approve with: \`npm run factory -- approve ${id} --by <name> --version ${version}\`  (approval fixes this exact set; to change anything, draft a new change)`, '',
     '## Spec key points', ...keyPoints, '',
-    `## Scenarios: ${d.scenarios.length} total`, '| kind | in spec | not in spec |', '|---|---|---|',
+    ...(d.base?.baseSha ? [`Extends: ${d.base.baseSha} (the ship target must still be at this commit when the change runs)`, ''] : []),
+    `## Scenarios: ${d.scenarios.length} total`,
+    'Self-report = the scenario writer\'s own claim that the request states the behaviour (it never saw the spec or the spec writer\'s assumptions).', '',
+    '| kind | self-report: stated | self-report: unstated |', '|---|---|---|',
     ...Object.entries(counts).map(([k, c]) => `| ${k} | ${c.inSpec} | ${c.notInSpec} |`), '',
-    ...d.scenarios.map((s) => `- [${s.inSpec ? 'spec' : 'unstated'}] ${s.id}: ${s.title} -- ${s.summary}`), '',
+    'Readable from the spec, decided independently (a spec-only session predicted each response; the scenario\'s checks were compared with the prediction):', '',
+    '| independent label | self-report: stated | self-report: unstated |', '|---|---|---|',
+    ...Object.entries(cross).sort().map(([k, c]) => `| ${k} | ${c.stated} | ${c.unstated} |`), '',
+    ...d.scenarios.map((s) => `- [${SELF(s.inSpec)} / ${labelOf(cls.get(s.id))}] ${s.id}: ${s.title} -- ${s.summary}`), '',
+    '## Discrepancies between the spec and the scenarios (the factory does not fix these; approve as is, or draft a new change)', '',
+    `### (a) The spec says otherwise (${contra.length})`, ...(contra.length ? contra : ['- none']), '',
+    `### (b) The scenario requires what the spec does not determine (${silent.length})`, ...(silent.length ? silent : ['- none']), '',
     `## Assumptions (${d.assumptions.length})`, ...d.assumptions.map((a) => `- ${a}`), '',
     '## Scenario bodies (for the approver only; never shown to the builder)', '```json', JSON.stringify(d.scenarios, null, 2), '```', '',
+    '## Classifier predictions (per scenario and step)', '```json', JSON.stringify(d.classification ?? [], null, 2), '```', '',
   ].join('\n')
 }
 
@@ -56,7 +103,7 @@ export async function main(argv: string[], model: Model = claudeModel): Promise<
   try {
     parsed = parseArgs({
       args: argv, allowPositionals: true,
-      options: { help: { type: 'boolean', short: 'h' }, request: { type: 'string' }, signals: { type: 'string' }, by: { type: 'string' }, version: { type: 'string' }, note: { type: 'string' }, 'ship-target': { type: 'string' },
+      options: { help: { type: 'boolean', short: 'h' }, request: { type: 'string' }, base: { type: 'string' }, signals: { type: 'string' }, by: { type: 'string' }, version: { type: 'string' }, note: { type: 'string' }, 'ship-target': { type: 'string' },
         'max-cost': { type: 'string' }, 'max-attempts': { type: 'string' }, port: { type: 'string' }, 'traffic-base': { type: 'string' } },
     })
   } catch (e) { console.error(`factory: ${(e as Error).message}\n${USAGE}`); return 2 }
@@ -78,7 +125,10 @@ export async function main(argv: string[], model: Model = claudeModel): Promise<
       const before: Ledger | null = existsSync(costFile) ? JSON.parse(readFileSync(costFile, 'utf8')) : null // earlier (re-)drafts of this id
       const guard = startGuard(CAPS.maxCostUsd, stopFile, { spentUsd: before?.totalUsd ?? 0, lapFile })
       try {
-        const d = await draft(guard.model(model), readFileSync(v.request, 'utf8'), v.signals ? readFileSync(v.signals, 'utf8') : undefined)
+        const request = readFileSync(v.request, 'utf8')
+        const app = v.base ? await appSnapshot(resolve(v.base)) : null
+        const drafted = await draft(guard.model(model), request, { signals: v.signals ? readFileSync(v.signals, 'utf8') : undefined, app: app?.text })
+        const d: Draft = { ...drafted, base: { baseSha: app?.sha ?? null, requestSha256: createHash('sha256').update(request).digest('hex') } }
         const dir = writeDraft(sd, id, d)
         const version = hash(dir)
         writeFileSync(join(dir, 'approval-summary.md'), approvalSummary(id, d, version))

@@ -4,14 +4,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { assertLoopbackOnly, freePort, killTree, removeTree, spawnApp, waitPort } from './sandbox.ts'
 
-export type Expect = { status?: number | number[]; json?: unknown; jsonHas?: string[]; isArray?: boolean; length?: number }
+export type Expect = { status?: number | number[]; json?: unknown; jsonHas?: string[]; isArray?: boolean; length?: number | Record<string, number> }
 export type Step = { method: string; path: string; body?: unknown; headers?: Record<string, string>; expect: Expect; capture?: Record<string, string> }
 // inSpec: the drafter's claim that the spec states this behaviour (used to split pass rates; self-reported, not verified).
 export type Scenario = { id: string; title: string; summary: string; inSpec: boolean; kind: string; steps: Step[] }
 export type ScenarioResult = { id: string; inSpec: boolean; kind: string; pass: boolean; failedStep?: number; detail: string }
 
 // ---- validation (drafter output is untrusted) ----
-const isObj = (x: unknown): x is Record<string, any> => typeof x === 'object' && x !== null && !Array.isArray(x)
+export const isObj = (x: unknown): x is Record<string, any> => typeof x === 'object' && x !== null && !Array.isArray(x)
 function keys(o: Record<string, unknown>, allowed: string[], where: string) {
   for (const k of Object.keys(o)) if (!allowed.includes(k)) throw new Error(`${where}: unknown field "${k}"`)
 }
@@ -49,15 +49,15 @@ export function validateScenarios(x: unknown): Scenario[] {
       keys(e, ['status', 'json', 'jsonHas', 'isArray', 'length'], `${ws}.expect`)
       if (Object.keys(e).length === 0) throw new Error(`${ws}: expect must contain at least one check`)
       if (e.status !== undefined && !(Number.isInteger(e.status) || (Array.isArray(e.status) && e.status.length > 0 && e.status.every(Number.isInteger)))) throw new Error(`${ws}: bad expect.status`)
-      if (e.jsonHas !== undefined && !(Array.isArray(e.jsonHas) && e.jsonHas.every((p: unknown) => typeof p === 'string'))) throw new Error(`${ws}: bad expect.jsonHas`)
+      if (e.jsonHas !== undefined && !(Array.isArray(e.jsonHas) && e.jsonHas.length > 0 && e.jsonHas.every((p: unknown) => typeof p === 'string'))) throw new Error(`${ws}: bad expect.jsonHas`)
       if (e.isArray !== undefined && typeof e.isArray !== 'boolean') throw new Error(`${ws}: bad expect.isArray`)
-      if (e.length !== undefined && !Number.isInteger(e.length)) throw new Error(`${ws}: bad expect.length`)
+      if (e.length !== undefined && !(Number.isInteger(e.length) || (isObj(e.length) && Object.keys(e.length).length > 0 && Object.values(e.length).every(Number.isInteger)))) throw new Error(`${ws}: bad expect.length`)
       // The summary is the only thing the builder may see on failure: it must not carry concrete values.
       const lits = [st.path.split('?')[0].replace(/\{\{\w+\}\}/g, ''), ...strings(st.body), ...strings(e.json), ...strings(st.headers)]
         .filter((v) => v.length >= 3 && v !== '/').map((v) => v.toLowerCase())
       const leaked = lits.find((v) => s.summary.toLowerCase().includes(v))
         ?? [e.status ?? []].flat().find((c: number) => new RegExp(`\\b${c}\\b`).test(s.summary))
-      if (leaked !== undefined) throw new Error(`${w}: summary contains a concrete value from the steps`)
+      if (leaked !== undefined) throw new Error(`${w}: summary contains a concrete value from the steps (${JSON.stringify(String(leaked))})`)
     }
   }
   return x as Scenario[]
@@ -65,7 +65,7 @@ export function validateScenarios(x: unknown): Scenario[] {
 
 // ---- matching ----
 // Own properties only: 'constructor' etc. must not count as present.
-const get = (o: any, path: string) => path.split('.').reduce((v, k) => (v !== null && typeof v === 'object' && Object.hasOwn(v, k) ? v[k] : undefined), o)
+export const get = (o: any, path: string) => path.split('.').reduce((v, k) => (v !== null && typeof v === 'object' && Object.hasOwn(v, k) ? v[k] : undefined), o)
 
 // ponytail: arrays match by position (expected is a prefix of actual); unordered containment if specs leave order open.
 export function subset(expected: unknown, actual: unknown): boolean {
@@ -74,7 +74,7 @@ export function subset(expected: unknown, actual: unknown): boolean {
   return expected === actual
 }
 
-function fill(x: unknown, vars: Record<string, unknown>): unknown {
+export function fill(x: unknown, vars: Record<string, unknown>): unknown {
   const need = (n: string) => { if (!Object.hasOwn(vars, n)) throw new Error(`variable ${n} was never captured`); return vars[n] }
   if (typeof x === 'string' && /^\{\{\w+\}\}$/.test(x)) return need(x.slice(2, -2)) // whole value: keep the captured type
   if (typeof x === 'string') return x.replace(/\{\{(\w+)\}\}/g, (_, n) => String(need(n)))
@@ -91,6 +91,32 @@ async function text(res: Response, max = 1_000_000): Promise<string> {
   return raw + dec.decode()
 }
 
+// One step's checks against one response; fills `vars` from its captures. Returns the failure, or null.
+// Shared by the runner (real responses) and the classifier (predicted responses).
+// expect.length: a number checks the top-level array; {"dot.path": n} checks arrays inside the body.
+export const lengthChecks = (e: Expect): [string, number][] => (e.length === undefined ? [] : typeof e.length === 'number' ? [['', e.length]] : Object.entries(e.length))
+export const at = (json: unknown, path: string) => (path ? get(json, path) : json)
+// A capture path "header:<name>" reads a response header instead of the JSON body.
+export const HEADER = 'header:'
+
+export function checkStep(st: Step, status: number, json: unknown, vars: Record<string, unknown>, headers?: Headers): string | null {
+  const e = st.expect
+  const statuses = e.status === undefined ? null : ([] as number[]).concat(e.status)
+  if (statuses && !statuses.includes(status)) return `expected status ${statuses.join('|')}, got ${status}`
+  if (e.isArray !== undefined && Array.isArray(json) !== e.isArray) return `expected isArray=${e.isArray}`
+  for (const [p, n] of lengthChecks(e)) {
+    const v = at(json, p)
+    if (!Array.isArray(v) || v.length !== n) return `expected length ${n}${p ? ` at ${p}` : ''}, got ${Array.isArray(v) ? v.length : 'non-array'}`
+  }
+  for (const p of e.jsonHas ?? []) if (get(json, p) === undefined) return `response missing ${p}`
+  if (e.json !== undefined && !subset(fill(e.json, vars), json)) return 'response body did not match expected subset'
+  for (const [name, p] of Object.entries(st.capture ?? {})) {
+    const v = p.startsWith(HEADER) ? (headers?.get(p.slice(HEADER.length)) ?? undefined) : get(json, p)
+    if ((vars[name] = v) === undefined) return `capture ${name} missing from response`
+  }
+  return null
+}
+
 async function runSteps(port: number, s: Scenario, signal: AbortSignal): Promise<{ failedStep?: number; detail: string }> {
   const vars: Record<string, unknown> = {}
   for (const [i, st] of s.steps.entries()) {
@@ -99,23 +125,15 @@ async function runSteps(port: number, s: Scenario, signal: AbortSignal): Promise
       const path = fill(st.path, vars) as string
       const body = st.body === undefined ? undefined : JSON.stringify(fill(st.body, vars))
       const res = await fetch(`http://127.0.0.1:${port}${path}`, {
-        method: st.method, body, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...st.headers },
+        method: st.method, body, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...(fill(st.headers ?? {}, vars) as Record<string, string>) },
         redirect: 'manual', // judge the tested endpoint's own response, never a redirect target
         signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]),
       })
       const raw = await text(res)
       let json: unknown
       try { json = raw ? JSON.parse(raw) : undefined } catch { json = undefined }
-      const e = st.expect
-      const statuses = e.status === undefined ? null : ([] as number[]).concat(e.status)
-      if (statuses && !statuses.includes(res.status)) return { failedStep: n, detail: `step ${n}: expected status ${statuses.join('|')}, got ${res.status}` }
-      if (e.isArray !== undefined && Array.isArray(json) !== e.isArray) return { failedStep: n, detail: `step ${n}: expected isArray=${e.isArray}` }
-      if (e.length !== undefined && (!Array.isArray(json) || json.length !== e.length)) return { failedStep: n, detail: `step ${n}: expected length ${e.length}, got ${Array.isArray(json) ? json.length : 'non-array'}` }
-      for (const p of e.jsonHas ?? []) if (get(json, p) === undefined) return { failedStep: n, detail: `step ${n}: response missing ${p}` }
-      if (e.json !== undefined && !subset(fill(e.json, vars), json)) return { failedStep: n, detail: `step ${n}: response body did not match expected subset` }
-      for (const [name, p] of Object.entries(st.capture ?? {})) {
-        if ((vars[name] = get(json, p)) === undefined) return { failedStep: n, detail: `step ${n}: capture ${name} missing from response` }
-      }
+      const failed = checkStep(st, res.status, json, vars, res.headers)
+      if (failed) return { failedStep: n, detail: `step ${n}: ${failed}` }
     } catch (err) {
       if (signal.aborted) throw err
       return { failedStep: n, detail: `step ${n}: ${(err as Error).message}` }
