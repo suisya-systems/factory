@@ -6,7 +6,8 @@ import { join } from 'node:path'
 import { sandboxSpawn, killTree, HOME, SANDBOX_PATH, type SandboxOpts } from './sandbox.ts'
 
 export type Access = 'none' | 'read' | 'write'
-export type Task = { role: string; instruction: string; workdir: string; access: Access; maxCostUsd: number; timeoutMs: number; signal?: AbortSignal }
+// model: a per-command override of MODEL_BY_ROLE (lap 5, `--model <role>=<model>`); checked by parseModels.
+export type Task = { role: string; instruction: string; workdir: string; access: Access; maxCostUsd: number; timeoutMs: number; signal?: AbortSignal; model?: string }
 // costByModel: the cost the CLI reports per model inside the call (its own internal calls included), when it reports one.
 export type Result = { ok: boolean; text: string; costUsd: number | null; error?: string; model?: string; costByModel?: Record<string, number> }
 export type Model = (task: Task) => Promise<Result>
@@ -43,11 +44,30 @@ export function cliSandbox(t: Task): SandboxOpts {
 }
 
 // Model per role, pinned explicitly so a CLI default never decides it (claude-opus-5-5 was the newest generation on 2026-10-17).
-export const MODEL_BY_ROLE: Record<string, string> = { drafter: 'claude-opus-5-5', builder: 'claude-opus-5-5', judge: 'claude-opus-5-5' }
-const modelFor = (role: string) => (Object.hasOwn(MODEL_BY_ROLE, role) ? MODEL_BY_ROLE[role] : 'claude-opus-5-5')
+// The keys are the role names the factory really calls with (until lap 4 they were drafter/builder/judge, so the
+// two drafters and the classifier silently got the fallback). A role missing here is an error, never a default.
+export const MODEL_BY_ROLE: Record<string, string> = {
+  'spec-drafter': 'claude-opus-5-5', 'scenario-drafter': 'claude-opus-5-5', classifier: 'claude-opus-5-5', builder: 'claude-opus-5-5', judge: 'claude-opus-5-5',
+}
+// The models a `--model` override may name (lap 5 compares these two).
+export const MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5']
+export function modelFor(t: Pick<Task, 'role' | 'model'>): string {
+  if (!Object.hasOwn(MODEL_BY_ROLE, t.role)) throw new Error(`no model is set for role "${t.role}"`)
+  return t.model ?? MODEL_BY_ROLE[t.role]
+}
+// `--model <role>=<model>` values -> {role: model}. Rejected before any model is called.
+export function parseModels(specs: string[] = []): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const s of specs) {
+    const [role, model, ...rest] = s.split('=')
+    if (rest.length || !Object.hasOwn(MODEL_BY_ROLE, role) || !MODELS.includes(model)) throw new Error(`--model ${s}: expected <role>=<model> with role in ${Object.keys(MODEL_BY_ROLE).join('|')} and model in ${MODELS.join('|')}`)
+    out[role] = model
+  }
+  return out
+}
 
 function cliArgs(t: Task): string[] {
-  const a = ['-p', '--model', modelFor(t.role), '--output-format', 'json', '--max-budget-usd', t.maxCostUsd.toFixed(4), '--no-session-persistence', '--strict-mcp-config',
+  const a = ['-p', '--model', modelFor(t), '--output-format', 'json', '--max-budget-usd', t.maxCostUsd.toFixed(4), '--no-session-persistence', '--strict-mcp-config',
     // Inside the sandbox the user config dir is empty, so 'user' loads nothing. 'project' is NOT
     // loaded on purpose: the workdir is builder-written and could plant hooks that see the judge prompt.
     '--setting-sources', 'user']
@@ -73,6 +93,7 @@ const ERROR_KIND: Record<string, string> = { error_max_budget_usd: 'budget excee
 
 // Exported for tests only (bin = a fake CLI); production code uses claudeModel.
 export async function runCli(t: Task, bin: string): Promise<Result> {
+  modelFor(t) // an unknown role throws before anything starts
   if (t.signal?.aborted) return { ok: false, text: '', costUsd: null, error: 'stopped before start' }
   const child = sandboxSpawn(bin, cliArgs(t), cliSandbox(t),
     { cwd: t.workdir, env: cliEnv(), stdio: ['pipe', 'pipe', 'pipe'] })
@@ -98,7 +119,7 @@ export async function runCli(t: Task, bin: string): Promise<Result> {
   const text = j && typeof j.result === 'string' ? j.result : ''
   // The models that actually answered (per-model usage), else the one requested.
   const usage: [string, any][] = j && j.modelUsage && typeof j.modelUsage === 'object' ? Object.entries(j.modelUsage) : []
-  const model = usage.map(([m]) => m).join(',') || modelFor(t.role)
+  const model = usage.map(([m]) => m).join(',') || modelFor(t)
   const priced = usage.filter(([, u]) => u && typeof u.costUSD === 'number' && Number.isFinite(u.costUSD))
   const by = priced.length ? { costByModel: Object.fromEntries(priced.map(([m, u]) => [m, u.costUSD])) } : {}
   if (why) return { ok: false, text, costUsd: cost, error: why, model, ...by }

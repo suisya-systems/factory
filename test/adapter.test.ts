@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { chmodSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { cliEnv, MODEL_BY_ROLE, runCli, type Access } from '../src/adapter.ts'
+import { cliEnv, MODEL_BY_ROLE, MODELS, parseModels, runCli, type Access } from '../src/adapter.ts'
 import { startGuard } from '../src/limits.ts'
 import { CLI_MARKERS, REPO, tmp } from './helpers.ts'
 
@@ -22,7 +22,7 @@ function fakeCli(body: string) {
   chmodSync(join(w, 'cli'), 0o755)
   return w
 }
-const call = (w: string, access: Access = 'write') => runCli({ role: 'r', instruction: 'hello', workdir: w, access, maxCostUsd: 2.5, timeoutMs: 10_000 }, join(w, 'cli'))
+const call = (w: string, access: Access = 'write', more: { role?: string; model?: string } = {}) => runCli({ role: 'builder', instruction: 'hello', workdir: w, access, maxCostUsd: 2.5, timeoutMs: 10_000, ...more }, join(w, 'cli'))
 
 test('parses result text and cost from the CLI JSON', async () => {
   const r = await call(fakeCli(`printf '{"type":"result","result":"%s","total_cost_usd":0.125,"is_error":false}' "$IN"`))
@@ -91,7 +91,32 @@ test('CLI error kinds, garbage and missing cost never reach records in CLI words
 test('the model that actually answered is reported (per-model usage), and recorded per role', async () => {
   const r = await call(fakeCli(`echo '{"result":"ok","total_cost_usd":0.2,"modelUsage":{"claude-opus-5-5":{},"claude-haiku-5-5":{}}}'`))
   assert.equal(r.model, 'claude-opus-5-5,claude-haiku-5-5')
-  for (const role of ['drafter', 'builder', 'judge']) assert.equal(MODEL_BY_ROLE[role], 'claude-opus-5-5')
+})
+
+// Lap 4 found the table keyed drafter/builder/judge while the factory called spec-drafter, scenario-drafter
+// and classifier, which silently fell back to the default. Every role name the factory calls with must be a key.
+test('every role the factory calls a model with has its own entry in MODEL_BY_ROLE', () => {
+  const roles = new Set<string>()
+  for (const f of readdirSync(join(REPO, 'src')).filter((f) => f.endsWith('.ts'))) {
+    for (const m of readFileSync(join(REPO, 'src', f), 'utf8').matchAll(/role: '([\w-]+)'|ask\(model, '([\w-]+)'/g)) roles.add(m[1] ?? m[2])
+  }
+  assert.deepEqual([...roles].sort(), ['builder', 'classifier', 'judge', 'scenario-drafter', 'spec-drafter'])
+  assert.deepEqual(Object.keys(MODEL_BY_ROLE).sort(), [...roles].sort())
+})
+
+test('a role missing from the table is an error, not a default; a per-role model reaches --model', async () => {
+  const w = fakeCli(`printf '{"result":"%s","total_cost_usd":0}' "$*"`)
+  await assert.rejects(call(w, 'none', { role: 'drafter' }), /no model is set for role "drafter"/)
+  for (const role of Object.keys(MODEL_BY_ROLE)) {
+    assert.match((await call(w, 'none', { role })).text, /--model claude-opus-5-5 /)
+    assert.match((await call(w, 'none', { role, model: 'claude-sonnet-5-5' })).text, /--model claude-sonnet-5-5 /)
+  }
+})
+
+test('--model values: only table roles and the listed models', () => {
+  assert.deepEqual(MODELS, ['claude-opus-5-5', 'claude-sonnet-5-5'])
+  assert.deepEqual(parseModels(['builder=claude-sonnet-5-5', 'scenario-drafter=claude-opus-5-5']), { builder: 'claude-sonnet-5-5', 'scenario-drafter': 'claude-opus-5-5' })
+  for (const bad of ['drafter=claude-opus-5-5', 'builder=claude-sonnet-5', 'builder', 'builder=claude-opus-5-5=x']) assert.throws(() => parseModels([bad]), /--model/)
 })
 
 test('per-model cost (lap 4): costUSD of each model in the usage, only when it is a number', async () => {

@@ -104,27 +104,45 @@ const strs = (x: unknown, who: string): string[] => {
 
 // A drafter reply that fails validation gets ONE repair round in a fresh session (same role, same
 // inputs, plus its reply and the error). Nothing is relaxed: the repaired reply must pass the same checks.
+// Both rejected replies travel on the final error (`rejected`), so `draft` can keep them in the hidden run dir (lap 5).
+export type Rejected = { role: string; error: string; reply: string }
 async function ask<T>(model: Model, role: string, instruction: string, parse: (j: any) => T): Promise<T> {
   let text = '', err = ''
+  const rejected: Rejected[] = []
   for (const repair of [false, true]) {
     const r = await model(draftTask(role, repair ? `${instruction}\n\nYOUR PREVIOUS REPLY WAS REJECTED: ${err}\nPREVIOUS REPLY:\n${text}\n\nReply again with the whole corrected JSON object.` : instruction))
     if (!r.ok) throw new Error(`${role} failed: ${r.error}`)
     text = r.text
-    try { return parse(extractJson(text)) } catch (e) { if (repair) throw e; err = (e as Error).message }
+    try { return parse(extractJson(text)) } catch (e) {
+      err = (e as Error).message
+      rejected.push({ role, error: err, reply: text })
+      if (repair) throw Object.assign(e as Error, { rejected })
+    }
   }
   throw new Error('unreachable')
 }
 
-export async function draft(model: Model, request: string, o: { signals?: string; app?: string } = {}): Promise<Omit<Draft, 'base'>> {
+// The spec section the factory appends; specBody / specIface split an approved spec back into its parts.
+const IFACE_HEAD = '\n\n## Interface (names and shapes, shared with the scenario writer)\n\n```json\n'
+export const specBody = (spec: string) => spec.split(IFACE_HEAD)[0]
+export function specIface(spec: string): string {
+  const i = spec.split(IFACE_HEAD)[1]
+  if (i === undefined) throw new Error('spec has no factory interface section')
+  return i.slice(0, i.indexOf('\n```'))
+}
+
+// o.reuse (lap 5, `draft --spec-from`): an approved spec (body + interface) is used as is and the spec drafter is not called,
+// so several scenario sets (or a hand-edited control spec) share one spec and one interface.
+export async function draft(model: Model, request: string, o: { signals?: string; app?: string; reuse?: { body: string; iface: string } } = {}): Promise<Omit<Draft, 'base'>> {
   const req = `REQUEST:\n${request}\n` + (o.signals ? `\nPRODUCTION SIGNALS (observed from the running app):\n${o.signals}\n` : '') + appBlock(o.app ?? '')
-  const j = await ask(model, 'spec-drafter', `You are the spec drafter of a software factory. Turn the request into a spec for a builder (HTTP JSON API).\n\n${req}\n${SPEC_FORMAT}`, (j) => {
+  const j = o.reuse ? { spec: o.reuse.body, iface: o.reuse.iface, assumptions: ['(spec reused from an approved change; the spec drafter was not called)'] } : await ask(model, 'spec-drafter', `You are the spec drafter of a software factory. Turn the request into a spec for a builder (HTTP JSON API).\n\n${req}\n${SPEC_FORMAT}`, (j) => {
     if (typeof j.spec !== 'string' || !j.spec.trim()) throw new Error('spec drafter: spec missing')
     if (!UNDECIDED.test(j.spec)) throw new Error('spec drafter: spec has no "## Undecided" section')
     return { spec: j.spec as string, iface: JSON.stringify(checkInterface(j.interface)), assumptions: strs(j.assumptions, 'spec drafter') }
   })
   const assumptions = [`Interface (names and shapes only): ${j.iface}`, ...j.assumptions]
   // The builder sees the same names the scenarios use.
-  const spec = `${j.spec.trimEnd()}\n\n## Interface (names and shapes, shared with the scenario writer)\n\n\`\`\`json\n${j.iface}\n\`\`\`\n`
+  const spec = `${j.spec.trimEnd()}${IFACE_HEAD}${j.iface}\n\`\`\`\n`
 
   const k = await ask(model, 'scenario-drafter', `You are the scenario writer of a software factory. Write hidden acceptance scenarios (HTTP JSON API) for the request. ` +
     `A builder will implement a spec you do not see; your scenarios judge it.\n\n${req}\nINTERFACE (names and shapes the builder uses; it says nothing about behaviour):\n${j.iface}\n\n${SCENARIO_FORMAT}`,
