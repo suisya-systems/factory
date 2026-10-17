@@ -2,7 +2,7 @@
 // This file only ever asks `draft` (via the injected `factory`) for a draft. It never approves, runs or ships anything:
 // what ships is decided by `approve` (a human, bound to the exact set read) and `run`.
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { observe, STDERR_ERROR } from './serve.ts'
 import { prodDir } from './ship.ts'
@@ -58,6 +58,7 @@ export type WatchOpts = { shipTarget: string; ports?: number[]; stopFile: string
 export async function watchOnce(sd: string, o: WatchOpts, factory: (argv: string[]) => Promise<number>): Promise<number> {
   const seenFile = join(sd, 'signal-seen.json')
   const seen = readJson<Seen>(seenFile) ?? {}
+  const save = () => { writeFileSync(`${seenFile}.tmp`, JSON.stringify(seen, null, 2)); renameSync(`${seenFile}.tmp`, seenFile) }
   const pending = () => [...new Set(Object.values(seen))].filter((id) => !existsSync(join(sd, 'vault', id, 'approval.json'))).length
   const ports = o.ports ?? (existsSync(join(sd, 'prod')) ? readdirSync(join(sd, 'prod')).filter((d) => /^\d{1,5}$/.test(d)).map(Number) : [])
   for (const port of ports) {
@@ -74,24 +75,41 @@ export async function watchOnce(sd: string, o: WatchOpts, factory: (argv: string
     if (!fresh.length) continue
     if (pending() >= MAX_PENDING) { console.error(`watch: ${MAX_PENDING} signal drafts already wait for approval; no new draft for port ${port}`); continue }
     const id = `sig-${port}-${createHash('sha256').update(fresh.map(fp).sort().join()).digest('hex').slice(0, 12)}`
-    if (existsSync(join(sd, 'vault', id))) { for (const i of fresh) seen[`${port}:${fp(i)}`] = id; continue } // drafted before, ledger lost: never re-draft over it
+    if (existsSync(join(sd, 'vault', id))) { for (const i of fresh) seen[`${port}:${fp(i)}`] = id; save(); continue } // drafted before, ledger lost: never re-draft over it
     const dir = join(sd, 'runs', id)
     mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, 'request.md'), request(port, fresh, sig))
     const code = await factory(['draft', id, '--request', join(dir, 'request.md'), '--base', o.shipTarget])
     if (code !== 0) return code
     for (const i of fresh) seen[`${port}:${fp(i)}`] = id
-    writeFileSync(`${seenFile}.tmp`, JSON.stringify(seen, null, 2))
-    renameSync(`${seenFile}.tmp`, seenFile)
+    save()
     console.log(`watch: port ${port}: ${fresh.length} new sign(s) -> draft ${id}, waiting for approval`)
   }
   return 0
 }
 
-export async function watch(sd: string, o: WatchOpts & { intervalSec?: number }, factory: (argv: string[]) => Promise<number>): Promise<number> {
-  for (;;) {
-    const code = await watchOnce(sd, o, factory)
-    if (code !== 0 || o.intervalSec === undefined || existsSync(o.stopFile)) return code
-    await new Promise((r) => setTimeout(r, o.intervalSec! * 1000))
+// One watcher per state dir: the ledger is read, drafted against and written back, so two would lose each other's entries (and double-spend on one sign).
+// The lock holds the pid; a lock whose process is gone is taken over.
+function lock(sd: string): () => void {
+  const f = join(sd, 'signal-watch.lock')
+  for (let tries = 0; tries < 2; tries++) {
+    try { writeFileSync(f, String(process.pid), { flag: 'wx' }); return () => { try { unlinkSync(f) } catch { /* already gone */ } } } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
+      const pid = Number(readFileSync(f, 'utf8'))
+      try { process.kill(pid, 0); throw new Error(`another watch (pid ${pid}) holds ${f}`) } catch (k) { if ((k as NodeJS.ErrnoException).code !== 'ESRCH') throw k }
+      unlinkSync(f) // ponytail: two watchers racing to take over a stale lock can both win; start them apart
+    }
   }
+  throw new Error(`could not take ${f}`)
+}
+
+export async function watch(sd: string, o: WatchOpts & { intervalSec?: number }, factory: (argv: string[]) => Promise<number>): Promise<number> {
+  const unlock = lock(sd)
+  try {
+    for (;;) {
+      const code = await watchOnce(sd, o, factory)
+      if (code !== 0 || o.intervalSec === undefined || existsSync(o.stopFile)) return code
+      await new Promise((r) => setTimeout(r, o.intervalSec! * 1000))
+    }
+  } finally { unlock() }
 }

@@ -171,6 +171,20 @@ test('informational stderr lines are not failure signs; an error.log alone is re
   assert.equal(h.drafts().length, 1)
 })
 
+test('a recovered draft is written to the ledger; a second watcher on the state dir is refused, a dead one is taken over', async () => {
+  const h = harness()
+  h.put(8787, sig())
+  await h.watch()
+  writeFileSync(join(h.sd, 'signal-seen.json'), '{}')
+  await h.watch() // recovers from the vault and persists
+  assert.equal(Object.keys(JSON.parse(readFileSync(join(h.sd, 'signal-seen.json'), 'utf8'))).length, 2)
+  writeFileSync(join(h.sd, 'signal-watch.lock'), String(process.pid)) // a live holder
+  await assert.rejects(h.watch(), /another watch/)
+  writeFileSync(join(h.sd, 'signal-watch.lock'), '2147483646') // no such process
+  assert.equal(await h.watch(), 0)
+  assert.equal(existsSync(join(h.sd, 'signal-watch.lock')), false)
+})
+
 test('fingerprints ignore time, ids, query and counts', () => {
   const a = items(parseSignals(sig()))
   const b = items(parseSignals(sig({ requests: 1, samples: { errors5xx: ['2030-01-01T00:00:00.000Z GET /notes/99999?z=1 500 700'], stderr: ['2030-01-01T00:00:00.000Z TypeError: boom at line 78'] } })))
