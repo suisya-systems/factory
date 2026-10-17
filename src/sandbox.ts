@@ -36,6 +36,8 @@ export type SandboxOpts = {
   copies?: Record<string, string>
 }
 
+const RESOLVER_FILES = ['/etc/resolv.conf', '/etc/hosts', '/etc/nsswitch.conf']
+
 export function sandboxCommand(cmd: string, args: string[], o: SandboxOpts): { cmd: string; args: string[]; fds: string[] } {
   const ro = [NODE_DIR, ...(o.extraRo ?? [])]
   const copies = Object.entries(o.copies ?? {}).filter(([, src]) => existsSync(src))
@@ -48,7 +50,10 @@ export function sandboxCommand(cmd: string, args: string[], o: SandboxOpts): { c
   // Host runtime sockets (systemd --user, D-Bus session bus, gpg/ssh agent) would let a child run
   // commands OUTSIDE the sandbox (e.g. systemd-run --user) and so reach the vault.
   const xdg = process.env.XDG_RUNTIME_DIR ? real(process.env.XDG_RUNTIME_DIR) : ''
-  for (const d of ['/mnt', '/run/user', '/var/tmp', xdg]) if (d && existsSync(d) && !within(d, HOME) && !within(d, '/tmp')) a.push('--tmpfs', d)
+  const hidden = ['/mnt', '/run/user', '/var/tmp', xdg].filter((d) => d && existsSync(d) && !within(d, HOME) && !within(d, '/tmp'))
+  for (const d of hidden) a.push('--tmpfs', d)
+  // Name resolution must survive the hiding: on WSL /etc/resolv.conf -> /mnt/wsl/resolv.conf.
+  for (const f of RESOLVER_FILES) { const r = real(f); if (existsSync(r) && hidden.some((d) => within(r, d))) a.push('--ro-bind', r, r) }
   for (const p of ro) a.push('--ro-bind', real(p), real(p))
   a.push(o.writable ? '--bind' : '--ro-bind', real(o.workdir), real(o.workdir))
   for (const p of o.extraRw ?? []) a.push('--bind', real(p), real(p))
