@@ -13,9 +13,12 @@ import type { ScenarioResult } from './scenario.ts'
 
 export type RunOpts = { changeId: string; shipTarget: string; model: Model; stateDir: string; port: number; maxCostUsd?: number; maxAttempts?: number; stopFile?: string; trafficBase?: string }
 
-const rate = (rs: ScenarioResult[], inSpec: boolean) => {
-  const xs = rs.filter((r) => r.inSpec === inSpec)
-  return { passed: xs.filter((r) => r.pass).length, total: xs.length }
+const rate = (xs: ScenarioResult[]) => ({ passed: xs.filter((r) => r.pass).length, total: xs.length })
+// Pass rates split two ways: the scenario writer's self-report, and the independent label fixed at approval.
+function passRate(rs: ScenarioResult[], labels: Map<string, string>) {
+  const byLabel: Record<string, { passed: number; total: number }> = {}
+  for (const l of new Set(rs.map((r) => labels.get(r.id) ?? 'unknown'))) byLabel[l] = rate(rs.filter((r) => (labels.get(r.id) ?? 'unknown') === l))
+  return { inSpec: rate(rs.filter((r) => r.inSpec)), notInSpec: rate(rs.filter((r) => !r.inSpec)), byLabel }
 }
 
 // ponytail: fixed synthetic traffic shaped for a CRUD resource at `base`; derive from the spec when apps vary.
@@ -38,6 +41,8 @@ export async function runChange(o: RunOpts) {
   const runDir = join(o.stateDir, 'runs', id)
   if (existsSync(join(runDir, 'run.json'))) throw new Error(`${id} already ran; a new attempt must enter as a new change`)
   const approved = loadApproved(o.stateDir, id)
+  // readable labels carry their basis (readable-spec / -code / -convention); read from the approved set, never recomputed.
+  const labels = new Map(approved.classification.map((c) => [c.id, c.label === 'readable' ? `readable-${c.basis}` : c.label]))
   mkdirSync(runDir, { recursive: true })
   const draftFile = join(runDir, 'draft-cost.json') // written by `draft`; reported here so the change's cost is in one record
   const draftCost: Ledger | null = existsSync(draftFile) ? JSON.parse(readFileSync(draftFile, 'utf8')) : null
@@ -48,7 +53,7 @@ export async function runChange(o: RunOpts) {
   const record = {
     changeId: id, approvedVersion: approved.version, status: 'running' as 'running' | 'shipped' | 'failed', stopReason: '',
     caps: { maxCostUsd: capUsd, maxAttempts },
-    attempts: [] as { n: number; sha: string; builderOk: boolean; testsAllPass: boolean; llmPass: boolean | null; llmReason: string; pass: boolean; approvedVersion: string; passRate: { inSpec: object; notInSpec: object }; results: ScenarioResult[] }[],
+    attempts: [] as { n: number; sha: string; builderOk: boolean; testsAllPass: boolean; llmPass: boolean | null; llmReason: string; pass: boolean; approvedVersion: string; passRate: ReturnType<typeof passRate>; results: ScenarioResult[] }[],
     llmOnlyRejections: 0, // attempts where every deterministic test passed but the LLM judge did not approve
     judgeFailures: 0, // attempts where the LLM judge gave no verdict (call failed / unparseable reply)
     passedWithinCap: false, shipped: null as null | { sha: string; release: string }, signals: null as unknown,
@@ -63,6 +68,9 @@ export async function runChange(o: RunOpts) {
   save()
   try {
     const work = join(o.stateDir, 'work', id)
+    // The spec and scenarios were drafted against this commit of the app; building on another one is not what was approved.
+    const want = approved.base.baseSha
+    if (want && execFileSync('git', ['-C', o.shipTarget, 'rev-parse', 'HEAD']).toString().trim() !== want) throw new Stop(`ship target is no longer at the approved base ${want}`)
     if (!existsSync(work)) execFileSync('git', ['clone', '-q', '--no-hardlinks', o.shipTarget, work], { stdio: 'pipe' })
     let feedback = ''
     let passed: Verdict | null = null
@@ -73,7 +81,7 @@ export async function runChange(o: RunOpts) {
       sha = b.sha
       const v = await judge(model, work, sha, approved.spec, approved.scenarios, approved.version, guard.signal)
       record.attempts.push({ n, sha, builderOk: b.ok, testsAllPass: v.testsAllPass, llmPass: v.llmPass, llmReason: v.reason, pass: v.pass, approvedVersion: v.approvedVersion,
-        passRate: { inSpec: rate(v.results, true), notInSpec: rate(v.results, false) }, results: v.results })
+        passRate: passRate(v.results, labels), results: v.results })
       if (v.testsAllPass && v.llmPass === false) record.llmOnlyRejections++
       if (v.llmPass === null && !v.stop) record.judgeFailures++
       save()
