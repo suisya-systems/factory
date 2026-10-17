@@ -180,11 +180,24 @@ test('classifyReply: wrong values contradict; captured ids; quote checks; isArra
   assert.equal(classifyReply(prefix, SPEC, '', { steps: [st([200], [{ title: 'a' }, { title: 'b' }])] }).label, 'readable')
 })
 
-test('spec drafter: an interface with status codes or unknown keys is refused', async () => {
-  for (const iface of [{ endpoints: ['POST /notes -> 201'] }, { endpoints: ['GET /notes'], rules: 'AND' }]) {
+test('spec drafter: an interface with status codes, unknown keys or values is refused', async () => {
+  // Lap 4: names and shapes only. Each of these carries a value a field or parameter may take.
+  const values = [{ fields: { entry: ['action: create|update|revert'] } }, { fields: { entry: ['action'] }, listShape: 'items, next (null on the last page)' },
+    { queryParams: { 'GET /notes': ['order=asc'] } }, { conflictToken: { in: 'header', name: 'If-Match', default: '*' } }, { endpoints: ['GET /notes?order=asc'] }, { fields: ['id'] }]
+  for (const iface of [{ endpoints: ['POST /notes -> 201'] }, { endpoints: ['GET /notes'], rules: 'AND' }, ...values]) {
     const m: Model = async (t) => ({ ok: true, costUsd: 0, text: JSON.stringify(t.role === 'spec-drafter' ? { spec: SPEC, interface: iface, assumptions: [] } : {}) })
     await assert.rejects(draft(m, 'x'), /interface/)
   }
+})
+
+test('spec drafter: a names-and-shapes interface passes as is', async () => {
+  const iface = { endpoints: ['POST /groups', 'GET /groups/:id/settlement', 'PUT /groups/{id}'], queryParams: { 'GET /groups/:id/expenses': ['cursor', 'limit'] },
+    fields: { expense: ['id', 'paidBy', 'amount', 'shares[].member', 'shares[].amount'] }, listShape: ['items', 'next'], conflictToken: { in: 'header', name: 'If-Match' } }
+  const withIface = (i: object): Model => async (t) => ({ ok: true, costUsd: 0, text: JSON.stringify(t.role === 'spec-drafter' ? { spec: SPEC, interface: i, assumptions: [] } : t.role === 'scenario-drafter' ? { scenarios: [createGet] } : { steps: [] }) })
+  assert.match((await draft(withIface(iface), 'x')).assumptions[0], /shares\[\]\.member/)
+  for (const listShape of ['bare array', ['items']]) await draft(withIface({ ...iface, listShape }), 'x')
+  const d = await draft(withIface({ endpoints: ['POST /groups'], conflictToken: null, listShape: null }), 'x') // an unused key sent as null is left out
+  assert.match(d.assumptions[0], /^Interface \(names and shapes only\): \{"endpoints":\["POST \/groups"\]\}$/)
 })
 
 test('approval summary (b): a convention-only mismatch is listed with its step', () => {

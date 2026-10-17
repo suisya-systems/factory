@@ -93,3 +93,11 @@ test('the model that actually answered is reported (per-model usage), and record
   assert.equal(r.model, 'claude-opus-5-5,claude-haiku-5-5')
   for (const role of ['drafter', 'builder', 'judge']) assert.equal(MODEL_BY_ROLE[role], 'claude-opus-5-5')
 })
+
+test('per-model cost (lap 4): costUSD of each model in the usage, only when it is a number', async () => {
+  const r = await call(fakeCli(`echo '{"result":"ok","total_cost_usd":0.3,"modelUsage":{"claude-opus-5-5":{"costUSD":0.25},"claude-haiku-5-5":{"costUSD":0.05},"odd":{"costUSD":"x"}}}'`))
+  assert.deepEqual(r.costByModel, { 'claude-opus-5-5': 0.25, 'claude-haiku-5-5': 0.05 })
+  const e = await call(fakeCli(`echo '{"result":"","is_error":true,"total_cost_usd":0.1,"modelUsage":{"claude-opus-5-5":{"costUSD":0.1}}}'; exit 1`))
+  assert.deepEqual(e.costByModel, { 'claude-opus-5-5': 0.1 }) // a failed call's spend is split too
+  assert.equal((await call(fakeCli(`echo '{"result":"ok","total_cost_usd":0.2,"modelUsage":{"claude-opus-5-5":{}}}'`))).costByModel, undefined)
+})
