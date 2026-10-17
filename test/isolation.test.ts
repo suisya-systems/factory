@@ -3,10 +3,11 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { chmodSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
-import { homedir, tmpdir } from 'node:os'
+import { homedir, networkInterfaces, tmpdir } from 'node:os'
+import net from 'node:net'
 import { join } from 'node:path'
 import { BIN, CONFIG_KEEP, cliSandbox, runCli, type Task } from '../src/adapter.ts'
-import { protect, sandboxCommand, sandboxExec, SANDBOX_PATH } from '../src/sandbox.ts'
+import { freePort, killTree, protect, sandboxCommand, sandboxExec, SANDBOX_PATH, spawnApp, waitPort } from '../src/sandbox.ts'
 import { runScenario } from '../src/scenario.ts'
 import { vaultDir } from '../src/vault.ts'
 import { freshState, MEMO_SERVER, tmp, writeApp } from './helpers.ts'
@@ -133,15 +134,66 @@ test('sandboxExec keeps only the tail of builder-controlled output', async () =>
   assert.ok(r.out.endsWith('END\n'))
 })
 
-test('an app listening on a non-loopback address fails its scenario; the same app on 127.0.0.1 passes', async () => {
+// Host addresses other than loopback: what an app sharing the host network could reach.
+const hostAddrs = () => Object.values(networkInterfaces()).flat().filter((i) => i && !i.internal).map((i) => i!.address)
+const tryConnect = (port: number, host: string) => new Promise<string>((ok) => {
+  const c = net.connect(port, host).on('connect', () => { c.destroy(); ok('connected') }).on('error', (e: any) => ok(e.code ?? e.message))
+  c.setTimeout(3000, () => { c.destroy(); ok('timeout') })
+})
+
+test('app code has no network but loopback; the host still reaches it on 127.0.0.1', async () => {
+  let seen = 0
+  const outside = net.createServer((c) => { seen++; c.destroy() })
+  await new Promise<void>((ok) => outside.listen(0, '::', ok)) // dual-stack: every host address
+  const P = (outside.address() as net.AddressInfo).port
+  const targets = ['127.0.0.1', '::1', ...hostAddrs()]
+  // A runner already confined to loopback (e.g. a sandboxed dev shell) has no other address; CI has.
+  for (const h of targets) assert.equal(await tryConnect(P, h), 'connected', `control: host reaches ${h}`) // not vacuous
+  seen = 0
+  const app = tmp('iso-net')
+  writeApp(app, `
+const http = require('node:http'), net = require('node:net'), { execSync } = require('node:child_process')
+const tryConnect = (h) => new Promise((ok) => { const c = net.connect(${P}, h).on('connect', () => { c.destroy(); ok('connected') }).on('error', (e) => ok(e.code)); c.setTimeout(3000, () => { c.destroy(); ok('timeout') }) })
+http.createServer(async (q, s) => {
+  const out = {}; for (const h of ${JSON.stringify(targets)}) out[h] = await tryConnect(h)
+  out.sockets = execSync('find /run -type s 2>/dev/null; true').toString()
+  s.end(JSON.stringify(out))
+}).listen(Number(process.env.PORT), '127.0.0.1')`)
+  const port = await freePort(), data = tmp('iso-net-data')
+  const child = spawnApp(app, port, data)
+  try {
+    await waitPort(port, 15_000, child)
+    const out = await (await fetch(`http://127.0.0.1:${port}/`)).json()
+    for (const h of targets) assert.notEqual(out[h], 'connected', `app reached ${h}`)
+    assert.equal(seen, 0)
+    assert.equal(out.sockets, '', 'host sockets under /run are visible')
+  } finally { killTree(child, 500); outside.close() }
+})
+
+test('an app listening on any address works and stays unreachable from outside the host loopback', async () => {
   const sc = { id: 'lo', title: 't', summary: 'the app answers', inSpec: true, kind: 'net', steps: [{ method: 'GET', path: '/notes', expect: { status: 200 } }] }
-  for (const [addr, pass] of [['0.0.0.0', false], ['::', false], ['127.0.0.1', true]] as const) {
+  for (const addr of ['0.0.0.0', '::', '127.0.0.1']) {
     const app = tmp('lo')
     writeApp(app, MEMO_SERVER.replace(".listen(Number(process.env.PORT), '127.0.0.1')", `.listen(Number(process.env.PORT), '${addr}')`))
     const r = await runScenario(app, sc, new AbortController().signal)
-    assert.equal(r.pass, pass, `${addr}: ${r.detail}`)
-    if (!pass) assert.match(r.detail, /app listens on a non-loopback address/)
+    assert.equal(r.pass, true, `${addr}: ${r.detail}`)
+    const port = await freePort(), child = spawnApp(app, port, tmp('lo-data'))
+    try {
+      await waitPort(port, 15_000, child)
+      assert.equal((await fetch(`http://127.0.0.1:${port}/notes`)).status, 200)
+      for (const h of hostAddrs()) assert.notEqual(await tryConnect(port, h), 'connected', `${addr}: reachable on ${h}`)
+    } finally { killTree(child, 500) }
   }
+})
+
+test('readiness is the bridge itself: a port taken by someone else makes the app fail, not pass', async () => {
+  const other = net.createServer((c) => c.destroy())
+  await new Promise<void>((ok) => other.listen(0, '127.0.0.1', ok))
+  const port = (other.address() as net.AddressInfo).port
+  const app = tmp('busy')
+  writeApp(app, MEMO_SERVER)
+  const child = spawnApp(app, port, tmp('busy-data'))
+  try { await assert.rejects(waitPort(port, 15_000, child), /exited before listening/) } finally { killTree(child, 500); other.close() }
 })
 
 test('sandboxExec kills a hanging child on abort and on timeout', async () => {

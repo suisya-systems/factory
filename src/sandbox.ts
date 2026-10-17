@@ -1,8 +1,9 @@
 // OS sandbox (bubblewrap) for everything the factory runs that it does not trust:
 // model sessions AND builder-written app code. The hidden-scenario guarantee lives here:
 // the child sees / read-only, but $HOME (where the vault must live) is an empty tmpfs,
-// /tmp is fresh, /mnt is hidden, and it has its own pid namespace.
-import { existsSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync } from 'node:fs'
+// /tmp is fresh, /mnt is hidden, and it has its own pid namespace. App code also gets its own
+// network namespace (loopback only): it cannot reach out, and the host reaches it through a bridge.
+import { existsSync, mkdtempSync, openSync, realpathSync, rmSync } from 'node:fs'
 import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
@@ -34,6 +35,9 @@ export type SandboxOpts = {
   extraRo?: string[]
   // dest (inside the sandbox) -> host source; the content is COPIED into a fresh writable file.
   copies?: Record<string, string>
+  // Own network namespace with loopback only. Also hides /run, whose host control sockets
+  // (e.g. docker.sock) would be a way out that no network namespace closes.
+  isolateNet?: boolean
 }
 
 const RESOLVER_FILES = ['/etc/resolv.conf', '/etc/hosts', '/etc/nsswitch.conf']
@@ -50,7 +54,7 @@ export function sandboxCommand(cmd: string, args: string[], o: SandboxOpts): { c
   // Host runtime sockets (systemd --user, D-Bus session bus, gpg/ssh agent) would let a child run
   // commands OUTSIDE the sandbox (e.g. systemd-run --user) and so reach the vault.
   const xdg = process.env.XDG_RUNTIME_DIR ? real(process.env.XDG_RUNTIME_DIR) : ''
-  const cand = ['/mnt', '/run/user', '/var/tmp', xdg].filter((d) => d && existsSync(d) && !within(d, HOME) && !within(d, '/tmp'))
+  const cand = ['/mnt', '/run/user', '/var/tmp', xdg, o.isolateNet ? '/run' : ''].filter((d) => d && existsSync(d) && !within(d, HOME) && !within(d, '/tmp'))
   // A dir under another hidden one (e.g. XDG=/run/user/<uid>) is already hidden; a nested --tmpfs
   // would recreate its mountpoint inside the parent tmpfs and so reveal it.
   const hidden = cand.filter((d) => !cand.some((o) => o !== d && within(d, o)))
@@ -61,6 +65,7 @@ export function sandboxCommand(cmd: string, args: string[], o: SandboxOpts): { c
   a.push(o.writable ? '--bind' : '--ro-bind', real(o.workdir), real(o.workdir))
   for (const p of o.extraRw ?? []) a.push('--bind', real(p), real(p))
   copies.forEach(([dest], i) => a.push('--file', String(3 + i), dest))
+  if (o.isolateNet) a.push('--unshare-net')
   a.push('--unshare-pid', '--die-with-parent', '--new-session', '--chdir', real(o.workdir), '--', cmd, ...args)
   return { cmd: 'bwrap', args: a, fds: copies.map(([, s]) => s) }
 }
@@ -69,7 +74,8 @@ export function sandboxCommand(cmd: string, args: string[], o: SandboxOpts): { c
 export function sandboxSpawn(cmd: string, args: string[], o: SandboxOpts, so: SpawnOptions = {}): ChildProcess {
   const s = sandboxCommand(cmd, args, o)
   const base = (so.stdio as any[] | undefined) ?? ['ignore', 'pipe', 'pipe']
-  const stdio = [...base.slice(0, 3), ...s.fds.map((f) => openSync(f, 'r'))]
+  // fds 3.. are the copies; extra stdio entries the caller passes come after them
+  const stdio = [...base.slice(0, 3), ...s.fds.map((f) => openSync(f, 'r')), ...base.slice(3)]
   return spawn(s.cmd, s.args, { ...so, stdio, detached: true })
 }
 
@@ -89,63 +95,87 @@ export function appEnv(port: number, dataDir: string): NodeJS.ProcessEnv {
   return { PATH: SANDBOX_PATH, HOME, PORT: String(port), DATA_DIR: dataDir, NODE_ENV: 'production', npm_config_update_notifier: 'false', npm_config_fund: 'false' }
 }
 
-// Runs the app (`npm start` in appDir) sandboxed: appDir read-only, dataDir writable.
-export function spawnApp(appDir: string, port: number, dataDir: string, stdio: SpawnOptions['stdio'] = ['ignore', 'ignore', 'pipe']): ChildProcess {
-  return sandboxSpawn('npm', ['start', '--silent'], { workdir: appDir, writable: false, extraRw: [dataDir] }, { env: appEnv(port, dataDir), stdio })
+// The bridge between host and app is one pipe (fd 3 inside the sandbox) carrying frames:
+// [id u32][len u32][payload]. len 0 closes connection id; id 0 with len 0 means "the app accepts".
+function frame(id: number, data: Buffer = Buffer.alloc(0)): Buffer {
+  const h = Buffer.alloc(8)
+  h.writeUInt32BE(id); h.writeUInt32BE(data.length, 4)
+  return Buffer.concat([h, data])
 }
-
-// TCP listeners of the app's process tree (rootPid = the bwrap child) on a non-loopback address,
-// e.g. ['0.0.0.0:8080']. The app shares the host network, so such a listener is reachable from outside.
-// --unshare-pid / --new-session rule out pgid, but host /proc lists the inner processes by ppid.
-// ponytail: checked at readiness only (a later bind is not caught); a network namespace + forwarding is the upgrade path.
-export function publicListeners(rootPid: number): string[] {
-  const ppid = new Map<number, number>()
-  for (const p of readdirSync('/proc')) {
-    if (!/^\d+$/.test(p)) continue
-    try { const st = readFileSync(`/proc/${p}/stat`, 'utf8'); ppid.set(Number(p), Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[1])) } catch { /* exited */ }
-  }
-  const inTree = (pid: number) => { for (let p = pid, n = 0; p > 1 && n < 1000; p = ppid.get(p) ?? 0, n++) if (p === rootPid) return true; return false }
-  const inodes = new Set<string>()
-  for (const pid of ppid.keys()) {
-    if (!inTree(pid)) continue
-    try {
-      for (const fd of readdirSync(`/proc/${pid}/fd`)) {
-        try { const m = /^socket:\[(\d+)\]$/.exec(readlinkSync(`/proc/${pid}/fd/${fd}`)); if (m) inodes.add(m[1]) } catch { /* closed */ }
-      }
-    } catch { /* exited */ }
-  }
-  const out: string[] = []
-  for (const file of ['/proc/net/tcp', '/proc/net/tcp6']) {
-    let rows: string[] = []
-    try { rows = readFileSync(file, 'utf8').trim().split('\n').slice(1) } catch { continue }
-    for (const r of rows) {
-      const c = r.trim().split(/\s+/)
-      const [hex, port] = c[1].split(':')
-      if (c[3] !== '0A' || !inodes.has(c[9]) || isLoopbackHex(hex)) continue
-      out.push(`${hexAddr(hex)}:${parseInt(port, 16)}`)
+function frameReader(on: (id: number, data: Buffer) => void, onBad: () => void) {
+  let buf = Buffer.alloc(0)
+  return (d: Buffer) => {
+    buf = Buffer.concat([buf, d])
+    while (buf.length >= 8) {
+      const len = buf.readUInt32BE(4)
+      if (len > 1 << 20) return onBad() // never buffer an unbounded frame
+      if (buf.length < 8 + len) return
+      const id = buf.readUInt32BE(0), data = buf.subarray(8, 8 + len)
+      buf = buf.subarray(8 + len)
+      on(id, data)
     }
   }
-  return out
 }
 
-// Throws unless the app (just reported ready) listens on loopback only.
-export function assertLoopbackOnly(app: ChildProcess): void {
-  const l = app.pid ? publicListeners(app.pid) : []
-  if (l.length) throw new Error(`app listens on a non-loopback address (${l.join(', ')})`)
-}
+// Runs inside the app's namespace (the app itself gets fd 3 closed). Each new id opens a fresh
+// connection to the app on its loopback. The functions above are inlined (type-stripped source).
+const RELAY = `const net = require('node:net'); const port = Number(process.argv[1])
+${frame}
+${frameReader}
+const pipe = new net.Socket({ fd: 3 }), conns = new Map()
+pipe.on('error', () => process.exit(1)).on('close', () => process.exit(1))
+pipe.on('data', frameReader((id, d) => {
+  let c = conns.get(id)
+  if (!d.length) return c?.end()
+  if (!c) {
+    c = net.connect(port, '127.0.0.1'); conns.set(id, c)
+    c.on('data', (x) => pipe.write(frame(id, x))).on('error', () => {}).on('close', () => { conns.delete(id); pipe.write(frame(id)) })
+  }
+  c.write(d)
+}, () => process.exit(1)))
+const wait = () => { const c = net.connect(port, '127.0.0.1').on('connect', () => { c.destroy(); pipe.write(frame(0)) }).on('error', () => setTimeout(wait, 100)) }
+wait()`
 
-// /proc/net/tcp{,6} print each 32-bit word of the address in host (little-endian) byte order.
-const wordBytes = (w: string) => [6, 4, 2, 0].map((i) => parseInt(w.slice(i, i + 2), 16))
-function isLoopbackHex(hex: string): boolean {
-  if (hex.length === 8) return wordBytes(hex)[0] === 127
-  const words = hex.toUpperCase().match(/.{8}/g)!
-  if (words.join('') === '00000000000000000000000001000000') return true // ::1
-  return words.slice(0, 3).join('') === '0000000000000000FFFF0000' && wordBytes(words[3])[0] === 127 // ::ffff:127.x
-}
-function hexAddr(hex: string): string {
-  if (hex.length === 8) return wordBytes(hex).join('.')
-  const b = hex.match(/.{8}/g)!.flatMap(wordBytes)
-  return `[${Array.from({ length: 8 }, (_, i) => ((b[2 * i] << 8) | b[2 * i + 1]).toString(16)).join(':')}]`
+// App child -> "its host-side port is bound", for waitPort. Readiness is this bridge's own bind,
+// never whatever else might be listening on the port.
+const bridged = new WeakMap<ChildProcess, () => boolean>()
+
+// Runs the app (`npm start` in appDir) sandboxed: appDir read-only, dataDir writable, no network but
+// loopback. Host 127.0.0.1:port is bridged to the app's 127.0.0.1:port over an inherited pipe: no
+// path, address or socket the app could reach out through.
+// ponytail: no backpressure on the bridge; fine for judge/prod HTTP, add pause/resume if bodies get big.
+export function spawnApp(appDir: string, port: number, dataDir: string, stdio: SpawnOptions['stdio'] = ['ignore', 'ignore', 'pipe']): ChildProcess {
+  const base = (stdio as any[]).slice(0, 3)
+  const app = sandboxSpawn('sh', ['-c', 'node -e "$0" "$1" & exec npm start --silent 3>&-', RELAY, String(port)],
+    { workdir: appDir, writable: false, extraRw: [dataDir], isolateNet: true }, { env: appEnv(port, dataDir), stdio: [...base, 'pipe'] })
+  const pipe = app.stdio[3] as net.Socket
+  const conns = new Map<number, net.Socket>()
+  let next = 1, started = false, listening = false
+  const tcp = net.createServer((c) => {
+    const id = next++
+    conns.set(id, c)
+    c.on('data', (d) => pipe.write(frame(id, d))).on('error', () => {}).on('close', () => { if (conns.delete(id)) pipe.write(frame(id)) })
+  })
+  pipe.on('error', () => {}).on('data', frameReader((id, d) => {
+    if (id === 0) {
+      if (!started) { started = true; tcp.listen(port, '127.0.0.1', () => { listening = true }) }
+      return
+    }
+    const c = conns.get(id)
+    if (!c) return
+    if (d.length) c.write(d)
+    else { conns.delete(id); c.end() }
+  }, () => killTree(app, 500)))
+  const close = () => {
+    listening = false
+    tcp.close()
+    for (const c of conns.values()) c.destroy()
+    pipe.destroy()
+  }
+  app.once('exit', close).once('error', close)
+  tcp.on('error', () => killTree(app, 500)) // e.g. port taken meanwhile: waitPort then sees the app exit
+  bridged.set(app, () => listening)
+  return app
 }
 
 // ponytail: bind-to-0-then-close has a tiny race window; fine for a local prototype.
@@ -164,7 +194,8 @@ export async function waitPort(port: number, timeoutMs: number, child?: ChildPro
   while (Date.now() < end) {
     if (signal?.aborted) throw new Error('stopped')
     if (child && (child.exitCode !== null || child.signalCode !== null)) throw new Error('app exited before listening')
-    const up = await new Promise<boolean>((ok) => {
+    const isUp = child && bridged.get(child)
+    const up = isUp ? isUp() : await new Promise<boolean>((ok) => {
       const c = net.connect(port, '127.0.0.1', () => { c.destroy(); ok(true) })
       c.on('error', () => ok(false))
     })
