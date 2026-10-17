@@ -64,6 +64,9 @@ test('K builds from empty repos, scored by this change, a same-spec change and t
   const again = await replicate({ changeId: 'rep-a', model: async () => { throw new Error('model called') }, stateDir: sd, k: 0, builderModel: 'm1', rescore: true })
   assert.equal(again.length, 3)
   assert.ok(again.every((r) => r.probes.length === 0 && r.probesSha256 === null && r.rescoredAt))
+  const stop = join(sd, 'STOP-rescore')
+  writeFileSync(stop, 'x')
+  await assert.rejects(replicate({ changeId: 'rep-a', model: builder([]), stateDir: sd, k: 0, builderModel: 'm1', rescore: true, stopFile: stop }), /emergency stop/)
 })
 
 test('refused before any model call: other spec, probes outside the vault, a change that ran; run refuses after replicate', async () => {
@@ -146,5 +149,8 @@ test('draft --spec-from reuses the approved spec byte for byte; --spec swaps the
   writeFileSync(ctl, '# Control without the section\n')
   await assert.rejects(main(['draft', 'sf-y', '--request', other, '--spec-from', 'sf-a1', '--spec', ctl], m), /Undecided/)
   await assert.rejects(main(['draft', 'sf-z', '--request', req, '--spec', ctl], m), /needs --spec-from/)
+  const ext = writeDraft(sd, 'sf-ext', { spec: '# Ext\n', scenarios: SCENARIOS, assumptions: [], base: { baseSha: 'a'.repeat(40), requestSha256: null } })
+  approve(sd, 'sf-ext', { by: 't', version: hash(ext) })
+  await assert.rejects(main(['draft', 'sf-w', '--request', req, '--spec-from', 'sf-ext'], m), /extends an app/)
   assert.deepEqual(roles, [])
 })
