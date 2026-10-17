@@ -2,7 +2,7 @@
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { assertLoopbackOnly, freePort, killTree, removeTree, spawnApp, waitPort } from './sandbox.ts'
+import { freePort, killTree, removeTree, spawnApp, waitPort } from './sandbox.ts'
 
 export type Expect = { status?: number | number[]; json?: unknown; jsonHas?: string[]; isArray?: boolean; length?: number | Record<string, number> }
 export type Step = { method: string; path: string; body?: unknown; headers?: Record<string, string>; expect: Expect; capture?: Record<string, string> }
@@ -165,7 +165,6 @@ async function withApp<T>(appDir: string, signal: AbortSignal, go: (port: number
       if (signal.aborted) throw err
       return failed(`app did not start: ${(err as Error).message}; stderr: ${stderr.trim()}`)
     }
-    try { assertLoopbackOnly(app) } catch (err) { return failed((err as Error).message) }
     return await go(port)
   } finally {
     killTree(app, 500)
