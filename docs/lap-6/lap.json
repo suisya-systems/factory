@@ -1,0 +1,24 @@
+{
+  "name": "lap6",
+  "home": ".factory-lap6",
+  "steps": [
+    { "exec": ["npm", "test"] },
+    { "exec": ["node", "--experimental-strip-types", "--no-warnings", "docs/lap-6/attempts.ts", "--self-test"] },
+    { "factory": ["probe-isolation", "lap6-probe"] },
+    { "copy": "settle-a1", "from": ".factory-lap5" },
+    { "factory": ["draft", "minor-1", "--request", "requests/split-settle.md", "--spec-from", "settle-a1", "--minority"] },
+    { "factory": ["draft", "minor-2", "--request", "requests/split-settle.md", "--spec-from", "settle-a1", "--minority"] },
+    { "exec": ["cmp", "{state}/vault/settle-a1/spec.md", "{state}/vault/minor-1/spec.md"] },
+    { "exec": ["cmp", "{state}/vault/settle-a1/spec.md", "{state}/vault/minor-2/spec.md"] },
+    { "gate": "entrance", "approve": ["minor-1", "minor-2"], "fix": { "prereg/prereg.json": "docs/lap-6/prereg.json" } },
+    { "copy": "minor-1", "to": ["minor-1-b", "minor-1-c"] },
+    { "copy": "minor-2", "to": ["minor-2-b", "minor-2-c"] },
+    { "factory": ["run", "minor-1", "--port", "8787", "--traffic-base", "/groups"], "newShipTarget": "# split settle\n" },
+    { "factory": ["run", "minor-2", "--port", "8787", "--traffic-base", "/groups"], "newShipTarget": "# split settle\n" },
+    { "factory": ["run", "minor-1-b", "--port", "8787", "--traffic-base", "/groups"], "newShipTarget": "# split settle\n" },
+    { "factory": ["run", "minor-2-b", "--port", "8787", "--traffic-base", "/groups"], "newShipTarget": "# split settle\n" },
+    { "factory": ["run", "minor-1-c", "--port", "8787", "--traffic-base", "/groups"], "newShipTarget": "# split settle\n" },
+    { "factory": ["run", "minor-2-c", "--port", "8787", "--traffic-base", "/groups"], "newShipTarget": "# split settle\n" },
+    { "exec": ["node", "--experimental-strip-types", "--no-warnings", "docs/lap-6/attempts.ts", "{state}/prereg/prereg.json", "{state}"], "always": true }
+  ]
+}
