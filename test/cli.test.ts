@@ -21,6 +21,14 @@ test('a failed drafter still records its spend', async () => {
   assert.deepEqual(JSON.parse(readFileSync(join(sd, 'runs', 'd1', kept[0]), 'utf8')).map((r: { role: string; reply: string }) => [r.role, r.reply]), [['spec-drafter', 'sorry'], ['spec-drafter', 'sorry']])
 })
 
+test('--minority-brief needs --minority, before any model call', async () => {
+  const req = join(tmp('req'), 'req.txt')
+  writeFileSync(req, 'a memo api')
+  let calls = 0
+  await assert.rejects(main(['draft', 'd2', '--request', req, '--minority-brief', 'pick 4'], async () => { calls++; return { ok: true, text: '', costUsd: 0 } }), /--minority-brief needs --minority/)
+  assert.equal(calls, 0)
+})
+
 test('probe-isolation over the cap still writes its result, with its own exit code', async () => {
   writeDraft(sd, 'p1', { spec: 's', scenarios: SCENARIOS, assumptions: [] })
   const code = await main(['probe-isolation', 'p1'], async () => ({ ok: true, text: 'could not read anything', costUsd: 1.5 }))

@@ -1,0 +1,26 @@
+{
+  "name": "lap7",
+  "home": ".factory-lap7",
+  "steps": [
+    { "exec": ["npm", "test"] },
+    { "exec": ["node", "--experimental-strip-types", "--no-warnings", "docs/lap-7/attempts.ts", "--self-test"] },
+    { "factory": ["probe-isolation", "lap7-probe"] },
+    { "copy": "settle-a1", "from": "../factory-lap-5/.factory-lap5" },
+    { "factory": ["draft", "hard-1", "--request", "requests/split-settle.md", "--spec-from", "settle-a1", "--minority", "--minority-brief", "Pick 4 or 5 points instead of 2 or 3. At least 2 of them must change amounts the app computes (a member's share of an expense, who receives leftover yen, the settlement transfers and their amounts), so that the choice shows in several scenarios, including scenarios written mainly for other behaviour. Do not pick the order of any list."] },
+    { "factory": ["draft", "hard-2", "--request", "requests/split-settle.md", "--spec-from", "settle-a1", "--minority", "--minority-brief", "Pick 4 or 5 points instead of 2 or 3. At least 2 of them must change amounts the app computes (a member's share of an expense, who receives leftover yen, the settlement transfers and their amounts), so that the choice shows in several scenarios, including scenarios written mainly for other behaviour. Do not pick the order of any list."] },
+    { "exec": ["cmp", "{state}/vault/settle-a1/spec.md", "{state}/vault/hard-1/spec.md"] },
+    { "exec": ["cmp", "{state}/vault/settle-a1/spec.md", "{state}/vault/hard-2/spec.md"] },
+    { "gate": "entrance", "approve": ["hard-1", "hard-2"], "fix": { "prereg/prereg.json": "docs/lap-7/prereg.json" }, "read": ["docs/lap-7/entrance-summary.md"] },
+    { "copy": "hard-1", "to": ["hard-1-b", "hard-1-bare-a", "hard-1-bare-b"] },
+    { "copy": "hard-2", "to": ["hard-2-b", "hard-2-bare-a", "hard-2-bare-b"] },
+    { "factory": ["run", "hard-1-bare-a", "--port", "8797", "--traffic-base", "/groups", "--feedback", "bare"], "newShipTarget": "# split settle\n" },
+    { "factory": ["run", "hard-2-bare-a", "--port", "8797", "--traffic-base", "/groups", "--feedback", "bare"], "newShipTarget": "# split settle\n" },
+    { "factory": ["run", "hard-2", "--port", "8797", "--traffic-base", "/groups"], "newShipTarget": "# split settle\n" },
+    { "factory": ["run", "hard-1", "--port", "8797", "--traffic-base", "/groups"], "newShipTarget": "# split settle\n" },
+    { "factory": ["run", "hard-2-b", "--port", "8797", "--traffic-base", "/groups"], "newShipTarget": "# split settle\n" },
+    { "factory": ["run", "hard-2-bare-b", "--port", "8797", "--traffic-base", "/groups", "--feedback", "bare"], "newShipTarget": "# split settle\n" },
+    { "factory": ["run", "hard-1-bare-b", "--port", "8797", "--traffic-base", "/groups", "--feedback", "bare"], "newShipTarget": "# split settle\n" },
+    { "factory": ["run", "hard-1-b", "--port", "8797", "--traffic-base", "/groups"], "newShipTarget": "# split settle\n" },
+    { "exec": ["node", "--experimental-strip-types", "--no-warnings", "docs/lap-7/attempts.ts", "{state}/prereg/prereg.json", "{state}"], "always": true }
+  ]
+}

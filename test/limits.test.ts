@@ -108,6 +108,18 @@ test('run: retry cap -> failed after N attempts, never re-enqueued', async () =>
   assert.equal(builds, 2)
 })
 
+test('run --feedback bare: the retry gets one bare line per failed scenario, recorded in run.json', async () => {
+  approvedChange(sd, 'bare-fb')
+  const seen: string[] = []
+  const model: Model = async (t) => { if (t.role === 'builder') seen.push(t.instruction); return { ok: true, text: '{"pass":true}', costUsd: 0.01 } } // builds nothing
+  const r = await runChange({ changeId: 'bare-fb', shipTarget: gitTarget(), model, stateDir: sd, port: await freePort(), maxAttempts: 2, stopFile: join(sd, 'NOSTOP'), feedback: 'bare' })
+  const failed = r.attempts[0].results.filter((x) => !x.pass).length
+  assert.ok(failed > 0)
+  assert.equal(seen[1].split('Feedback:\n')[1].trim(), Array(failed).fill('- failed: a hidden scenario').join('\n'))
+  assert.equal(JSON.parse(readFileSync(join(sd, 'runs', 'bare-fb', 'run.json'), 'utf8')).feedback, 'bare')
+  await assert.rejects(runChange({ changeId: 'bare-fb-2', shipTarget: gitTarget(), model, stateDir: sd, port: 1, feedback: 'none' as 'bare' }), /feedback must be/)
+})
+
 test('run: STOP file created mid-call aborts the in-flight call promptly and fails the change', async () => {
   approvedChange(sd, 'estop')
   const stopFile = join(tmp('stop'), 'STOP')

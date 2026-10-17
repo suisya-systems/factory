@@ -73,6 +73,9 @@ answer is reasonable. For each, deliberately choose a reasonable answer that mos
 and write at least one scenario that checks it. Your answer must still satisfy everything the request states. Do not pick a status code.
 For each such point add one assumption in exactly this form:
 "[minority] <the point>: <your answer> (most would: <the usual answer>); scenarios: <id>, <id>"`
+// Lap 7 (`draft --minority-brief <text>`): the experimenter's extra constraints on the minority points (how many, which kind).
+// It is kept in the assumptions, so it is part of the approved version; the builder never sees assumptions.
+const minorityPrompt = (brief?: string) => `\n\n${MINORITY}` + (brief ? `\nEXPERIMENTER'S BRIEF (where it differs from the paragraph above, the brief wins): ${brief}` : '')
 const MINORITY_LINE = /^\[minority\] (.+?): (.+) \(most would: (.+)\); scenarios: (.+)$/
 // ponytail: at least one marked point, well formed, citing real scenario ids; whether the answer is really
 // a minority one is checked outside the factory (lap-6 runbook, entrance check).
@@ -156,7 +159,7 @@ export function specIface(spec: string): string {
 
 // o.reuse (lap 5, `draft --spec-from`): an approved spec (body + interface) is used as is and the spec drafter is not called,
 // so several scenario sets (or a hand-edited control spec) share one spec and one interface.
-export async function draft(model: Model, request: string, o: { signals?: string; app?: string; reuse?: { body: string; iface: string }; minority?: boolean } = {}): Promise<Omit<Draft, 'base'>> {
+export async function draft(model: Model, request: string, o: { signals?: string; app?: string; reuse?: { body: string; iface: string }; minority?: boolean; minorityBrief?: string } = {}): Promise<Omit<Draft, 'base'>> {
   const req = `REQUEST:\n${request}\n` + (o.signals ? `\nPRODUCTION SIGNALS (observed from the running app):\n${o.signals}\n` : '') + appBlock(o.app ?? '')
   const j = o.reuse ? { spec: o.reuse.body, iface: o.reuse.iface, assumptions: ['(spec reused from an approved change; the spec drafter was not called)'] } : await ask(model, 'spec-drafter', `You are the spec drafter of a software factory. Turn the request into a spec for a builder (HTTP JSON API).\n\n${req}\n${SPEC_FORMAT}`, (j) => {
     if (typeof j.spec !== 'string' || !j.spec.trim()) throw new Error('spec drafter: spec missing')
@@ -168,13 +171,13 @@ export async function draft(model: Model, request: string, o: { signals?: string
   const spec = `${j.spec.trimEnd()}${IFACE_HEAD}${j.iface}\n\`\`\`\n`
 
   const k = await ask(model, 'scenario-drafter', `You are the scenario writer of a software factory. Write hidden acceptance scenarios (HTTP JSON API) for the request. ` +
-    `A builder will implement a spec you do not see; your scenarios judge it.\n\n${req}\nINTERFACE (names and shapes the builder uses; it says nothing about behaviour):\n${j.iface}\n\n${SCENARIO_FORMAT}${o.minority ? `\n\n${MINORITY}` : ''}`,
+    `A builder will implement a spec you do not see; your scenarios judge it.\n\n${req}\nINTERFACE (names and shapes the builder uses; it says nothing about behaviour):\n${j.iface}\n\n${SCENARIO_FORMAT}${o.minority ? minorityPrompt(o.minorityBrief) : ''}`,
   (k) => {
     const scenarios = validateScenarios(k.scenarios), more = k.assumptions === undefined ? [] : strs(k.assumptions, 'scenario drafter')
     if (o.minority) checkMinority(more, scenarios)
     return { scenarios, more }
   })
-  return { spec, scenarios: k.scenarios, assumptions: [...assumptions, ...k.more.map((x) => `(scenario writer) ${x}`)], classification: await classify(model, spec, o.app ?? '', k.scenarios, extractJson) }
+  return { spec, scenarios: k.scenarios, assumptions: [...assumptions, ...(o.minorityBrief ? [`(experimenter) minority brief: ${o.minorityBrief}`] : []), ...k.more.map((x) => `(scenario writer) ${x}`)], classification: await classify(model, spec, o.app ?? '', k.scenarios, extractJson) }
 }
 
 // ---- builder ----
@@ -246,8 +249,11 @@ async function judgeDir(model: Model, dir: string, spec: string, scenarios: Scen
 // What the builder may learn from a rejection. DEFAULT = the drafter's one-line summary of each
 // failed scenario + a bare "LLM judge did not approve" flag (only on a real rejection, not a judge failure). Never steps, values, expectations,
 // details, or the judge's reason text (which may quote scenarios). Keep this the only path.
-export function feedbackFor(v: Verdict, scenarios: Scenario[]): string {
-  const byId = new Map(scenarios.map((s) => [s.id, s.summary]))
+// Lap 7 control (`run --feedback bare`): the same lines without the summaries, so the builder learns that it was
+// rejected and how many scenarios failed, never which or why.
+export type FeedbackMode = 'summaries' | 'bare'
+export function feedbackFor(v: Verdict, scenarios: Scenario[], mode: FeedbackMode = 'summaries'): string {
+  const byId = new Map(mode === 'bare' ? [] : scenarios.map((s) => [s.id, s.summary]))
   const lines = v.results.filter((r) => !r.pass).map((r) => `- failed: ${byId.get(r.id) ?? 'a hidden scenario'}`)
   if (v.llmPass === false) lines.push('- LLM judge did not approve')
   return lines.join('\n')

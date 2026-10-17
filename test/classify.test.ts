@@ -270,6 +270,18 @@ test('lap 6: --minority asks for marked minority choices; a reply without a well
   assert.match(good.seen[2].instruction, /REJECTED: scenario drafter: no "\[minority\]/)
   assert.ok(!(good.d instanceof Error))
   assert.match(approvalSummary('x', good.d, 'v'), /## Minority choices[^\n]*\n- \(scenario writer\) \[minority\] leftover yen: goes to non-payers/)
+  // lap 7: the experimenter's brief reaches the scenario writer only, and is part of the approved assumptions
+  const seen: Task[] = []
+  const m: Model = async (t) => {
+    seen.push(t)
+    const reply = t.role === 'scenario-drafter' ? { scenarios: [createGet], assumptions: [ok] } : { steps: [{ status: null, body: null, basis: 'convention', quote: '' }, { status: null, body: null, basis: 'convention', quote: '' }] }
+    return { ok: true, costUsd: 0.1, text: JSON.stringify(reply) }
+  }
+  const briefed = await draft(m, 'x', { minority: true, minorityBrief: 'Pick 4 or 5 points.', reuse: { body: SPEC, iface: JSON.stringify(IFACE) } })
+  assert.match(seen[0].instruction, /MINORITY CHOICES[\s\S]*\nEXPERIMENTER'S BRIEF [^\n]*: Pick 4 or 5 points\.$/)
+  assert.ok(seen.slice(1).every((t) => !t.instruction.includes('Pick 4 or 5')))
+  assert.ok(briefed.assumptions.includes('(experimenter) minority brief: Pick 4 or 5 points.'))
+  assert.match(approvalSummary('x', briefed, 'v'), /- \(experimenter\) minority brief: Pick 4 or 5 points\./)
   for (const [bad, why] of [[ok.replace(createGet.id, 'nope'), /unknown scenario "nope"/], [ok.replace(' (most would: everyone in turn)', ''), /malformed/]] as const) {
     const r = await run(true, [bad], [bad])
     assert.ok(r.d instanceof Error && why.test(r.d.message), String(r.d))
