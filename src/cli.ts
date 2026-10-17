@@ -20,6 +20,8 @@ const USAGE = `usage: factory <command>
                                                    (--base: the app being extended; run then requires the same HEAD)
         [--spec-from <approved id> [--spec <file>]]  reuse that change's spec + interface (no spec drafter);
                                                    --spec replaces the spec body (a control spec), interface kept
+        [--minority]                               the scenario writer picks reasonable minority answers on purpose
+                                                   and marks them "[minority]" in its assumptions
   approve <id> --by <name> --version <hash> [--note <text>]   human entrance approval of the version you read
   run <id> --ship-target <repo> [--max-cost N (per change, drafter included)] [--max-attempts N] [--port N] [--traffic-base /memos]
   replicate <id> --k N [--score <id,id>] [--probes <file under vault/>] [--max-cost N] [--rescore]
@@ -85,12 +87,14 @@ export function approvalSummary(id: string, d: Draft, version: string): string {
   const keyPoints = d.spec.split('\n').filter((l) => /^\s*(#|[-*]|\d+\.)/.test(l)).slice(0, 25)
   // The points the spec leaves to the builder (lap 3), shown whole: the key points above are capped.
   const undecided = UNDECIDED.test(d.spec) ? d.spec.split(UNDECIDED)[1].split(/^## /m)[0].trim().split('\n') : []
+  const minority = d.assumptions.filter((a) => a.includes('[minority]')) // lap 6: stored with a "(scenario writer) " prefix
   return [
     `# Approval request: ${id}`, '',
     `Version: ${version}`, '',
     `Approve with: \`npm run factory -- approve ${id} --by <name> --version ${version}\`  (approval fixes this exact set; to change anything, draft a new change)`, '',
     '## Spec key points', ...keyPoints, '',
     ...(undecided.length ? ['## Undecided in the spec (left to the builder)', ...undecided, ''] : []),
+    ...(minority.length ? ['## Minority choices (the scenario writer chose these on purpose; most builders are expected to miss them at first)', ...minority.map((a) => `- ${a}`), ''] : []),
     ...(d.base?.baseSha ? [`Extends: ${d.base.baseSha} (the ship target must still be at this commit when the change runs)`, ''] : []),
     `## Scenarios: ${d.scenarios.length} total`,
     'Self-report = the scenario writer\'s own claim that the request states the behaviour (it never saw the spec or the spec writer\'s assumptions).', '',
@@ -117,7 +121,7 @@ export async function main(argv: string[], model: Model = claudeModel): Promise<
       args: argv, allowPositionals: true,
       options: { help: { type: 'boolean', short: 'h' }, request: { type: 'string' }, base: { type: 'string' }, signals: { type: 'string' }, by: { type: 'string' }, version: { type: 'string' }, note: { type: 'string' }, 'ship-target': { type: 'string' },
         'max-cost': { type: 'string' }, 'max-attempts': { type: 'string' }, port: { type: 'string' }, 'traffic-base': { type: 'string' },
-        model: { type: 'string', multiple: true }, 'spec-from': { type: 'string' }, spec: { type: 'string' }, k: { type: 'string' }, score: { type: 'string' }, probes: { type: 'string' }, rescore: { type: 'boolean' } },
+        model: { type: 'string', multiple: true }, 'spec-from': { type: 'string' }, spec: { type: 'string' }, k: { type: 'string' }, score: { type: 'string' }, probes: { type: 'string' }, rescore: { type: 'boolean' }, minority: { type: 'boolean' } },
     })
   } catch (e) { console.error(`factory: ${(e as Error).message}\n${USAGE}`); return 2 }
   const { positionals, values: v } = parsed
@@ -156,7 +160,7 @@ export async function main(argv: string[], model: Model = claudeModel): Promise<
           if (!UNDECIDED.test(reuse.body)) throw new Error('--spec: the spec has no "## Undecided" section')
         } else if (v.spec) throw new Error('--spec needs --spec-from')
         const app = v.base ? await appSnapshot(resolve(v.base)) : null
-        const drafted = await draft(guard.model(model), request, { signals: v.signals ? readFileSync(v.signals, 'utf8') : undefined, app: app?.text, reuse })
+        const drafted = await draft(guard.model(model), request, { signals: v.signals ? readFileSync(v.signals, 'utf8') : undefined, app: app?.text, reuse, minority: v.minority })
         const d: Draft = { ...drafted, base: { baseSha: app?.sha ?? null, requestSha256 } }
         const dir = writeDraft(sd, id, d)
         const version = hash(dir)
