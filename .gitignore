@@ -1,0 +1,4 @@
+.factory/
+.worker-scratch/
+.codex-home/
+node_modules/
