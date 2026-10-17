@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import type { Model } from './adapter.ts'
 import { CAPS } from './limits.ts'
 import { classify, UNDECIDED } from './classify.ts'
+import { usesService, withService } from './fake.ts'
 import { exportTree, removeTree, sandboxGit } from './sandbox.ts'
 import { isObj, runScenarios, validateScenarios, type Scenario, type ScenarioResult } from './scenario.ts'
 import type { Draft } from './vault.ts'
@@ -64,6 +65,16 @@ use "length" to check that a list holds exactly the expected items.
 Use ONLY the endpoint, parameter and field names in the INTERFACE. Where the request does not fix a status code, accept every reasonable one (e.g. [400, 422]).
 Each scenario starts from an EMPTY app.
 Write 8-15 scenarios, a mix of inSpec true and false. You cannot ask questions: record every guess in assumptions.`
+
+// #17: only for a spec that declares an external service (fake.ts). The fake answers what the scenario sets; never the builder's business.
+const SERVICE_STEPS = `EXTERNAL SERVICE: the app calls the external service the request names. In judging a fake stands in for it, and a step with
+"service": true goes to the fake's control endpoint instead of the app (no "headers" on such a step). Two forms only:
+- {"service": true, "method": "POST", "path": "/responses", "body": {"method": "GET|POST|PUT|PATCH|DELETE", "path": "/<path on the service>", "status": <int 200-599>, "json": <optional body>, "headers": {<optional>}}, "expect": {"status": 204}}
+  sets what the fake answers to that method and path (query ignored; the last one set wins; anything not set gets 404 {"error": "no canned response"}).
+- {"service": true, "method": "GET", "path": "/requests", "expect": {...}} returns the array of requests the app sent to the service so far, in order,
+  each {"method", "path" (with query), "headers" (lower-case names), "body" (parsed JSON, else text)}: use it to check what the app sent.
+Service steps before the scenario's first app step run before the app starts. The fake starts empty in every scenario.
+Use the service's API exactly as the request describes it. The summary rule covers service steps too.`
 
 // Lap 6 (`draft --minority`): the scenario writer picks, on purpose, reasonable answers most builders would not
 // (in lap 5 builders and scenario writers chose the same answer 16/16 times, so no retry ever happened). Each choice is
@@ -159,7 +170,8 @@ export function specIface(spec: string): string {
 
 // o.reuse (lap 5, `draft --spec-from`): an approved spec (body + interface) is used as is and the spec drafter is not called,
 // so several scenario sets (or a hand-edited control spec) share one spec and one interface.
-export async function draft(model: Model, request: string, o: { signals?: string; app?: string; reuse?: { body: string; iface: string }; minority?: boolean; minorityBrief?: string } = {}): Promise<Omit<Draft, 'base'>> {
+// o.service (#17, `draft --service`): the spec declares an external service (fake.ts); a reused spec that already does keeps it.
+export async function draft(model: Model, request: string, o: { signals?: string; app?: string; reuse?: { body: string; iface: string }; minority?: boolean; minorityBrief?: string; service?: boolean } = {}): Promise<Omit<Draft, 'base'>> {
   const req = `REQUEST:\n${request}\n` + (o.signals ? `\nPRODUCTION SIGNALS (observed from the running app):\n${o.signals}\n` : '') + appBlock(o.app ?? '')
   const j = o.reuse ? { spec: o.reuse.body, iface: o.reuse.iface, assumptions: ['(spec reused from an approved change; the spec drafter was not called)'] } : await ask(model, 'spec-drafter', `You are the spec drafter of a software factory. Turn the request into a spec for a builder (HTTP JSON API).\n\n${req}\n${SPEC_FORMAT}`, (j) => {
     if (typeof j.spec !== 'string' || !j.spec.trim()) throw new Error('spec drafter: spec missing')
@@ -168,10 +180,11 @@ export async function draft(model: Model, request: string, o: { signals?: string
   })
   const assumptions = [`Interface (names and shapes only): ${j.iface}`, ...j.assumptions]
   // The builder sees the same names the scenarios use.
-  const spec = `${j.spec.trimEnd()}${IFACE_HEAD}${j.iface}\n\`\`\`\n`
+  const body = o.service ? withService(j.spec) : j.spec
+  const spec = `${body.trimEnd()}${IFACE_HEAD}${j.iface}\n\`\`\`\n`
 
   const k = await ask(model, 'scenario-drafter', `You are the scenario writer of a software factory. Write hidden acceptance scenarios (HTTP JSON API) for the request. ` +
-    `A builder will implement a spec you do not see; your scenarios judge it.\n\n${req}\nINTERFACE (names and shapes the builder uses; it says nothing about behaviour):\n${j.iface}\n\n${SCENARIO_FORMAT}${o.minority ? minorityPrompt(o.minorityBrief) : ''}`,
+    `A builder will implement a spec you do not see; your scenarios judge it.\n\n${req}\nINTERFACE (names and shapes the builder uses; it says nothing about behaviour):\n${j.iface}\n\n${SCENARIO_FORMAT}${usesService(spec) ? `\n\n${SERVICE_STEPS}` : ''}${o.minority ? minorityPrompt(o.minorityBrief) : ''}`,
   (k) => {
     const scenarios = validateScenarios(k.scenarios), more = k.assumptions === undefined ? [] : strs(k.assumptions, 'scenario drafter')
     if (o.minority) checkMinority(more, scenarios)
@@ -188,10 +201,14 @@ export const RUN_CONTRACT = `RUN CONTRACT (fixed, non-negotiable):
 - JSON request and response bodies.
 - Work only inside the current directory. The factory commits your work when you finish.`
 
+// #17: a spec that declares an external service lifts "no network" for that one address.
+export const runContract = (spec: string) => (usesService(spec)
+  ? RUN_CONTRACT.replace('no network at runtime.', 'no network at runtime except the external service at process.env.SERVICE_URL (see the spec).') : RUN_CONTRACT)
+
 // The builder gets the spec only. assumptions.json carries scenario-writer text: never pass it here.
 export async function build(model: Model, workspace: string, spec: string, feedback: string, signal?: AbortSignal): Promise<{ sha: string; ok: boolean; error?: string }> {
   const instruction = `You are the builder of a software factory. Implement the spec below in the current directory. ` +
-    `Points the spec lists under "Undecided" are left to you: choose sensible behaviour.\n\nSPEC:\n${spec}\n\n${RUN_CONTRACT}\n` +
+    `Points the spec lists under "Undecided" are left to you: choose sensible behaviour.\n\nSPEC:\n${spec}\n\n${runContract(spec)}\n` +
     (feedback ? `\nYOUR PREVIOUS ATTEMPT WAS REJECTED. Feedback:\n${feedback}\n` : '')
   const r = await model({ ...base, maxCostUsd: CAPS.builderCallUsd, role: 'builder', instruction, workdir: workspace, access: 'write' })
   // The workspace (incl. .git/config) is builder-written: a silently failed commit would leave HEAD
@@ -227,7 +244,7 @@ export async function judge(model: Model, workspace: string, sha: string, spec: 
 }
 
 async function judgeDir(model: Model, dir: string, spec: string, scenarios: Scenario[], approvedVersion: string, signal: AbortSignal): Promise<Verdict> {
-  const results = await runScenarios(dir, scenarios, signal)
+  const results = await runScenarios(dir, scenarios, signal, { service: usesService(spec) })
   const testsAllPass = results.every((r) => r.pass)
   const instruction = `You are the judge of a software factory. The deterministic hidden scenarios have already run. Read the code in the current directory (read-only) and decide whether it satisfies the spec as a whole. Points the spec lists under "Undecided" were left to the builder: any sensible choice satisfies the spec.\n\nSPEC:\n${spec}\n\nSCENARIOS:\n${JSON.stringify(scenarios)}\n\nRESULTS:\n${JSON.stringify(results)}\n\nReply with ONE JSON object: {"pass": true|false, "reason": "..."}`
   let r

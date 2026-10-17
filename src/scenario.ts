@@ -2,10 +2,12 @@
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { CONTROL, startFake, type Fake } from './fake.ts'
 import { freePort, killTree, removeTree, spawnApp, waitPort } from './sandbox.ts'
 
 export type Expect = { status?: number | number[]; json?: unknown; jsonHas?: string[]; isArray?: boolean; length?: number | Record<string, number> }
-export type Step = { method: string; path: string; body?: unknown; headers?: Record<string, string>; expect: Expect; capture?: Record<string, string> }
+// service: the step goes to the fake external service's control endpoint (fake.ts), not to the app.
+export type Step = { method: string; path: string; body?: unknown; headers?: Record<string, string>; expect: Expect; capture?: Record<string, string>; service?: true }
 // inSpec: the drafter's claim that the spec states this behaviour (used to split pass rates; self-reported, not verified).
 export type Scenario = { id: string; title: string; summary: string; inSpec: boolean; kind: string; steps: Step[] }
 export type ScenarioResult = { id: string; inSpec: boolean; kind: string; pass: boolean; failedStep?: number; detail: string }
@@ -22,6 +24,7 @@ function leaves<T>(x: unknown, is: (v: unknown) => v is T, out: T[] = []): T[] {
   return out
 }
 const strings = (x: unknown) => leaves(x, (v): v is string => typeof v === 'string')
+const objKeys = (x: unknown): string[] => (Array.isArray(x) ? x.flatMap(objKeys) : isObj(x) ? Object.entries(x).flatMap(([k, v]) => [k, ...objKeys(v)]) : [])
 // Lap 4: amounts (yen) are this app's expected values, so numbers count too.
 const numbers = (x: unknown) => leaves(x, Number.isInteger as (v: unknown) => v is number)
 
@@ -41,7 +44,9 @@ export function validateScenarios(x: unknown): Scenario[] {
     for (const [j, st] of s.steps.entries()) {
       const ws = `${w}.steps[${j}]`
       if (!isObj(st)) throw new Error(`${ws}: not an object`)
-      keys(st, ['method', 'path', 'body', 'headers', 'expect', 'capture'], ws)
+      keys(st, ['method', 'path', 'body', 'headers', 'expect', 'capture', 'service'], ws)
+      if (st.service !== undefined && (st.service !== true || st.headers !== undefined || ![CONTROL.set, CONTROL.list].includes(`${st.method} ${String(st.path).split('?')[0]}`)))
+        throw new Error(`${ws}: a service step is "${CONTROL.set}" or "${CONTROL.list}" with "service": true and no headers`)
       if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(st.method)) throw new Error(`${ws}: bad method`)
       if (typeof st.path !== 'string' || !st.path.startsWith('/')) throw new Error(`${ws}: path must start with /`)
       if (st.method === 'GET' && st.body !== undefined) throw new Error(`${ws}: GET cannot have a body`)
@@ -56,7 +61,8 @@ export function validateScenarios(x: unknown): Scenario[] {
       if (e.isArray !== undefined && typeof e.isArray !== 'boolean') throw new Error(`${ws}: bad expect.isArray`)
       if (e.length !== undefined && !(Number.isInteger(e.length) || (isObj(e.length) && Object.keys(e.length).length > 0 && Object.values(e.length).every(Number.isInteger)))) throw new Error(`${ws}: bad expect.length`)
       // The summary is the only thing the builder may see on failure: it must not carry concrete values.
-      const lits = [st.path.split('?')[0].replace(/\{\{\w+\}\}/g, ''), ...strings(st.body), ...strings(e.json), ...strings(st.headers)]
+      // A service step's body is the fake's canned answer: its keys are scenario data too.
+      const lits = [st.path.split('?')[0].replace(/\{\{\w+\}\}/g, ''), ...strings(st.body), ...strings(e.json), ...strings(st.headers), ...(st.service ? objKeys(st.body) : [])]
         .filter((v) => v.length >= 3 && v !== '/').map((v) => v.toLowerCase())
       const leaked = lits.find((v) => s.summary.toLowerCase().includes(v))
         ?? [e.status ?? [], ...numbers(st.body), ...numbers(e.json)].flat().find((c: number) => Math.abs(c) >= 100 && new RegExp(`(?<!\\d)${c}(?!\\d)`).test(s.summary))
@@ -134,13 +140,20 @@ async function send(port: number, st: Omit<Step, 'expect'>, vars: Record<string,
   return { res, json }
 }
 
-async function runSteps(port: number, s: Scenario, signal: AbortSignal): Promise<{ failedStep?: number; detail: string }> {
-  const vars: Record<string, unknown> = {}
-  for (const [i, st] of s.steps.entries()) {
-    const n = i + 1
+// steps[i] is step from + i + 1 of the scenario. port 0: the app is not started yet (only service steps run).
+async function runSteps(port: number, steps: Step[], from: number, vars: Record<string, unknown>, fake: Fake | undefined, signal: AbortSignal): Promise<{ failedStep?: number; detail: string }> {
+  for (const [i, st] of steps.entries()) {
+    const n = from + i + 1
     try {
-      const { res, json } = await send(port, st, vars, signal)
-      const failed = checkStep(st, res.status, json, vars, res.headers)
+      let failed: string | null
+      if (st.service) {
+        if (!fake) return { failedStep: n, detail: `step ${n}: the spec declares no external service` }
+        const r = fake.control(st.method, fill(st.path, vars) as string, st.body === undefined ? undefined : fill(st.body, vars))
+        failed = checkStep(st, r.status, r.json, vars)
+      } else {
+        const { res, json } = await send(port, st, vars, signal)
+        failed = checkStep(st, res.status, json, vars, res.headers)
+      }
       if (failed) return { failedStep: n, detail: `step ${n}: ${failed}` }
     } catch (err) {
       if (signal.aborted) throw err
@@ -152,10 +165,12 @@ async function runSteps(port: number, s: Scenario, signal: AbortSignal): Promise
 
 // Starts the app fresh (own data dir, own port), runs `go` against it, always stops it.
 // When the app does not start, `failed` gets why.
-async function withApp<T>(appDir: string, signal: AbortSignal, go: (port: number) => Promise<T>, failed: (why: string) => T): Promise<T> {
+async function withApp<T>(appDir: string, signal: AbortSignal, go: (port: number) => Promise<T>, failed: (why: string) => T, fake?: Fake): Promise<T> {
   const dataDir = mkdtempSync(join(tmpdir(), 'factory-data-'))
   const port = await freePort()
-  const app = spawnApp(appDir, port, dataDir)
+  let sport = 0 // the service port only exists inside the app's network namespace; any port but the app's will do
+  while (fake && (!sport || sport === port)) sport = await freePort()
+  const app = spawnApp(appDir, port, dataDir, undefined, fake && { port: sport, connect: () => fake.connect() })
   let stderr = ''
   app.stderr?.on('data', (d) => { stderr = (stderr + d).slice(-300) })
   try {
@@ -177,12 +192,23 @@ async function withApp<T>(appDir: string, signal: AbortSignal, go: (port: number
   }
 }
 
-export async function runScenario(appDir: string, s: Scenario, signal: AbortSignal): Promise<ScenarioResult> {
+// o.service (#17, the approved spec declares an external service): a fresh fake per scenario; the
+// scenario's leading service steps run before the app starts, so an app that calls the service at startup sees them.
+export async function runScenario(appDir: string, s: Scenario, signal: AbortSignal, o: { service?: boolean } = {}): Promise<ScenarioResult> {
   const base = { id: s.id, inSpec: s.inSpec, kind: s.kind }
-  return withApp(appDir, signal, async (port) => {
-    const r = await runSteps(port, s, signal)
-    return { ...base, pass: r.failedStep === undefined, ...r }
-  }, (detail) => ({ ...base, pass: false, failedStep: 0, detail }))
+  const fake = o.service ? startFake() : undefined
+  try {
+    const vars: Record<string, unknown> = {}
+    const first = s.steps.findIndex((st) => !st.service)
+    const lead = !fake ? 0 : first < 0 ? s.steps.length : first
+    const pre = await runSteps(0, s.steps.slice(0, lead), 0, vars, fake, signal)
+    if (pre.failedStep !== undefined) return { ...base, pass: false, ...pre }
+    return await withApp(appDir, signal, async (port) => {
+      const r = await runSteps(port, s.steps.slice(lead), lead, vars, fake, signal)
+      if (r.failedStep === undefined && fake?.overflow()) return { ...base, pass: false, failedStep: s.steps.length, detail: 'the app sent the external service more than the fake keeps' }
+      return { ...base, pass: r.failedStep === undefined, ...r }
+    }, (detail) => ({ ...base, pass: false, failedStep: 0, detail }), fake)
+  } finally { fake?.close() }
 }
 
 // ---- probes (lap 5) ----
@@ -253,11 +279,11 @@ export async function runProbe(appDir: string, p: Probe, signal: AbortSignal): P
   }, (detail) => ({ id: p.id, answer: BLOCKED, detail }))
 }
 
-export async function runScenarios(appDir: string, scenarios: Scenario[], signal: AbortSignal): Promise<ScenarioResult[]> {
+export async function runScenarios(appDir: string, scenarios: Scenario[], signal: AbortSignal, o: { service?: boolean } = {}): Promise<ScenarioResult[]> {
   const out: ScenarioResult[] = []
   for (const s of scenarios) {
     if (signal.aborted) throw new Error('stopped')
-    out.push(await runScenario(appDir, s, signal)) // ponytail: sequential; parallelize if scenario count grows
+    out.push(await runScenario(appDir, s, signal, o)) // ponytail: sequential; parallelize if scenario count grows
   }
   return out
 }
