@@ -5,13 +5,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Model } from './adapter.ts'
 import { CAPS, startGuard, Stop, type Ledger } from './limits.ts'
-import { build, feedbackFor, judge, type Verdict } from './roles.ts'
+import { build, feedbackFor, judge, type FeedbackMode, type Verdict } from './roles.ts'
 import { observe } from './serve.ts'
 import { ship, type PassMark } from './ship.ts'
 import { loadApproved, checkId } from './vault.ts'
 import type { ScenarioResult } from './scenario.ts'
 
-export type RunOpts = { changeId: string; shipTarget: string; model: Model; stateDir: string; port: number; maxCostUsd?: number; maxAttempts?: number; stopFile?: string; trafficBase?: string }
+export type RunOpts = { changeId: string; shipTarget: string; model: Model; stateDir: string; port: number; maxCostUsd?: number; maxAttempts?: number; stopFile?: string; trafficBase?: string; feedback?: FeedbackMode }
 
 const rate = (xs: ScenarioResult[]) => ({ passed: xs.filter((r) => r.pass).length, total: xs.length })
 // Pass rates split two ways: the scenario writer's self-report, and the independent label fixed at approval.
@@ -38,6 +38,8 @@ export async function runChange(o: RunOpts) {
   const maxAttempts = o.maxAttempts ?? CAPS.maxAttempts
   if (!(Number.isFinite(capUsd) && capUsd > 0)) throw new Error(`max cost must be a positive number, got ${capUsd}`)
   if (!(Number.isInteger(maxAttempts) && maxAttempts >= 1)) throw new Error(`max attempts must be an integer >= 1, got ${maxAttempts}`)
+  const feedbackMode = o.feedback ?? 'summaries'
+  if (!['summaries', 'bare'].includes(feedbackMode)) throw new Error(`feedback must be summaries or bare, got ${feedbackMode}`)
   const runDir = join(o.stateDir, 'runs', id)
   if (existsSync(join(runDir, 'run.json'))) throw new Error(`${id} already ran; a new attempt must enter as a new change`)
   if (existsSync(join(runDir, 'replicates'))) throw new Error(`${id} has replicates; replicate and run keep separate cost records, so one change takes only one of them`)
@@ -53,7 +55,7 @@ export async function runChange(o: RunOpts) {
   const model = guard.model(o.model)
   const record = {
     changeId: id, approvedVersion: approved.version, status: 'running' as 'running' | 'shipped' | 'failed', stopReason: '',
-    caps: { maxCostUsd: capUsd, maxAttempts },
+    caps: { maxCostUsd: capUsd, maxAttempts }, feedback: feedbackMode,
     attempts: [] as { n: number; sha: string; builderOk: boolean; testsAllPass: boolean; llmPass: boolean | null; llmReason: string; pass: boolean; approvedVersion: string; passRate: ReturnType<typeof passRate>; results: ScenarioResult[] }[],
     llmOnlyRejections: 0, // attempts where every deterministic test passed but the LLM judge did not approve
     judgeFailures: 0, // attempts where the LLM judge gave no verdict (call failed / unparseable reply)
@@ -88,7 +90,7 @@ export async function runChange(o: RunOpts) {
       save()
       if (v.stop) throw v.stop // recorded first: the deterministic results of this attempt are kept
       if (v.pass) { passed = v; break }
-      feedback = feedbackFor(v, approved.scenarios)
+      feedback = feedbackFor(v, approved.scenarios, feedbackMode)
     }
     if (!passed) throw new Stop(`retry cap reached: ${maxAttempts} attempts without a pass`)
     record.passedWithinCap = true
