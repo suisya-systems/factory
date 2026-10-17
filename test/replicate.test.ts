@@ -23,6 +23,9 @@ const PROBES = { decisions: [
   // unordered lists, extra keys and captured values: the order the app lists notes in does not matter
   { id: 'listed', steps: [{ method: 'POST', path: '/notes', body: { title: 'x', body: 'b' }, capture: { x: 'id' } }, { method: 'POST', path: '/notes', body: { title: 'y', body: 'b' } }, { method: 'GET', path: '/notes' }],
     observe: ['3:body'], options: { both: [[[{ title: 'y' }, { id: '{{x}}', title: 'x' }]]], one: [[[{ title: 'x' }]]] } },
+  // two observations: an answer that only matches with the two swapped is not that answer
+  { id: 'swap', steps: [{ method: 'POST', path: '/notes', body: { title: 't', body: 'b' } }, { method: 'GET', path: '/notes/nope' }], observe: ['1:status', '2:status'],
+    options: { swapped: [[404, 201]], 'in-order': [[201, 404]] } },
 ] }
 const probesFile = (id: string) => { const f = join(vaultDir(sd, id), 'probes.json'); writeFileSync(f, JSON.stringify(PROBES)); return f }
 
@@ -49,7 +52,7 @@ test('K builds from empty repos, scored by this change, a same-spec change and t
     for (const sc of SCENARIOS) assert.ok(!s.task.instruction.includes(sc.summary), 'scenario text reached the builder')
     assert.ok(!s.task.instruction.includes('created-201'), 'probe text reached the builder')
   }
-  assert.deepEqual(rs.map((r) => r.probes.map((p) => p.answer)), [['created-201', 'kept', 'blocked', 'both'], ['ok-200', 'kept', 'blocked', 'both']])
+  assert.deepEqual(rs.map((r) => r.probes.map((p) => p.answer)), [['created-201', 'kept', 'blocked', 'both', 'in-order'], ['ok-200', 'kept', 'blocked', 'both', 'other']])
   assert.match(rs[0].probes[2].detail!, /step 3: variable g was never captured/)
   assert.deepEqual(rs.map((r) => r.passed), [{ 'rep-a': 4, 'rep-b': 2 }, { 'rep-a': 2, 'rep-b': 1 }]) // 200 on create fails the 201 checks
   assert.ok(rs.every((r) => r.probesSha256 && r.costUsd === 0.25 && r.requestedModels.builder === 'm1'))
