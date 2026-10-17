@@ -45,6 +45,7 @@ export async function serve(stateDir: string, port: number): Promise<void> {
 
 // Reads prod logs into signals.json and stops there: turning a signal into the next job goes
 // through the drafter + human approval at the entrance (decision 2), never automatically.
+export const STDERR_ERROR = /error|exception|unhandled|exited/i // what observe() counts as an error line
 export function observe(stateDir: string, port: number) {
   const prod = prodDir(stateDir, port)
   const read = (f: string) => (existsSync(join(prod, f)) ? readFileSync(join(prod, f), 'utf8').split('\n').filter(Boolean) : [])
@@ -63,7 +64,7 @@ export function observe(stateDir: string, port: number) {
     requests: access.length,
     byStatus,
     errors5xx: e5.length,
-    stderrErrors: stderr.filter((l) => /error|exception|unhandled|exited/i.test(l)).length,
+    stderrErrors: stderr.filter((l) => STDERR_ERROR.test(l)).length,
     latencyMs: { p50: pct(0.5), p95: pct(0.95) },
     samples: { errors5xx: e5.slice(-5).map((a) => a.line), stderr: stderr.slice(-5) },
   }
