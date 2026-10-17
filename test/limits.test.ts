@@ -2,10 +2,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { runCli, type Model, type Task } from '../src/adapter.ts'
-import { CAPS, startGuard, Stop } from '../src/limits.ts'
+import { CAPS, mergeLedger, startGuard, Stop, UNATTRIBUTED } from '../src/limits.ts'
 import { runChange } from '../src/run.ts'
 import { freePort } from '../src/sandbox.ts'
 import { approvedChange, freshState, gitTarget, MEMO_SERVER, tmp, writeApp } from './helpers.ts'
@@ -35,6 +35,34 @@ test('null cost is listed as uncounted AND charged its whole budget, so the cap 
   assert.equal(calls, 1) // a timed-out call must not hand the full budget to the next one
   assert.deepEqual(g.ledger.uncounted, [{ role: 'drafter', reason: 'process died', chargedUsd: 5 }])
   assert.equal(g.ledger.totalUsd, 5)
+})
+
+test('per-model cost (lap 4): the guard ledger and the lap ledger split each role per model; the rest is unattributed', async () => {
+  const lapFile = join(tmp('lapsplit'), 'lap-ledger.json')
+  const g = startGuard(5, join(sd, 'NOSTOP'), { lapFile })
+  const replies = [{ costUsd: 0.3, costByModel: { 'claude-opus-5-5': 0.25, 'claude-haiku-5-5': 0.05 } }, { costUsd: 0.2, costByModel: { 'claude-opus-5-5': 0.15 } }, { costUsd: null }]
+  const m = g.model(async () => ({ ok: true, text: '', ...replies.shift()! }))
+  await m(task('builder'))
+  await m(task('builder'))
+  await m({ ...task('judge'), maxCostUsd: 1 }) // no cost reported: charged its whole budget, attributed to no model
+  g.dispose()
+  const want = { builder: { 'claude-opus-5-5': 0.4, 'claude-haiku-5-5': 0.05, [UNATTRIBUTED]: 0.05 }, judge: { [UNATTRIBUTED]: 1 } }
+  const close = (got: any) => {
+    assert.deepEqual(Object.keys(got).sort(), ['builder', 'judge'])
+    for (const [r, ms] of Object.entries(want)) {
+      assert.deepEqual(Object.keys(got[r]).sort(), Object.keys(ms).sort())
+      for (const [k, v] of Object.entries(ms)) assert.ok(Math.abs(got[r][k] - v) < 1e-9, `${r}/${k}: ${got[r][k]}`)
+    }
+  }
+  close(g.ledger.byRoleModel)
+  const lap = JSON.parse(readFileSync(lapFile, 'utf8'))
+  close(lap.byRoleModel)
+  assert.ok(Math.abs(lap.totalUsd - 1.5) < 1e-9)
+  // a re-draft's ledger adds to the earlier one, per role and model
+  const before = JSON.stringify(g.ledger.byRoleModel)
+  assert.ok(Math.abs(mergeLedger(g.ledger, g.ledger).byRoleModel!.builder['claude-opus-5-5'] - 0.8) < 1e-9)
+  assert.equal(JSON.stringify(g.ledger.byRoleModel), before) // merge does not mutate its inputs
+  assert.deepEqual(mergeLedger({ note: '', byRole: {}, totalUsd: 0, uncounted: [] }, g.ledger).byRoleModel, g.ledger.byRoleModel) // a lap-3 ledger has no split
 })
 
 test('a non-numeric or non-positive cap / attempts is refused, never silently uncapped', async () => {
