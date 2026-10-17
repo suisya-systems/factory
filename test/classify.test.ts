@@ -5,7 +5,7 @@ import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from
 import { join } from 'node:path'
 import type { Model, Task } from '../src/adapter.ts'
 import { main, approvalSummary } from '../src/cli.ts'
-import { classify, classifyReply, predictInstruction } from '../src/classify.ts'
+import { classify, classifyReply, predictInstruction, withoutUndecided } from '../src/classify.ts'
 import { startGuard, Stop } from '../src/limits.ts'
 import { draft, extractJson } from '../src/roles.ts'
 import { runScenario, type Scenario } from '../src/scenario.ts'
@@ -263,4 +263,24 @@ test('classifyReply: a re-captured name keeps its earlier value for "{{name}}"; 
     { method: 'GET', path: '/notes/{{id}}', expect: { status: 200 }, capture: { e: 'header:etag' } },
     { method: 'GET', path: '/notes/{{id}}', expect: { json: { tag: '{{e}}' } } }] }
   assert.equal(classifyReply(hdr, SPEC, '', { steps: [p({ id: '?' }), p(null, { etag: '{{id}}' }), p({ tag: '{{id}}' })] }).label, 'readable')
+})
+
+test('classifyReply (lap 3 review): "?" inside a captured object, header name case and type, quotes from Undecided', () => {
+  const q = 'GET /notes/:id returns the note'
+  const p = (body: unknown, headers?: object) => ({ status: [200], body, basis: 'spec', quote: q, ...(headers ? { headers } : {}) })
+  const obj: Scenario = { id: 'o', title: 'o', summary: 'an old version is returned', inSpec: true, kind: 'history', steps: [
+    { method: 'POST', path: '/notes', body: {}, expect: { status: 200 }, capture: { m: 'memo' } },
+    { method: 'GET', path: '/notes', expect: { json: { memo: '{{m}}' } } }] }
+  // the prediction never determined the title: open, not a contradiction
+  assert.equal(classifyReply(obj, SPEC, '', { steps: [p({ memo: { title: '?' } }), p({ memo: { title: 'z' } })] }).label, 'unstated')
+  assert.equal(classifyReply(obj, SPEC, '', { steps: [p({ memo: { title: '?' } }), p({ memo: '{{m}}' })] }).label, 'readable')
+  const hdr: Scenario = { id: 'h', title: 'h', summary: 'the tag is echoed', inSpec: true, kind: 'conflict', steps: [
+    { method: 'GET', path: '/notes', expect: { status: 200 }, capture: { e: 'header:ETag' } },
+    { method: 'GET', path: '/notes', expect: { json: { tag: '{{e}}' } } }] }
+  assert.equal(classifyReply(hdr, SPEC, '', { steps: [p(null, { ETag: 7 }), p({ tag: '7' })] }).label, 'readable') // any case; a header is a string
+  assert.equal(classifyReply(hdr, SPEC, '', { steps: [p(null, { ETag: 7 }), p({ tag: 7 })] }).label, 'contradicts')
+  // a quote from the Undecided section is not spec evidence
+  assert.equal(withoutUndecided(SPEC + '\n\n## Interface\nx'), SPEC.split('## Undecided')[0] + '## Interface\nx')
+  const r = classifyReply(SCENARIOS[3], SPEC, '', { steps: [{ status: [404], body: null, basis: 'spec', quote: 'the status code for an unknown id' }] })
+  assert.equal(r.basis, 'convention')
 })

@@ -4,7 +4,8 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import type { Model } from './adapter.ts'
 
 // The ONE place for caps. Changing them is an owner decision, not something a role can do.
-export const CAPS = { maxCostUsd: 10, lapCostUsd: 30, maxAttempts: 3, modelTimeoutMs: 20 * 60_000, pollMs: 500 }
+// builderCallUsd / judgeCallUsd: per-call ceilings (lap 3; lap 2 spent $0.47 / $0.23 per call).
+export const CAPS = { maxCostUsd: 10, lapCostUsd: 30, maxAttempts: 3, builderCallUsd: 5, judgeCallUsd: 2, modelTimeoutMs: 20 * 60_000, pollMs: 500 }
 
 export class Stop extends Error {}
 
