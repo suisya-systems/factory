@@ -143,7 +143,7 @@ npm test
 node --experimental-strip-types --no-warnings docs/lap-6/attempts.ts --self-test
 ```
 
-期待: `# pass 95`、`# fail 0`、`# skipped 0`。続けて `self-test ok`。
+期待: `# pass 96`、`# fail 0`、`# skipped 0`。続けて `self-test ok`。
 
 ### 2. 隔離の確認（実モデル呼び出し、上限 $1）
 
