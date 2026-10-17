@@ -185,11 +185,13 @@ export async function runPlan(sd: string, plan: string, o: PlanOpts, factory: (a
         try { checkWithin(JSON.parse(specIface(a.spec)), JSON.parse(specIface(loadApproved(sd, p.wholeId).spec))) } catch (e) { return `${id}: ${(e as Error).message}` }
         return null
       }
-      const done = tries.find((t) => rec(t)?.status === 'shipped')
+      // Outcomes are looked for under every reserved retry id: lowering --retries on a resume limits new tries, it hides no shipped one.
+      const every = Array.from({ length: MAX_RETRIES + 1 }, (_, k) => retryId(id0, k))
+      const done = every.find((t) => rec(t)?.status === 'shipped')
       if (done) {
         const bad = vet(done)
         if (bad) return report('failed', bad)
-        rep.status = 'shipped'; rep.changeIds = tries.filter((t) => rec(t)); rep.sha = prev = rec(done)!.shipped!.sha; continue }
+        rep.status = 'shipped'; rep.changeIds = every.filter((t) => rec(t)); rep.sha = prev = rec(done)!.shipped!.sha; continue }
       if (stopped()) return report('failed', `emergency stop is active (${o.stopFile}); delete it by hand to continue`)
       if ((await head()) !== prev) return report('failed', `${part.id}: the ship target is not at ${prev} (the commit the plan has shipped so far); parts must extend exactly what the one before shipped`)
 

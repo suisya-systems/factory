@@ -294,3 +294,17 @@ test('a plan name that is already a change id (or a part of another plan) is ref
   await assert.rejects(h.cli(['split', 'pl-create', '--request', other]), /change id pl-create is already used/)
   assert.ok(!existsSync(join(h.sd, 'runs', 'pl-create.plan', 'plan.json'))) // only the splitter's cost record is left
 })
+
+test('a part shipped by a late retry stays shipped when the plan is resumed with a lower --retries', async () => {
+  const h = await ready({ server: (id) => (id === 'pl-edit' || id === 'pl-edit-r2' ? BROKEN : MEMO_SERVER) })
+  for (;;) { // --retries 2: pl-edit and pl-edit-r2 are rejected, pl-edit-r3 ships
+    const code = await h.cli(h.planArgs(['--retries', '2']))
+    assert.equal(code, 3)
+    if (h.result().reason === 'approve pl-list') break
+    await h.approveWaiting()
+  }
+  assert.deepEqual(h.result().parts[1].changeIds, ['pl-edit', 'pl-edit-r2', 'pl-edit-r3'])
+  await h.approveWaiting() // part 3
+  assert.equal(await h.cli(h.planArgs(['--retries', '0'])), 0) // resumed with fewer retries: part 2 is still shipped
+  assert.deepEqual(h.result().parts[1].changeIds, ['pl-edit', 'pl-edit-r2', 'pl-edit-r3'])
+})
