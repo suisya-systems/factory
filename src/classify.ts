@@ -63,7 +63,8 @@ const fillOpen = (x: unknown, vars: Record<string, unknown>): unknown => {
 // Expected json vs predicted body, leaf by leaf.
 function tri(e: unknown, p: unknown): Tri {
   if (open(p)) return 'U'
-  if (typeof p === 'string' && p.includes(MARK)) return e === p ? 'M' : 'U' // a captured value nobody determined
+  const marked = (v: unknown) => typeof v === 'string' && v.includes(MARK) // a captured value nobody determined
+  if (marked(p) || marked(e)) return e === p ? 'M' : 'U'
   if (Array.isArray(e)) return !Array.isArray(p) || p.length < e.length ? 'X' : worst(e.map((x, i) => tri(x, p[i])))
   if (isObj(e)) return !isObj(p) ? 'X' : worst(Object.entries(e).map(([k, v]) => tri(v, Object.hasOwn(p, k) ? p[k] : undefined)))
   return e === p ? 'M' : 'X'
