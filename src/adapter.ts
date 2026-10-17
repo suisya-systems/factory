@@ -183,6 +183,7 @@ export async function runCodex(t: Task, bin: string, auth = CODEX_AUTH): Promise
   modelFor(t)
   if (t.access !== 'none') throw new Error(`role ${t.role}: the second model family runs without tool access only`)
   if (t.signal?.aborted) return { ok: false, text: '', costUsd: null, error: 'stopped before start' }
+  const before = crossLoginSecrets(auth) // a token refresh during the call replaces them in the file
   const { out, code, why } = await spawnModel(t, bin, codexArgs(t), codexSandbox(t, bin, auth), codexEnv(auth))
   const events = out.split('\n').flatMap((l) => { try { return [JSON.parse(l)] } catch { return [] } })
   const msgs = events.filter((e) => e?.type === 'item.completed' && e.item?.type === 'agent_message' && typeof e.item.text === 'string')
@@ -192,7 +193,7 @@ export async function runCodex(t: Task, bin: string, auth = CODEX_AUTH): Promise
   if (code !== 0 || !msgs.length) return { ok: false, text, costUsd: null, error: `model process exited (code ${code}) without a reply` }
   // The CLI keeps a read-only shell, and its login is mounted: a reply carrying a login secret is dropped whole, so it
   // never reaches a spec, a scenario or a builder. ponytail: verbatim copies only; an encoded one is NOT detected.
-  if (crossLoginSecrets(auth).some((x) => out.includes(x))) return { ok: false, text: '', costUsd: null, error: 'reply contained a second-family login secret (dropped)' }
+  if ([...before, ...crossLoginSecrets(auth)].some((x) => out.includes(x))) return { ok: false, text: '', costUsd: null, error: 'reply contained a second-family login secret (dropped)' }
   return { ok: true, text, costUsd: null }
 }
 

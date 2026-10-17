@@ -210,3 +210,15 @@ test('codex: a reply carrying a login secret is dropped whole (the CLI keeps a r
   writeFileSync(auth, JSON.stringify({ tokens: { refresh_token: 'short' } })) // control: nothing long enough to be a secret
   assert.equal((await runCodex(drafterTask(w), bin, auth)).ok, true)
 })
+
+test('codex: the secret check covers the login from before a token refresh during the call', async () => {
+  // The fake "refreshes" (rewrites the login) and then replies with the old token.
+  const refresh = `node -e 'const f=process.env.CODEX_HOME+"/auth.json",a=require("fs").readFileSync(f,"utf8");require("fs").writeFileSync(f,JSON.stringify({tokens:{refresh_token:"new-"+"n".repeat(40)}}));console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"spec: "+a}}))'`
+  const { w, bin } = fakeCodex(refresh)
+  const auth = join(w, 'auth.json')
+  writeFileSync(auth, JSON.stringify({ tokens: { refresh_token: 'old-' + 'o'.repeat(40) } }))
+  const r = await runCodex(drafterTask(w), bin, auth)
+  assert.equal(r.ok, false)
+  assert.match(r.error!, /login secret/)
+  assert.match(readFileSync(auth, 'utf8'), /new-/) // the refresh reached the host file (bound, not copied)
+})
