@@ -1,7 +1,7 @@
 // Lap 5: K independent builds of one approved spec, scored by scenarios and probes; nothing ships.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Model, Task } from '../src/adapter.ts'
 import { main } from '../src/cli.ts'
@@ -93,6 +93,11 @@ test('refused before any model call: other spec, probes outside the vault, a cha
   writeFileSync(join(vaultDir(sd, 'rep-c'), 'bad.json'), JSON.stringify({ decisions: [{ id: 'x', steps: [{ method: 'GET', path: '/' }], observe: ['2:status'], options: { a: [[1]], b: [[2]] } }] }))
   await assert.rejects(replicate({ ...o, probesFile: join(vaultDir(sd, 'rep-c'), 'bad.json') }), /bad observe/)
 
+  // rejected or no-op commands leave no mark, so run stays possible
+  await assert.rejects(replicate({ ...o, k: 0 }), /--k/)
+  await assert.rejects(replicate({ ...o, maxCostUsd: Number('10usd') }), /max cost/)
+  assert.deepEqual(await replicate({ ...o, rescore: true }), [])
+  assert.ok(!existsSync(join(sd, 'runs', 'rep-c', 'replicates')))
   await replicate({ ...o, model: builder([]) })
   await assert.rejects(runChange({ changeId: 'rep-c', shipTarget: gitTarget(), model: never, stateDir: sd, port: 1 }), /has replicates/)
   approvedChange(sd, 'rep-ran')
