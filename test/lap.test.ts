@@ -298,3 +298,29 @@ test('a parallel group is refused unless its steps are independent: one command,
   assert.match(errs.join('\n'), /two runs of the group ship to the same checkout/)
   assert.ok(!existsSync(join(sd, 'runs', 'a')) && !existsSync(join(sd, 'runs', 'b')))
 })
+
+// Lap 8: the second family's first call comes before any first-family spend, every set is checked for provenance
+// before the gate that approves it, every reused spec is compared byte for byte, and each spec's builds are scored
+// by exactly the other-family set drafted on it.
+test('lap 8 definition: second family first, provenance before each gate, cmp per reused spec, builds scored across families', () => {
+  const d = parseLap(readFileSync(join(REPO, 'examples', 'lap-8.json'), 'utf8'))
+  const firstModelStep = d.steps.find((s) => s.factory && s.factory[0] !== 'tally')!
+  assert.deepEqual(firstModelStep.factory!.slice(0, 2), ['draft', 'settle-xx-1'])
+  assert.ok(firstModelStep.factory!.includes('spec-drafter=gpt-6-astra') && firstModelStep.factory!.includes('scenario-drafter=gpt-6-astra'))
+  const at = (g: string) => d.steps.findIndex((s) => s.gate === g)
+  for (const g of ['specs', 'entrance']) {
+    const gate = d.steps[at(g)], prov = d.steps[at(g) - 1]
+    assert.deepEqual(prov.exec!.slice(4), ['--provenance', '{state}', ...gate.approve!], g)
+  }
+  for (const id of d.steps[at('entrance')].approve!) {
+    const draft = d.steps.find((s) => s.factory?.[0] === 'draft' && s.factory[1] === id)!
+    const [req, fam, k] = id.split('-'), src = `${req}-${fam[0]}${fam[0]}-${k}`
+    assert.equal(draft.factory![draft.factory!.indexOf('--spec-from') + 1], src, id)
+    assert.equal(draft.factory!.includes('scenario-drafter=gpt-6-astra'), fam[1] === 'x', id)
+    assert.ok(d.steps.some((s) => s.exec?.[0] === 'cmp' && s.exec[1] === `{state}/vault/${src}/spec.md` && s.exec[2] === `{state}/vault/${id}/spec.md`), id)
+  }
+  const reps = d.steps.find((s) => s.parallel)!.parallel!
+  assert.deepEqual(reps.map((s) => [s.factory![1], s.factory![s.factory!.indexOf('--score') + 1]]).sort(),
+    d.steps[at('specs')].approve!.map((id) => [id, id.replace(/-(cc|xx)-/, (_, f) => (f === 'cc' ? '-cx-' : '-xc-'))]).sort())
+  assert.ok(reps.every((s) => s.factory![s.factory!.indexOf('--k') + 1] === '8'))
+})

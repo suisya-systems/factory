@@ -132,3 +132,36 @@ test('draft of an already-approved id is refused before any model call', async (
   assert.equal(await main(['draft', 'fixed1', '--request', req], async () => { calls++; return { ok: true, text: '{}', costUsd: 1 } }), 1)
   assert.equal(calls, 0)
 })
+
+// Lap 8: drafters on the second family. The record shows, per call, which model each role was asked for,
+// the counted calls apart from USD, and where a reused spec came from.
+test('draft with the second family: per-call models, counted calls apart from USD, spec lineage', async () => {
+  const req = join(tmp('req'), 'req.txt')
+  writeFileSync(req, 'a memo api')
+  const seen: [string, string | undefined][] = []
+  const m = async (t: { role: string; model?: string }) => {
+    seen.push([t.role, t.model])
+    if (t.role === 'spec-drafter') return { ok: true, text: JSON.stringify({ spec: '# Memo\n\n## Undecided\n- status codes\n', interface: { endpoints: ['POST /notes'] }, assumptions: [] }), costUsd: null }
+    if (t.role === 'scenario-drafter') return { ok: true, text: JSON.stringify({ scenarios: SCENARIOS, assumptions: [] }), costUsd: null }
+    return { ok: false, text: '', costUsd: 0.1, error: 'classifier down', model: 'claude-opus-5-5' }
+  }
+  assert.equal(await main(['draft', 'xx-1', '--request', req, '--model', 'spec-drafter=gpt-6-astra', '--model', 'scenario-drafter=gpt-6-astra'], m), 0)
+  assert.deepEqual(seen.slice(0, 3), [['spec-drafter', 'gpt-6-astra'], ['scenario-drafter', 'gpt-6-astra'], ['classifier', undefined]])
+  const c = JSON.parse(readFileSync(join(sd, 'runs', 'xx-1', 'draft-cost.json'), 'utf8'))
+  assert.equal(c.countedCalls, 2)
+  assert.ok(Math.abs(c.totalUsd - 0.1 * SCENARIOS.length) < 1e-9) // the classifier only: the counted calls are $0, not a ceiling
+  assert.deepEqual(c.uncounted, [])
+  assert.deepEqual(c.calls.slice(0, 3).map((x: { role: string; requested: string }) => [x.role, x.requested]), [['spec-drafter', 'gpt-6-astra'], ['scenario-drafter', 'gpt-6-astra'], ['classifier', 'claude-opus-5-5']])
+  assert.equal(c.specFrom, null)
+  approve(sd, 'xx-1', { by: 't', version: hash(vaultDir(sd, 'xx-1')) })
+  assert.equal(await main(['draft', 'xc-1', '--request', req, '--spec-from', 'xx-1'], m), 0)
+  const r = JSON.parse(readFileSync(join(sd, 'runs', 'xc-1', 'draft-cost.json'), 'utf8'))
+  assert.equal(r.specFrom, 'xx-1')
+  assert.equal(r.countedCalls, 0)
+  assert.equal(r.calls[0].requested, 'claude-opus-5-5')
+  let calls = 0
+  for (const argv of [['replicate', 'xx-1', '--k', '1', '--model', 'builder=gpt-6-astra'], ['probe-isolation', 'xx-1', '--model', 'judge=gpt-6-astra']]) {
+    assert.equal(await main(argv, async () => { calls++; return { ok: true, text: '', costUsd: 0 } }), 2)
+  }
+  assert.equal(calls, 0)
+})
