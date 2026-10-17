@@ -2,7 +2,7 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Model } from '../src/adapter.ts'
 import { main } from '../src/cli.ts'
@@ -89,6 +89,13 @@ test('a lap runs to its gate, resumes after approval without redoing steps, and 
   assert.ok(existsSync(join(sd, 'ship', 'lap-1-b', 'README.md')))
   assert.deepEqual([count(m1), count(m2)], [1, 1])
   const ran = calls.length
+  const fixed = join(sd, 'prereg', 'prereg.json'), keep = readFileSync(fixed)
+  chmodSync(fixed, 0o644); writeFileSync(fixed, 'tampered')
+  const err = console.error, errs: string[] = []
+  console.error = (...a: unknown[]) => { errs.push(a.join(' ')) }
+  try { assert.equal(await main(['lap', file], model), 1) } finally { console.error = err } // a failure (the report steps would still run), not a crash
+  assert.match(errs.join('\n'), /gate "entrance"\) failed: fixed file .*prereg\.json changed after approval/)
+  writeFileSync(fixed, keep); chmodSync(fixed, 0o444)
 
   assert.equal((await lapOut([file], model)).code, 0) // nothing left to do
   assert.equal(calls.length, ran)
