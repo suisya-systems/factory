@@ -157,3 +157,12 @@ test('sandboxExec kills a hanging child on abort and on timeout', async () => {
   assert.equal(r2.code, null)
   assert.match(r2.out, /timeout/)
 })
+
+test('name resolution files stay readable inside the sandbox (WSL: /etc/resolv.conf -> /mnt/wsl/...)', async () => {
+  for (const f of ['/etc/resolv.conf', '/etc/hosts'].filter(existsSync)) {
+    const host = readFileSync(f, 'utf8')
+    const r = await sandboxExec('cat', [f], { workdir: tmp('dns'), writable: false }, env)
+    assert.equal(r.code, 0, `${f}: ${r.out}`)
+    assert.equal(r.out, host)
+  }
+})
