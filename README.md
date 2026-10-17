@@ -35,7 +35,7 @@ Cost caps: per change (`--max-cost`, default $10, drafter spend included) and pe
   - `exec`: argv of any other program (tests, the lap's own tools).
   - `copy`: an approved vault set copied `from` another state dir or `to` other change ids, checked file by file and against its approval.
   - `gate`: a human stop. `approve` lists drafts for entrance approval, `fix` maps a path in the state dir to a file it is fixed from (the pre-registration, probes; read-only afterwards, never changed), `read` lists more files the approver reads. A file not written yet keeps the lap waiting there. The gate's version covers the whole definition and those files: any change after approval stops the lap at the gate again.
-  - `always: true` (exec, tally, observe): runs even after a failed step, for the lap's report.
+  - `always: true` (exec, tally, observe): runs even after a failed step, for the lap's report (while the STOP file exists, only `exec` ones run).
 
   Progress is kept in `$STATE/laps/<name>/` per step content: editing a step makes it a new step. The definition is trusted like code (an `exec` step can run anything); the owner approves it at every gate. A step finished just before the process was killed is reported as interrupted, not re-run.
 - **`ponytail:` comments**: mark a deliberate simplification with a known limit and the upgrade path.

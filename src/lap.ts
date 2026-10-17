@@ -94,7 +94,7 @@ export async function lap(file: string, o: LapOpts, factory: (argv: string[]) =>
   const progFile = join(dir, 'progress.json')
   const stopFile = process.env.FACTORY_STOP_FILE ?? join(sd, 'STOP')
   const resume = `npm run factory -- lap ${file}`
-  if (existsSync(stopFile)) { console.error(`factory: emergency stop is active (${stopFile}); delete it by hand to continue`); return 1 }
+  const stopped = () => existsSync(stopFile) && `emergency stop is active (${stopFile}); delete it by hand to continue`
   if (!existsSync(progFile) && existsSync(join(sd, 'lap-ledger.json'))) throw new Error(`${sd} is not a fresh state dir (lap-ledger.json exists); a lap starts from a fresh FACTORY_HOME`)
   const prog: Progress = existsSync(progFile) ? JSON.parse(readFileSync(progFile, 'utf8')) : { steps: {}, waiting: null }
   const save = () => { mkdirSync(dir, { recursive: true }); writeFileSync(`${progFile}.tmp`, JSON.stringify(prog, null, 2)); renameSync(`${progFile}.tmp`, progFile) }
@@ -114,6 +114,7 @@ export async function lap(file: string, o: LapOpts, factory: (argv: string[]) =>
   const gateRecord = (g: Step) => join(dir, 'gates', `${g.gate}.json`)
 
   if (o.approve) {
+    if (stopped()) { console.error(`factory: ${stopped()}`); return 1 }
     const g = def.steps.find((s) => s.gate === o.approve)
     if (!g) throw new Error(`lap ${def.name} has no gate "${o.approve}"`)
     if (prog.waiting !== g.gate) throw new Error(`lap ${def.name} is not waiting at gate "${g.gate}"; run \`${resume}\` first`)
@@ -185,8 +186,9 @@ export async function lap(file: string, o: LapOpts, factory: (argv: string[]) =>
     const key = JSON.stringify(s), st = prog.steps[key], at = `step ${i + 1}`
     if (st?.status === 'done') continue
     if (st) { failed ||= `${at} ${st.status === 'running' ? 'was interrupted (the lap ended during it)' : `failed: ${st.reason}`}`; continue }
+    // While the STOP file exists only `always` exec steps (the report) run; nothing is recorded for the skipped ones.
+    if (stopped() && !(s.always && s.exec)) { failed ||= stopped() as string; continue }
     if (failed && !s.always) continue
-    if (existsSync(stopFile)) { console.error(`factory: emergency stop is active (${stopFile}); delete it by hand to continue`); return 1 }
     if (s.gate) {
       // Never cached: checked again on every resume against the current definition and files.
       const { missing, version } = gateVersion(s)
