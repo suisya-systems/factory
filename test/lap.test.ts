@@ -134,7 +134,13 @@ test('a failed step stops the lap and is never re-run; always-steps still report
 
   const stop = join(sd, 'STOP')
   writeFileSync(stop, 'x')
-  try { assert.equal(await main(['lap', file], model), 1); assert.equal(count(rep), 1) } finally { unlinkSync(stop) }
+  const rep2 = join(dir, 'rep2')
+  writeFileSync(file, JSON.stringify({ name: 'lapf', steps: [...JSON.parse(readFileSync(file, 'utf8')).steps, { exec: mark(rep2), always: true }] }))
+  try {
+    assert.equal(await main(['lap', file], model), 1)
+    assert.deepEqual([count(rep), count(rep2), calls], [1, 1, 2]) // the report still runs under STOP; nothing else does
+    assert.equal(await main(['lap', file, '--approve', 'g', '--by', 'o', '--version', 'v'], model), 1)
+  } finally { unlinkSync(stop) }
 })
 
 test('a definition home sets the state dir; another FACTORY_HOME is refused', async () => {
