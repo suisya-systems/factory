@@ -14,6 +14,7 @@ import { runChange } from './run.ts'
 import { UNDECIDED, type Classification } from './classify.ts'
 import { exportTree, removeTree, sandboxGit } from './sandbox.ts'
 import { observe, serve } from './serve.ts'
+import { watch } from './watch.ts'
 import { approve, checkId, hash, loadApproved, stateDir, vaultDir, writeDraft, type Draft } from './vault.ts'
 
 const USAGE = `usage: factory <command>
@@ -41,6 +42,9 @@ const USAGE = `usage: factory <command>
                                                    K independent builds from the approved spec in empty repos;
                                                    scenarios + probes only, no LLM judge, nothing ships
   tally <id>                                       tables of the replicates' probe answers and scenario passes
+  watch --ship-target <repo> [--port N] [--interval SEC | --once]
+                                                   poll the prod signals (all ports, or N); a new 5xx / stderr error sign becomes a
+                                                   draft (--base = the ship target) that STOPS for approval; never approves or ships
   observe [--port N]                               read the prod logs of port N (default 8787) into signals.json
   stop                                             emergency stop (creates the STOP file)
   probe-isolation <id>                             REAL model call: can a builder read the vault?
@@ -51,10 +55,10 @@ const USAGE = `usage: factory <command>
                                                    gate (exit 3) and prints the summary to read and the resume
                                                    command; the same command resumes, skipping finished steps
   serve --port N                                   (internal) production supervisor
---model <role>=<model> (repeatable; draft, replicate, probe-isolation, split): the model for that role in this command.
+--model <role>=<model> (repeatable; draft, replicate, probe-isolation, split, watch): the model for that role in this command.
 After \`stop\`, every command refuses to start until the STOP file is deleted by hand.`
-const COMMANDS = ['draft', 'approve', 'run', 'serve', 'observe', 'stop', 'probe-isolation', 'replicate', 'tally', 'lap', 'split', 'plan']
-const MODEL_COMMANDS = ['draft', 'replicate', 'probe-isolation', 'split']
+const COMMANDS = ['draft', 'approve', 'run', 'serve', 'observe', 'stop', 'probe-isolation', 'replicate', 'tally', 'lap', 'split', 'plan', 'watch']
+const MODEL_COMMANDS = ['draft', 'replicate', 'probe-isolation', 'split', 'watch']
 
 // The canary is a random string the probe plants in the vault; seeing it outside means the vault leaked.
 // The probe passes only if the canary is in neither the reply nor any regular file the model left
@@ -140,7 +144,7 @@ export async function main(argv: string[], model: Model = realModel): Promise<nu
       args: argv, allowPositionals: true,
       options: { help: { type: 'boolean', short: 'h' }, request: { type: 'string' }, base: { type: 'string' }, signals: { type: 'string' }, by: { type: 'string' }, version: { type: 'string' }, note: { type: 'string' }, 'ship-target': { type: 'string' },
         'max-cost': { type: 'string' }, 'max-attempts': { type: 'string' }, port: { type: 'string' }, 'traffic-base': { type: 'string' },
-        model: { type: 'string', multiple: true }, 'spec-from': { type: 'string' }, spec: { type: 'string' }, k: { type: 'string' }, score: { type: 'string' }, probes: { type: 'string' }, rescore: { type: 'boolean' }, minority: { type: 'boolean' }, 'minority-brief': { type: 'string' }, service: { type: 'boolean' }, 'iface-from': { type: 'string' }, retries: { type: 'string' }, feedback: { type: 'string' }, approve: { type: 'string' } },
+        model: { type: 'string', multiple: true }, 'spec-from': { type: 'string' }, spec: { type: 'string' }, k: { type: 'string' }, score: { type: 'string' }, probes: { type: 'string' }, rescore: { type: 'boolean' }, minority: { type: 'boolean' }, 'minority-brief': { type: 'string' }, service: { type: 'boolean' }, 'iface-from': { type: 'string' }, interval: { type: 'string' }, once: { type: 'boolean' }, retries: { type: 'string' }, feedback: { type: 'string' }, approve: { type: 'string' } },
     })
   } catch (e) { console.error(`factory: ${(e as Error).message}\n${USAGE}`); return 2 }
   const { positionals, values: v } = parsed
@@ -251,6 +255,14 @@ export async function main(argv: string[], model: Model = realModel): Promise<nu
       if (!id || !v['ship-target']) break
       const retries = v.retries === undefined ? undefined : Number(v.retries)
       return runPlan(sd, id, { shipTarget: resolve(v['ship-target']), port, retries, maxCostUsd: v['max-cost'] ? Number(v['max-cost']) : undefined, maxAttempts: v['max-attempts'] ? Number(v['max-attempts']) : undefined, stopFile }, (argv) => main(argv, model))
+    }
+    case 'watch': {
+      if (!v['ship-target'] || (!!v.once === (v.interval !== undefined))) break // exactly one of --once / --interval
+      const intervalSec = v.interval === undefined ? undefined : Number(v.interval)
+      if (intervalSec !== undefined && !(Number.isFinite(intervalSec) && intervalSec >= 1)) throw new Error(`--interval must be a number of seconds >= 1, got ${v.interval}`)
+      const ports = v.port === undefined ? undefined : [Number(v.port)]
+      if (ports && !Number.isInteger(ports[0])) throw new Error(`--port must be an integer, got ${v.port}`)
+      return watch(sd, { shipTarget: resolve(v['ship-target']), ports, stopFile, intervalSec }, (argv) => main([...argv, ...(v.model ?? []).flatMap((m) => ['--model', m])], base))
     }
     case 'replicate': {
       if (!id || (!v.k && !v.rescore)) break
