@@ -3,7 +3,7 @@
 // usage: node --experimental-strip-types --no-warnings docs/lap-6/attempts.ts <prereg.json> <STATE>
 //        node --experimental-strip-types --no-warnings docs/lap-6/attempts.ts --self-test
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 type Attempt = { n: number; testsAllPass: boolean; llmPass: boolean | null; pass: boolean; results: { id: string; pass: boolean }[] }
@@ -40,7 +40,9 @@ function report(p: Prereg, sd: string): string {
     const m = new Set(s.minority), classes: string[] = []
     lines.push(`## ${set} (minority: ${s.minority.join(', ')})`, '', '| run | attempt | all tests | minority | others | LLM | pass | failed |', '|---|---|---|---|---|---|---|---|')
     for (const id of s.runs) {
-      const r: Run = JSON.parse(readFileSync(join(sd, 'runs', id, 'run.json'), 'utf8'))
+      const f = join(sd, 'runs', id, 'run.json')
+      if (!existsSync(f)) { lines.push(`| ${id} | **not started** | | | | | | |`); continue } // a lap cap or stop ended the lap first: not counted
+      const r: Run = JSON.parse(readFileSync(f, 'utf8'))
       for (const a of r.attempts) {
         const others = a.results.filter((x) => !m.has(x.id)).length
         lines.push(`| ${id} | ${a.n} | ${a.results.filter((x) => x.pass).length}/${a.results.length} | ${passed(a, m, true)}/${m.size} | ${passed(a, m, false)}/${others} | ${a.llmPass} | ${a.pass} | ${a.results.filter((x) => !x.pass).map((x) => x.id).join(', ')} |`)
