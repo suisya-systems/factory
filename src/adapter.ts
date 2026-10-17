@@ -41,7 +41,7 @@ export function cliSandbox(t: Task): SandboxOpts {
   }
 }
 
-// Model per role, pinned explicitly (latest generation), so a CLI default never decides it.
+// Model per role, pinned explicitly so a CLI default never decides it (claude-opus-5-5 was the newest generation on 2026-10-17).
 export const MODEL_BY_ROLE: Record<string, string> = { drafter: 'claude-opus-5-5', builder: 'claude-opus-5-5', judge: 'claude-opus-5-5' }
 const modelFor = (role: string) => (Object.hasOwn(MODEL_BY_ROLE, role) ? MODEL_BY_ROLE[role] : 'claude-opus-5-5')
 

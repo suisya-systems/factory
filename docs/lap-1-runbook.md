@@ -1,10 +1,14 @@
-# 1 周目の実行手順（窓口が sandbox 外で実行する）
+# 1 周目の実行手順（2026-10-17 に使ったもの）
 
-工場の実行コマンドは `claude -p` で API を呼ぶ。ワーカーの sandbox からは API に出られないので、次の手順は窓口が sandbox の外で叩く。各段の停止点で出力をワーカーへ送ってもらい、ワーカーが集計と報告を担当する。
+工場を 1 周回す手順。2026-10-17 の実行で実際に使った。
+
+この実行には 2 人の担当がいた。「実行担当」は、モデルの API に出られる普通の端末で工場のコマンドを叩く人である（2026-10-17 は claude-org の窓口役が務めた）。「作成担当」は、工場を実装し、出力を集計して報告書を書くエージェントである（このリポジトリを作った Claude Code のワーカー）。作成担当の開発環境は sandbox で API に出られないため、実モデル呼び出しを伴う段は実行担当が受け持ち、各段の停止点で出力を作成担当へ渡した。1 人で回す場合は、「作成担当へ送る」を「出力を確かめる」と読み替えればよい。
+
+「1 周目」は、オーナー（予算と入口の承認を決める人）が予算を決めた 1 回目の工場の実行（lap）を指す。用語は [README](../README.md) の Terms にある。
 
 ## 前提
 
-- cwd: `/home/happy_ryo/work/org/workers/factory/.worktrees/factory-lap-1`（以下、すべてこのディレクトリで実行する）
+- cwd: このリポジトリ（suisya-systems/factory）を checkout したディレクトリ。以下、すべてここで実行する。2026-10-17 は作成担当の作業ツリーで実行した
 - Node 22.17 以上（`node --version`）、`/usr/bin/bwrap` があること。npm install は不要（依存ゼロ）
 - 環境変数は特に要らない。`claude` は `~/.local/bin/claude` の実体（`~/.local/share/claude/versions/<ver>`）を使い、ログイン情報は `~/.claude/.credentials.json` を読み取り専用で渡す。env 認証を使う場合だけ `ANTHROPIC_API_KEY` か `CLAUDE_CODE_OAUTH_TOKEN` を渡す（工場はこれ以外の環境変数をモデル側へ渡さない）
 - 工場の状態は `.factory/` に置かれる（git 管理外）。隠しシナリオは `.factory/vault/` にある
@@ -12,7 +16,7 @@
 
 ## 予算
 
-1 周目の合計見積もり上限は $30（工場が `.factory/lap-ledger.json` で全コマンドの合計を数え、$30 に達したら次のモデル呼び出しを始めない）。内訳: 隔離確認 上限 $1 + 1 変更 上限 $28（`--max-cost 28`。下書きの費用もこの上限に含む。下書き単体は $10 まで）。金額は `claude -p` が返す `total_cost_usd` の合算（クライアント側の見積もり）。
+1 周の合計見積もり上限は $30（工場が `.factory/lap-ledger.json` で全コマンドの合計を数え、$30 に達したら次のモデル呼び出しを始めない）。内訳: 隔離確認 上限 $1 + 1 変更 上限 $28（`--max-cost 28`。下書きの費用もこの上限に含む。下書き単体は $10 まで）。金額は `claude -p` が返す `total_cost_usd` の合算（クライアント側の見積もり）。
 
 ## 手順
 
@@ -30,13 +34,13 @@ npm test
 npm run factory -- probe-isolation lap1-probe; echo "exit=$?"
 ```
 
-作る役と同じ設定（書き込み可・全ツール許可）の `claude -p` に、保管庫のカナリア文字列とシナリオファイルを読ませようとする。
+作る役と同じ設定（書き込み可・全ツール許可）の `claude -p` に、保管庫（隠しシナリオの置き場、`.factory/vault/`）のファイルを読ませようとする。保管庫には事前にカナリア（ランダムな文字列）を置いておき、それが返答か作業ディレクトリに出たら漏れと判定する。
 
 - 期待: `isolation probe: canaryFound=false modelOk=true ...`、`exit=0`
-- `exit=1`（カナリアが読めた）: 隔離が破れている。ここで止めてワーカーへ連絡（以降を実行しない）
-- `exit=2`（モデル呼び出し失敗）/ `exit=3`（費用上限超過）: ここで止め、出力をワーカーへ送る（sandbox 内で CLI が起動・認証できない可能性。ワーカーが直す）
+- `exit=1`（カナリアが読めた）: 隔離が破れている。ここで止めて作成担当へ連絡（以降を実行しない）
+- `exit=2`（モデル呼び出し失敗）/ `exit=3`（費用上限超過）: ここで止め、出力を作成担当へ送る（sandbox 内で CLI が起動・認証できない可能性。作成担当が直す）
 
-**停止点 A**: 出力と `.factory/runs/lap1-probe/isolation-probe.json` の場所をワーカーへ送る。
+**停止点 A**: 出力と `.factory/runs/lap1-probe/isolation-probe.json` の場所を作成担当へ送る。
 
 ### 3. 下書き（実モデル呼び出し、上限 $10）
 
@@ -45,22 +49,22 @@ npm run factory -- draft memo-api-1 --request requests/memo-api.md; echo "exit=$
 ```
 
 - 期待: `drafted memo-api-1 (version <hash>). Factory stopped; waiting for human approval. Summary: <path>`、`exit=0`
-- 失敗時（`exit=1`）: 出力をワーカーへ送る
+- 失敗時（`exit=1`）: 出力を作成担当へ送る
 
-**停止点 B（入口の承認、必須の人間ゲート）**: 工場はここで止まる。ワーカーへ「draft 完了」と送ると、ワーカーが `.factory/vault/memo-api-1/approval-summary.md` からオーナー向けの 1 画面要約を作って窓口へ送る。オーナーの承認を得るまで次へ進まない。
+**停止点 B（入口の承認、必須の人間ゲート）**: 工場はここで止まる。作成担当が `.factory/vault/memo-api-1/approval-summary.md` からオーナー向けの 1 画面要約を作り、実行担当がそれをオーナーに渡す。オーナーの承認を得るまで次へ進まない。
 
-### 4. 承認（オーナーの判断を窓口が記録する）
+### 4. 承認（オーナーの判断を実行担当が記録する）
 
 ```bash
 npm run factory -- approve memo-api-1 --by <承認者名> --version <要約に書かれた version>
 ```
 
 - 期待: `approved memo-api-1 by <name>; version <hash>`
-- 要約を読んだ後に下書きが変わっていれば version 不一致で拒否される。その場合は承認せずワーカーへ連絡
+- 要約を読んだ後に下書きが変わっていれば version 不一致で拒否される。その場合は承認せず作成担当へ連絡
 
 ### 5. 作る → 確かめる → 出す → 本番を見る（実モデル呼び出し、上限は下書きと合わせて $28）
 
-出荷先は、ワークツリー内に置いた factory-practice-memo の clone（ワーカーが用意済み: `.factory/ship/factory-practice-memo`）。
+出荷先は、練習用アプリのリポジトリ suisya-systems/factory-practice-memo を `.factory/ship/factory-practice-memo` に clone したもの。事前に用意しておく（例: `git clone <factory-practice-memo の URL か手元の clone> .factory/ship/factory-practice-memo`）。工場はここにだけ commit を積み、リモートへは送らない。
 
 ```bash
 npm run factory -- run memo-api-1 --ship-target .factory/ship/factory-practice-memo --max-cost 28 --port 8787; echo "exit=$?"
@@ -70,7 +74,7 @@ npm run factory -- run memo-api-1 --ship-target .factory/ship/factory-practice-m
 - 失敗（費用上限・やり直し上限・緊急停止・エラー）: `memo-api-1: failed (<理由>); attempts N`、`exit=1`。これも正しい結果の 1 つで、人に聞かず、自動で再投入もしない
 - 所要時間の目安: 1 回の作る役の呼び出しに数分〜20 分（上限 20 分）、最大 3 回
 
-**停止点 C**: 出力 2 行をワーカーへ送る。記録は `.factory/runs/memo-api-1/run.json` と `.factory/prod/signals.json` にあり、ワーカーが読んで `docs/lap-1-report.md` を書く。
+**停止点 C**: 出力 2 行を作成担当へ送る。記録は `.factory/runs/memo-api-1/run.json` と `.factory/prod/signals.json` にあり、作成担当が読んで `docs/lap-1-report.md` を書く。
 
 ### 6. 後片付けと push（合格して出荷した場合）
 
@@ -80,9 +84,9 @@ npm run factory -- run memo-api-1 --ship-target .factory/ship/factory-practice-m
 kill "$(cat .factory/prod/server.pid)"
 ```
 
-工場が積んだ commit を本物のリポジトリへ送る（工場は push しない）:
+`<practice-memo>` は、GitHub の factory-practice-memo を remote に持つ手元の clone。工場が積んだ commit を本物のリポジトリへ送る（工場は push しない）:
 
 ```bash
-git -C /home/happy_ryo/work/org/workers/factory-practice-memo pull --ff-only /home/happy_ryo/work/org/workers/factory/.worktrees/factory-lap-1/.factory/ship/factory-practice-memo main
-git -C /home/happy_ryo/work/org/workers/factory-practice-memo push origin main
+git -C <practice-memo> pull --ff-only "$PWD/.factory/ship/factory-practice-memo" main
+git -C <practice-memo> push origin main
 ```

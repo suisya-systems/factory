@@ -6,6 +6,7 @@ import { assertLoopbackOnly, freePort, killTree, removeTree, spawnApp, waitPort 
 
 export type Expect = { status?: number | number[]; json?: unknown; jsonHas?: string[]; isArray?: boolean; length?: number }
 export type Step = { method: string; path: string; body?: unknown; headers?: Record<string, string>; expect: Expect; capture?: Record<string, string> }
+// inSpec: the drafter's claim that the spec states this behaviour (used to split pass rates; self-reported, not verified).
 export type Scenario = { id: string; title: string; summary: string; inSpec: boolean; kind: string; steps: Step[] }
 export type ScenarioResult = { id: string; inSpec: boolean; kind: string; pass: boolean; failedStep?: number; detail: string }
 

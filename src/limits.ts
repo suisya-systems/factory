@@ -24,8 +24,9 @@ export type Guard = {
   dispose(): void
 }
 
-// Lap-wide spend (all changes and commands in this state dir). Every model call is charged here too.
-// ponytail: read-modify-write without a lock; one factory command at a time in lap 1.
+// Lap-wide spend. A lap is one owner-budgeted run of the factory loop; its ledger counts every model call
+// of every change and command in this state dir.
+// ponytail: read-modify-write without a lock; assumes one factory command at a time.
 export const lapSpent = (f: string): number => (existsSync(f) ? JSON.parse(readFileSync(f, 'utf8')).totalUsd : 0)
 export function chargeLap(f: string, usd: number): void {
   writeFileSync(f, JSON.stringify({ note: 'lap-wide client-side estimate, all roles and commands', totalUsd: lapSpent(f) + usd }, null, 2))
