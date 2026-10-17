@@ -35,6 +35,10 @@ http.createServer(async (q, r) => {
     } catch (e) { return send(502, { error: String(e) }) }
   }
   if (q.url === '/peek') { const x = await fetch(S + '/requests'); return send(200, { status: x.status, body: await x.text() }) }
+  if (q.url === '/seq') { // one fresh connection per request, closed after it
+    for (let i = 0; i < ${FAKE_LIMITS.connections + 5}; i++) await new Promise((ok) => require('node:http').get(S + '/ping', { agent: false }, (x) => x.resume().on('end', ok)).on('error', ok))
+    return send(200, {})
+  }
   if (q.url === '/burst') { for (let i = 0; i < ${FAKE_LIMITS.requests + 5}; i++) await fetch(S + '/ping').catch(() => {}); return send(200, {}) }
   send(404, {})
 }).listen(Number(process.env.PORT), '127.0.0.1')
@@ -220,4 +224,12 @@ test('unfinished concurrent requests count as they arrive: the fake cuts them an
       assert.deepEqual(fake.control('GET', '/requests', undefined).json, [])
     } finally { fake.close() }
   }
+})
+
+test('sequential connections that finished do not count as open', async () => {
+  const r = await runScenario(app, sc('seq', [
+    { method: 'GET', path: '/seq', expect: { status: 200 } },
+    { service: true, method: 'GET', path: '/requests', expect: { length: FAKE_LIMITS.connections + 5 } },
+  ]), never, { service: true })
+  assert.equal(r.pass, true, r.detail)
 })

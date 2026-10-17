@@ -183,7 +183,8 @@ export function spawnApp(appDir: string, port: number, dataDir: string, stdio: S
       opened.add(id)
       const s = service.connect()
       conns.set(id, s)
-      const done = () => { if (conns.delete(id)) pipe.write(frame(id)) }
+      // The fake finished: end our half too, so its side closes and leaves its open-connection count.
+      const done = () => { s.end(); if (conns.delete(id)) pipe.write(frame(id)) }
       s.on('data', (x: Buffer) => pipe.write(frame(id, x))).on('error', () => {}).on('end', done).on('close', done)
     }
     const c = conns.get(id)
