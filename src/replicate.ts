@@ -69,9 +69,9 @@ export async function replicate(o: ReplicateOpts): Promise<Replicate[]> {
 
   const stopFile = o.stopFile ?? process.env.FACTORY_STOP_FILE ?? join(o.stateDir, 'STOP')
   if (o.rescore) {
-    const guard = startGuard(CAPS.maxCostUsd, stopFile) // no model call; only the emergency stop
     const out: Replicate[] = []
     if (!existsSync(dir)) return out
+    const guard = startGuard(CAPS.maxCostUsd, stopFile) // no model call; only the emergency stop
     try {
       for (const f of readdirSync(dir).filter((f) => f.endsWith('.json')).sort()) {
         guard.check()
