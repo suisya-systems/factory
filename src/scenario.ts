@@ -2,7 +2,6 @@
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { isDeepStrictEqual } from 'node:util'
 import { assertLoopbackOnly, freePort, killTree, removeTree, spawnApp, waitPort } from './sandbox.ts'
 
 export type Expect = { status?: number | number[]; json?: unknown; jsonHas?: string[]; isArray?: boolean; length?: number | Record<string, number> }
@@ -190,8 +189,8 @@ export async function runScenario(appDir: string, s: Scenario, signal: AbortSign
 // ---- probes (lap 5) ----
 // A probe tells which of several pre-registered answers a build chose for one open decision: its steps
 // run on a fresh app (no checks), `observe` picks values out of the responses ("<step>:status",
-// "<step>:body" or "<step>:body.<dot.path>"), and the first option listing that exact observation
-// names the answer. No option matches -> "other" (the observation is kept); a step that could not run
+// "<step>:body" or "<step>:body.<dot.path>"), and the first option listing a matching observation
+// names the answer. Options may name captured values ("{{a}}"); they match like unordered(). No option matches -> "other" (the observation is kept); a step that could not run
 // (no response, a capture missing) -> "blocked". Written by the experimenter, never shown to a builder.
 export type Probe = { id: string; steps: Omit<Step, 'expect'>[]; observe: string[]; options: Record<string, unknown[][]> }
 export type ProbeResult = { id: string; answer: string; observed?: unknown[]; detail?: string }
@@ -212,6 +211,19 @@ export function validateProbes(x: unknown): Probe[] {
     }
   }
   return ds as Probe[]
+}
+
+// Like subset(), but arrays must be as long as expected and match in any order (a settlement's
+// transfers have no fixed order); objects may carry extra keys.
+export function unordered(expected: unknown, actual: unknown): boolean {
+  if (Array.isArray(expected)) {
+    if (!Array.isArray(actual) || actual.length !== expected.length) return false
+    const take = (i: number, used: boolean[]): boolean => i === expected.length
+      || actual.some((a, j) => !used[j] && unordered(expected[i], a) && take(i + 1, used.map((u, k) => u || k === j)))
+    return take(0, actual.map(() => false))
+  }
+  if (isObj(expected)) return isObj(actual) && Object.entries(expected).every(([k, v]) => unordered(v, actual[k]))
+  return expected === actual
 }
 
 export async function runProbe(appDir: string, p: Probe, signal: AbortSignal): Promise<ProbeResult> {
@@ -236,7 +248,7 @@ export async function runProbe(appDir: string, p: Probe, signal: AbortSignal): P
       const [n, what] = [Number(o.split(':')[0]), o.slice(o.indexOf(':') + 1)]
       return what === 'status' ? seen[n - 1].status : at(seen[n - 1].json, what.slice('body.'.length))
     })
-    const answer = Object.entries(p.options).find(([, vs]) => vs.some((v) => isDeepStrictEqual(v, observed)))?.[0] ?? OTHER
+    const answer = Object.entries(p.options).find(([, vs]) => vs.some((v) => { try { return unordered(fill(v, vars), observed) } catch { return false } }))?.[0] ?? OTHER
     return { id: p.id, answer, observed }
   }, (detail) => ({ id: p.id, answer: BLOCKED, detail }))
 }

@@ -20,6 +20,9 @@ const PROBES = { decisions: [
     observe: ['2:body.title'], options: { kept: [['t']], dropped: [[null]] } },
   // the second capture of g finds nothing: the first value must not be reused
   { id: 'ghost', steps: [{ method: 'POST', path: '/notes', body: {}, capture: { g: 'id' } }, { method: 'POST', path: '/notes', body: {}, capture: { g: 'ghost' } }, { method: 'GET', path: '/notes/{{g}}' }], observe: ['3:status'], options: { a: [[200]], b: [[404]] } },
+  // unordered lists, extra keys and captured values: the order the app lists notes in does not matter
+  { id: 'listed', steps: [{ method: 'POST', path: '/notes', body: { title: 'x', body: 'b' }, capture: { x: 'id' } }, { method: 'POST', path: '/notes', body: { title: 'y', body: 'b' } }, { method: 'GET', path: '/notes' }],
+    observe: ['3:body'], options: { both: [[[{ title: 'y' }, { id: '{{x}}', title: 'x' }]]], one: [[[{ title: 'x' }]]] } },
 ] }
 const probesFile = (id: string) => { const f = join(vaultDir(sd, id), 'probes.json'); writeFileSync(f, JSON.stringify(PROBES)); return f }
 
@@ -46,7 +49,7 @@ test('K builds from empty repos, scored by this change, a same-spec change and t
     for (const sc of SCENARIOS) assert.ok(!s.task.instruction.includes(sc.summary), 'scenario text reached the builder')
     assert.ok(!s.task.instruction.includes('created-201'), 'probe text reached the builder')
   }
-  assert.deepEqual(rs.map((r) => r.probes.map((p) => p.answer)), [['created-201', 'kept', 'blocked'], ['ok-200', 'kept', 'blocked']])
+  assert.deepEqual(rs.map((r) => r.probes.map((p) => p.answer)), [['created-201', 'kept', 'blocked', 'both'], ['ok-200', 'kept', 'blocked', 'both']])
   assert.match(rs[0].probes[2].detail!, /step 3: variable g was never captured/)
   assert.deepEqual(rs.map((r) => r.passed), [{ 'rep-a': 4, 'rep-b': 2 }, { 'rep-a': 2, 'rep-b': 1 }]) // 200 on create fails the 201 checks
   assert.ok(rs.every((r) => r.probesSha256 && r.costUsd === 0.25 && r.requestedModels.builder === 'm1'))
@@ -158,4 +161,13 @@ test('draft --spec-from reuses the approved spec byte for byte; --spec swaps the
   approve(sd, 'sf-ext', { by: 't', version: hash(ext) })
   await assert.rejects(main(['draft', 'sf-w', '--request', req, '--spec-from', 'sf-ext'], m), /extends an app/)
   assert.deepEqual(roles, [])
+})
+
+test('probe matching: same length, any order, each actual item used once, extra keys allowed', async () => {
+  const { unordered } = await import('../src/scenario.ts')
+  const t = (f: string, a: number) => ({ from: f, amount: a })
+  assert.ok(unordered([t('b', 33), t('c', 34)], [{ ...t('c', 34), id: 1 }, t('b', 33)]))
+  assert.ok(!unordered([t('b', 33), t('b', 33)], [t('b', 33), t('c', 33)])) // one actual item cannot match twice
+  assert.ok(!unordered([t('b', 33)], [t('b', 33), t('c', 1)])) // an extra transfer is a different answer
+  assert.ok(!unordered([t('b', 33)], [{ from: 'b' }]))
 })
