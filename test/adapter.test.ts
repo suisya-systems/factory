@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { chmodSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { cliEnv, runCli, type Access } from '../src/adapter.ts'
+import { cliEnv, MODEL_BY_ROLE, runCli, type Access } from '../src/adapter.ts'
 import { startGuard } from '../src/limits.ts'
 import { CLI_MARKERS, REPO, tmp } from './helpers.ts'
 
@@ -26,11 +26,11 @@ const call = (w: string, access: Access = 'write') => runCli({ role: 'r', instru
 
 test('parses result text and cost from the CLI JSON', async () => {
   const r = await call(fakeCli(`printf '{"type":"result","result":"%s","total_cost_usd":0.125,"is_error":false}' "$IN"`))
-  assert.deepEqual(r, { ok: true, text: 'hello', costUsd: 0.125 })
+  assert.deepEqual(r, { ok: true, text: 'hello', costUsd: 0.125, model: 'claude-opus-5-5' })
 })
 
 test('missing cost -> null; garbage output -> not ok, null cost; error result keeps cost', async () => {
-  assert.deepEqual(await call(fakeCli(`echo '{"result":"x"}'`)), { ok: true, text: 'x', costUsd: null })
+  assert.deepEqual(await call(fakeCli(`echo '{"result":"x"}'`)), { ok: true, text: 'x', costUsd: null, model: 'claude-opus-5-5' })
   const g = await call(fakeCli('echo "Error: --output-format bogus"; exit 3'))
   assert.equal(g.ok, false)
   assert.equal(g.costUsd, null)
@@ -45,6 +45,7 @@ test('access maps to permissions; budget passed down', async () => {
   const w = await call(fakeCli(echoArgs), 'write')
   assert.match(w.text, /--max-budget-usd 2\.5000/)
   assert.match(w.text, /bypassPermissions/)
+  assert.match(w.text, /--model claude-opus-5-5/) // pinned, never the CLI default
   const r = await call(fakeCli(echoArgs), 'read')
   assert.match(r.text, /--tools Read,Grep,Glob/)
   assert.doesNotMatch(r.text, /bypassPermissions/)
@@ -85,4 +86,10 @@ test('CLI error kinds, garbage and missing cost never reach records in CLI words
   for (const m of CLI_MARKERS) assert.ok(!m.test(txt), `record contains ${m}: ${txt}`)
   assert.match(txt, /budget exceeded/)
   assert.match(txt, /execution error/)
+})
+
+test('the model that actually answered is reported (per-model usage), and recorded per role', async () => {
+  const r = await call(fakeCli(`echo '{"result":"ok","total_cost_usd":0.2,"modelUsage":{"claude-opus-5-5":{},"claude-haiku-5-5":{}}}'`))
+  assert.equal(r.model, 'claude-opus-5-5,claude-haiku-5-5')
+  for (const role of ['drafter', 'builder', 'judge']) assert.equal(MODEL_BY_ROLE[role], 'claude-opus-5-5')
 })

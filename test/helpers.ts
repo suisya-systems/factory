@@ -77,4 +77,4 @@ export function writeApp(dir: string, server: string, start = 'node server.cjs')
   writeFileSync(join(dir, 'server.cjs'), server)
 }
 
-export const CLI_MARKERS = [/error_max|subtype|session_id/, /claude/i, /--output-format/, /total_cost_usd/, /--permission/, /bypassPermissions/, /--max-budget/, /is_error/, /--tools/, /allowedTools/, /setting-sources/, /no-session-persistence/, /stream-json/]
+export const CLI_MARKERS = [/error_max|subtype|session_id/, /claude(?!-(?:opus|sonnet|haiku|fable)-)/i, /--output-format/, /total_cost_usd/, /--permission/, /bypassPermissions/, /--max-budget/, /is_error/, /--tools/, /allowedTools/, /setting-sources/, /no-session-persistence/, /stream-json/]

@@ -7,7 +7,7 @@ import { sandboxSpawn, killTree, HOME, SANDBOX_PATH, type SandboxOpts } from './
 
 export type Access = 'none' | 'read' | 'write'
 export type Task = { role: string; instruction: string; workdir: string; access: Access; maxCostUsd: number; timeoutMs: number; signal?: AbortSignal }
-export type Result = { ok: boolean; text: string; costUsd: number | null; error?: string }
+export type Result = { ok: boolean; text: string; costUsd: number | null; error?: string; model?: string }
 export type Model = (task: Task) => Promise<Result>
 
 // The launcher's real file (under ~/.local/share/claude, which is mounted), not the whole ~/.local/bin.
@@ -41,8 +41,12 @@ export function cliSandbox(t: Task): SandboxOpts {
   }
 }
 
+// Model per role, pinned explicitly (latest generation), so a CLI default never decides it.
+export const MODEL_BY_ROLE: Record<string, string> = { drafter: 'claude-opus-5-5', builder: 'claude-opus-5-5', judge: 'claude-opus-5-5' }
+const modelFor = (role: string) => (Object.hasOwn(MODEL_BY_ROLE, role) ? MODEL_BY_ROLE[role] : 'claude-opus-5-5')
+
 function cliArgs(t: Task): string[] {
-  const a = ['-p', '--output-format', 'json', '--max-budget-usd', t.maxCostUsd.toFixed(4), '--no-session-persistence', '--strict-mcp-config',
+  const a = ['-p', '--model', modelFor(t.role), '--output-format', 'json', '--max-budget-usd', t.maxCostUsd.toFixed(4), '--no-session-persistence', '--strict-mcp-config',
     // Inside the sandbox the user config dir is empty, so 'user' loads nothing. 'project' is NOT
     // loaded on purpose: the workdir is builder-written and could plant hooks that see the judge prompt.
     '--setting-sources', 'user']
@@ -91,10 +95,13 @@ export async function runCli(t: Task, bin: string): Promise<Result> {
   try { j = JSON.parse(out) } catch { /* died without JSON */ }
   const cost = j && typeof j.total_cost_usd === 'number' && Number.isFinite(j.total_cost_usd) ? j.total_cost_usd : null
   const text = j && typeof j.result === 'string' ? j.result : ''
-  if (why) return { ok: false, text, costUsd: cost, error: why }
-  if (!j) return { ok: false, text: '', costUsd: null, error: `model process exited (code ${code}) without a parseable result` }
-  if (j.is_error || code !== 0) return { ok: false, text, costUsd: cost, error: `model reported an error (${Object.hasOwn(ERROR_KIND, j.subtype) ? ERROR_KIND[j.subtype] : 'unknown'})` }
-  return { ok: true, text, costUsd: cost }
+  // The models that actually answered (per-model usage), else the one requested.
+  const used = j && j.modelUsage && typeof j.modelUsage === 'object' ? Object.keys(j.modelUsage).join(',') : ''
+  const model = used || modelFor(t.role)
+  if (why) return { ok: false, text, costUsd: cost, error: why, model }
+  if (!j) return { ok: false, text: '', costUsd: null, error: `model process exited (code ${code}) without a parseable result`, model }
+  if (j.is_error || code !== 0) return { ok: false, text, costUsd: cost, error: `model reported an error (${Object.hasOwn(ERROR_KIND, j.subtype) ? ERROR_KIND[j.subtype] : 'unknown'})`, model }
+  return { ok: true, text, costUsd: cost, model }
 }
 
 export const claudeModel: Model = (t) => runCli(t, BIN)

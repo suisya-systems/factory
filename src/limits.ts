@@ -13,6 +13,7 @@ export type Ledger = {
   byRole: Record<string, number>
   totalUsd: number
   uncounted: { role: string; reason: string; chargedUsd: number }[]
+  modelByRole?: Record<string, string> // which model answered each role (as reported)
 }
 
 export type Guard = {
@@ -34,7 +35,7 @@ export function mergeLedger(a: Ledger | null, b: Ledger): Ledger {
   if (!a) return b
   const byRole = { ...a.byRole }
   for (const [k, v] of Object.entries(b.byRole)) byRole[k] = (byRole[k] ?? 0) + v
-  return { note: b.note, byRole, totalUsd: a.totalUsd + b.totalUsd, uncounted: [...a.uncounted, ...b.uncounted] }
+  return { note: b.note, byRole, totalUsd: a.totalUsd + b.totalUsd, uncounted: [...a.uncounted, ...b.uncounted], modelByRole: { ...a.modelByRole, ...b.modelByRole } }
 }
 
 // spentUsd: already spent on this change elsewhere (the drafter), counted against capUsd.
@@ -55,7 +56,7 @@ export function startGuard(capUsd: number, stopFile: string, o: { spentUsd?: num
 
   const ledger: Ledger = {
     note: 'costs are client-side estimates: the total cost the model CLI reports per call, summed per role. A call that reported no cost is charged its whole allowed budget (see uncounted).',
-    byRole: {}, totalUsd: 0, uncounted: [],
+    byRole: {}, totalUsd: 0, uncounted: [], modelByRole: {},
   }
   const check = () => { look(); if (ac.signal.aborted) throw new Stop(reason) } // look(): do not wait for the next poll
   return {
@@ -75,6 +76,7 @@ export function startGuard(capUsd: number, stopFile: string, o: { spentUsd?: num
       const cost = r.costUsd ?? remaining
       if (r.costUsd === null) ledger.uncounted.push({ role: task.role, reason: r.error ?? 'no cost reported', chargedUsd: remaining })
       ledger.byRole[task.role] = (ledger.byRole[task.role] ?? 0) + cost
+      if (r.model) ledger.modelByRole![task.role] = r.model
       ledger.totalUsd += cost
       if (o.lapFile) chargeLap(o.lapFile, cost)
       check()
