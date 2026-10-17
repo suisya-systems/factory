@@ -110,3 +110,12 @@ test('with the STOP file present every command but stop, serve (internal) and he
     assert.equal(await main(['stop']), 0)
   } finally { unlinkSync(f) }
 })
+
+test('draft of an already-approved id is refused before any model call', async () => {
+  const dir = writeDraft(sd, 'fixed1', { spec: 's', scenarios: SCENARIOS, assumptions: [] })
+  approve(sd, 'fixed1', { by: 'owner', version: hash(dir) })
+  const req = join(tmp('req'), 'r.md'); writeFileSync(req, 'x')
+  let calls = 0
+  assert.equal(await main(['draft', 'fixed1', '--request', req], async () => { calls++; return { ok: true, text: '{}', costUsd: 1 } }), 1)
+  assert.equal(calls, 0)
+})
