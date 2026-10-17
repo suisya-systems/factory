@@ -86,6 +86,8 @@ test('checkWithin: a part may use fewer names than the plan interface, never mor
   assert.throws(() => checkWithin({ endpoints: ['DELETE /notes'] }, plan), /outside the plan's interface: DELETE \/notes/)
   assert.throws(() => checkWithin({ fields: { note: ['body'] } }, plan), /note\.body/)
   assert.throws(() => checkWithin({ listShape: ['items'] }, plan), /list:/)
+  checkWithin({ conflictToken: { name: 'ETag', in: 'header' } }, { conflictToken: { in: 'header', name: 'ETag' } }) // key order is not a difference
+  assert.throws(() => checkWithin({ conflictToken: { in: 'body', name: 'ETag' } }, { conflictToken: { in: 'header', name: 'ETag' } }), /token:/)
 })
 
 test('a split request is approved once, built part by part on the shipped app, and verified as a whole', async () => {
@@ -269,4 +271,26 @@ test('an ordinary draft that took a reserved part id is not built', async () => 
   assert.equal(await h.cli(h.planArgs()), 1)
   assert.match(h.result().reason, /was not drafted from the plan's request for part create/)
   assert.equal(h.count('builder'), 0)
+})
+
+test('an ordinary change that took a part id and shipped is not counted as the part', async () => {
+  const h = await ready({})
+  const other = join(tmp('req'), 'other.md')
+  writeFileSync(other, 'a different request')
+  assert.equal(await h.cli(['draft', 'pl-create', '--request', other]), 0)
+  assert.equal(await h.cli(['approve', 'pl-create', '--by', 't', '--version', hash(vaultDir(h.sd, 'pl-create'))]), 0)
+  assert.equal(await h.cli(['run', 'pl-create', '--ship-target', h.target, '--port', String(h.port), '--max-attempts', '2']), 0) // shipped by hand
+  const builds = h.count('builder')
+  assert.equal(await h.cli(h.planArgs()), 1)
+  assert.match(h.result().reason, /pl-create was not drafted from the plan's request for part create/)
+  assert.equal(h.count('builder'), builds)
+})
+
+test('a plan name that is already a change id (or a part of another plan) is refused', async () => {
+  const h = await ready({})
+  const other = join(tmp('req'), 'o.md')
+  writeFileSync(other, 'WHOLE REQUEST again')
+  // plan "pl-create" would shadow part 1 of plan "pl": `approve pl-create` could then never approve that part
+  await assert.rejects(h.cli(['split', 'pl-create', '--request', other]), /change id pl-create is already used/)
+  assert.ok(!existsSync(join(h.sd, 'runs', 'pl-create.plan', 'plan.json'))) // only the splitter's cost record is left
 })

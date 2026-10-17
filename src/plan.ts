@@ -55,7 +55,7 @@ export async function splitRequest(model: Model, request: string, plan: string):
 
 // Every change id the plan owns, so a clash with any existing change (or another plan) is found before a model is called.
 export function derivedIds(plan: string, parts: Part[]): string[] {
-  return [wholeIdOf(plan), ...parts.flatMap((p) => Array.from({ length: MAX_RETRIES + 1 }, (_, k) => retryId(partChangeId(plan, p.id), k)))]
+  return [plan, wholeIdOf(plan), ...parts.flatMap((p) => Array.from({ length: MAX_RETRIES + 1 }, (_, k) => retryId(partChangeId(plan, p.id), k)))]
 }
 export function assertIdsFree(sd: string, plan: string, ids: string[]) {
   const taken = new Set<string>()
@@ -176,8 +176,20 @@ export async function runPlan(sd: string, plan: string, o: PlanOpts, factory: (a
       const rep = reps[i]
       const id0 = partChangeId(plan, part.id)
       const tries = Array.from({ length: retries + 1 }, (_, k) => retryId(id0, k))
+      // What makes a change this plan's part: drafted from the plan's request for it, on the commit the part before shipped,
+      // with an interface within the plan's. An ordinary change that took a reserved id fails this, shipped or not.
+      const vet = (id: string): string | null => {
+        const a = loadApproved(sd, id)
+        if (a.base.requestSha256 !== sha256(part.request)) return `${id} was not drafted from the plan's request for part ${part.id}`
+        if (a.base.baseSha !== (i === 0 ? null : prev)) return `${id} was drafted against ${a.base.baseSha ?? 'no app'}, not ${i === 0 ? 'a new app' : prev}`
+        try { checkWithin(JSON.parse(specIface(a.spec)), JSON.parse(specIface(loadApproved(sd, p.wholeId).spec))) } catch (e) { return `${id}: ${(e as Error).message}` }
+        return null
+      }
       const done = tries.find((t) => rec(t)?.status === 'shipped')
-      if (done) { rep.status = 'shipped'; rep.changeIds = tries.filter((t) => rec(t)); rep.sha = prev = rec(done)!.shipped!.sha; continue }
+      if (done) {
+        const bad = vet(done)
+        if (bad) return report('failed', bad)
+        rep.status = 'shipped'; rep.changeIds = tries.filter((t) => rec(t)); rep.sha = prev = rec(done)!.shipped!.sha; continue }
       if (stopped()) return report('failed', `emergency stop is active (${o.stopFile}); delete it by hand to continue`)
       if ((await head()) !== prev) return report('failed', `${part.id}: the ship target is not at ${prev} (the commit the plan has shipped so far); parts must extend exactly what the one before shipped`)
 
@@ -194,10 +206,8 @@ export async function runPlan(sd: string, plan: string, o: PlanOpts, factory: (a
       }
       if (!existsSync(join(vaultDir(sd, id0), 'approval.json'))) { rep.status = 'drafted'; rep.changeIds = [id0]; return report('waiting', `approve ${id0}`) }
       const approved = loadApproved(sd, id0)
-      if (approved.base.baseSha !== (i === 0 ? null : prev)) return report('failed', `${id0} was drafted against ${approved.base.baseSha ?? 'no app'}, not ${i === 0 ? 'a new app' : prev}`)
-      // A draft under this id that is not this plan's part (an ordinary `draft` took the reserved id) is not built.
-      if (approved.base.requestSha256 !== sha256(part.request)) return report('failed', `${id0} was not drafted from the plan's request for part ${part.id}`)
-      try { checkWithin(JSON.parse(specIface(approved.spec)), JSON.parse(specIface(loadApproved(sd, p.wholeId).spec))) } catch (e) { return report('failed', `${id0}: ${(e as Error).message}`) }
+      const bad = vet(id0)
+      if (bad) return report('failed', bad)
       rep.status = 'approved'
 
       let last = ''

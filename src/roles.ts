@@ -138,7 +138,7 @@ function checkInterface(raw: unknown): Record<string, unknown> {
 const flat = (x: Record<string, any>): string[] => [
   ...(x.endpoints ?? []), ...Object.entries<string[]>(x.queryParams ?? {}).flatMap(([k, ns]) => ns.map((n) => `${k}?${n}`)),
   ...Object.entries<string[]>(x.fields ?? {}).flatMap(([k, ns]) => ns.map((n) => `${k}.${n}`)),
-  ...(x.listShape === undefined ? [] : [`list:${JSON.stringify(x.listShape)}`]), ...(x.conflictToken === undefined ? [] : [`token:${JSON.stringify(x.conflictToken)}`]),
+  ...(x.listShape === undefined ? [] : [`list:${Array.isArray(x.listShape) ? [...x.listShape].sort().join(',') : x.listShape}`]), ...(x.conflictToken === undefined ? [] : [`token:${x.conflictToken.in}:${x.conflictToken.name}`]), // key order and list order do not matter
 ]
 export function checkWithin(part: Record<string, unknown>, plan: Record<string, unknown>) {
   const ok = new Set(flat(plan)), extra = flat(part).filter((n) => !ok.has(n))
