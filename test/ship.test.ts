@@ -2,12 +2,12 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { appendFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
 import { join } from 'node:path'
 import type { Model } from '../src/adapter.ts'
 import { build, judge } from '../src/roles.ts'
-import { freePort } from '../src/sandbox.ts'
+import { exportTree, freePort, removeTree } from '../src/sandbox.ts'
 import { runScenario, type Scenario } from '../src/scenario.ts'
 import { ship, stopServer } from '../src/ship.ts'
 import { freshState, gitTarget, MEMO_SERVER, SCENARIOS, tmp, writeApp } from './helpers.ts'
@@ -90,4 +90,35 @@ test('scenario runner: captured values keep their type; a missing capture fails 
   assert.match(r2.detail, /capture id missing/)
   const proto: Scenario = { ...del, id: 'proto', steps: [{ method: 'POST', path: '/notes', body: {}, expect: { jsonHas: ['constructor'] } }] }
   assert.equal((await runScenario(broken, proto, never)).pass, false)
+})
+
+test('export ignores builder-written .git/config filters: the exported bytes are the committed bytes', async () => {
+  const ws = gitTarget()
+  const { sha } = await build(builder((d) => {
+    writeFileSync(join(d, 'package.json'), '{"scripts":{"start":"node x.js"}}')
+    writeFileSync(join(d, '.gitattributes'), '* filter=evil\n')
+  }), ws, 'spec', '')
+  appendFileSync(join(ws, '.git', 'config'), '[filter "evil"]\n\tsmudge = echo SHIPPED-NOT-JUDGED\n\tclean = cat\n')
+  const dest = tmp('export')
+  await exportTree(ws, sha, dest)
+  assert.equal(readFileSync(join(dest, 'package.json'), 'utf8'), '{"scripts":{"start":"node x.js"}}')
+})
+
+test('export refuses malformed objects (fsck on fetch out of the builder repo)', async () => {
+  const ws = gitTarget()
+  const g = (...a: string[]) => execFileSync('git', ['-C', ws, '-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { input: '' }).toString().trim()
+  const blob = execFileSync('git', ['-C', ws, 'hash-object', '-w', '--stdin'], { input: 'x' }).toString().trim()
+  const sub = execFileSync('git', ['-C', ws, 'mktree'], { input: `100644 blob ${blob}\tconfig\n` }).toString().trim()
+  const tree = execFileSync('git', ['-C', ws, 'hash-object', '-w', '-t', 'tree', '--literally', '--stdin'],
+    { input: Buffer.concat([Buffer.from('40000 .git\0'), Buffer.from(sub, 'hex')]) }).toString().trim()
+  const sha = g('commit-tree', tree, '-m', 'bad')
+  await assert.rejects(exportTree(ws, sha, tmp('export-bad')), /hasDotgit|fsck|dotgit/i)
+})
+
+test('removeTree deletes a tree holding a mode-000 dir instead of throwing', () => {
+  const d = tmp('locked')
+  mkdirSync(join(d, 'data', 'locked', 'deep'), { recursive: true })
+  chmodSync(join(d, 'data', 'locked'), 0o000)
+  removeTree(d)
+  assert.ok(!existsSync(d))
 })

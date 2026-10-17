@@ -1,10 +1,10 @@
 // The 3 stop conditions: per-change cost cap, retry cap, emergency stop from outside the process.
 // Any of them ends the change as FAILED. Nobody is asked; nothing is re-enqueued.
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import type { Model } from './adapter.ts'
 
 // The ONE place for caps. Changing them is an owner decision, not something a role can do.
-export const CAPS = { maxCostUsd: 10, maxAttempts: 3, modelTimeoutMs: 20 * 60_000, pollMs: 500 }
+export const CAPS = { maxCostUsd: 10, lapCostUsd: 30, maxAttempts: 3, modelTimeoutMs: 20 * 60_000, pollMs: 500 }
 
 export class Stop extends Error {}
 
@@ -23,7 +23,23 @@ export type Guard = {
   dispose(): void
 }
 
-export function startGuard(capUsd: number, stopFile: string): Guard {
+// Lap-wide spend (all changes and commands in this state dir). Every model call is charged here too.
+// ponytail: read-modify-write without a lock; one factory command at a time in lap 1.
+export const lapSpent = (f: string): number => (existsSync(f) ? JSON.parse(readFileSync(f, 'utf8')).totalUsd : 0)
+export function chargeLap(f: string, usd: number): void {
+  writeFileSync(f, JSON.stringify({ note: 'lap-wide client-side estimate, all roles and commands', totalUsd: lapSpent(f) + usd }, null, 2))
+}
+
+export function mergeLedger(a: Ledger | null, b: Ledger): Ledger {
+  if (!a) return b
+  const byRole = { ...a.byRole }
+  for (const [k, v] of Object.entries(b.byRole)) byRole[k] = (byRole[k] ?? 0) + v
+  return { note: b.note, byRole, totalUsd: a.totalUsd + b.totalUsd, uncounted: [...a.uncounted, ...b.uncounted] }
+}
+
+// spentUsd: already spent on this change elsewhere (the drafter), counted against capUsd.
+// lapFile: the lap ledger; each call also gets at most what is left of CAPS.lapCostUsd.
+export function startGuard(capUsd: number, stopFile: string, o: { spentUsd?: number; lapFile?: string } = {}): Guard {
   if (!(Number.isFinite(capUsd) && capUsd > 0)) throw new Error(`cost cap must be a positive number, got ${capUsd}`)
   const ac = new AbortController()
   let reason = ''
@@ -48,8 +64,11 @@ export function startGuard(capUsd: number, stopFile: string): Guard {
     check,
     model: (m) => async (task) => {
       check()
-      const remaining = capUsd - ledger.totalUsd
-      if (remaining <= 0) throw new Stop(`cost cap reached ($${ledger.totalUsd.toFixed(4)} of $${capUsd})`)
+      const spent = (o.spentUsd ?? 0) + ledger.totalUsd
+      const lapLeft = o.lapFile ? CAPS.lapCostUsd - lapSpent(o.lapFile) : Infinity
+      if (lapLeft <= 0) throw new Stop(`lap cost cap reached ($${CAPS.lapCostUsd})`)
+      if (capUsd - spent <= 0) throw new Stop(`cost cap reached ($${spent.toFixed(4)} of $${capUsd})`)
+      const remaining = Math.min(capUsd - spent, lapLeft)
       const r = await m({ ...task, maxCostUsd: remaining, signal: ac.signal })
       // No reported cost (e.g. killed on timeout): money may still have been spent. Charge the whole
       // budget the call was allowed, so the cap still binds (the next call then gets nothing).
@@ -57,8 +76,10 @@ export function startGuard(capUsd: number, stopFile: string): Guard {
       if (r.costUsd === null) ledger.uncounted.push({ role: task.role, reason: r.error ?? 'no cost reported', chargedUsd: remaining })
       ledger.byRole[task.role] = (ledger.byRole[task.role] ?? 0) + cost
       ledger.totalUsd += cost
+      if (o.lapFile) chargeLap(o.lapFile, cost)
       check()
-      if (ledger.totalUsd > capUsd) throw new Stop(`cost cap exceeded ($${ledger.totalUsd.toFixed(4)} of $${capUsd})`)
+      if (spent + cost > capUsd) throw new Stop(`cost cap exceeded ($${(spent + cost).toFixed(4)} of $${capUsd})`)
+      if (o.lapFile && lapSpent(o.lapFile) > CAPS.lapCostUsd) throw new Stop(`lap cost cap exceeded ($${CAPS.lapCostUsd})`)
       return r
     },
     dispose: () => {

@@ -149,3 +149,30 @@ test('adapter kills the sandboxed CLI process on abort', async () => {
   await new Promise((res) => setTimeout(res, 500))
   assert.ok(!existsSync(join(w, 'survived')))
 })
+
+test('run: the drafter spend counts against the per-change cap', async () => {
+  approvedChange(sd, 'draft-cap')
+  mkdirSync(join(sd, 'runs', 'draft-cap'), { recursive: true })
+  writeFileSync(join(sd, 'runs', 'draft-cap', 'draft-cost.json'), JSON.stringify({ note: '', byRole: { drafter: 9.5 }, totalUsd: 9.5, uncounted: [] }))
+  const seen: number[] = []
+  const r = await runChange({ changeId: 'draft-cap', shipTarget: gitTarget(), model: async (t) => { seen.push(t.maxCostUsd); return { ok: true, text: '', costUsd: 1 } },
+    stateDir: sd, port: 1, maxCostUsd: 10, stopFile: join(sd, 'NOSTOP') })
+  assert.equal(r.status, 'failed')
+  assert.match(r.stopReason, /cost cap exceeded \(\$10\.5/)
+  assert.deepEqual(seen, [0.5]) // the builder got only what the drafter left
+})
+
+test('run: a judge failure is not an LLM rejection and the builder is not told the LLM rejected it', async () => {
+  approvedChange(sd, 'judge-fail')
+  const instr: string[] = []
+  const model: Model = async (t) => {
+    if (t.role === 'builder') { instr.push(t.instruction); writeApp(t.workdir, MEMO_SERVER); return { ok: true, text: '', costUsd: 0.01 } }
+    return { ok: false, text: '', costUsd: 0.01, error: 'execution error' }
+  }
+  const r = await runChange({ changeId: 'judge-fail', shipTarget: gitTarget(), model, stateDir: sd, port: 1, maxAttempts: 2, stopFile: join(sd, 'NOSTOP') })
+  assert.equal(r.status, 'failed')
+  assert.deepEqual(r.attempts.map((a) => [a.testsAllPass, a.llmPass]), [[true, null], [true, null]])
+  assert.equal(r.llmOnlyRejections, 0)
+  assert.equal(r.judgeFailures, 2)
+  assert.ok(!instr[1].includes('LLM judge did not approve'))
+})

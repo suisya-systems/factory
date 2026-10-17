@@ -1,11 +1,11 @@
 // Three model-calling roles: drafter, builder, judge. (The shipper is ship.ts and calls no model.)
 // Each role gets a Model; the run loop passes one wrapped by the limits guard.
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Model } from './adapter.ts'
 import { CAPS } from './limits.ts'
-import { exportTree, sandboxGit } from './sandbox.ts'
+import { exportTree, removeTree, sandboxGit } from './sandbox.ts'
 import { runScenarios, validateScenarios, type Scenario, type ScenarioResult } from './scenario.ts'
 import type { Draft } from './vault.ts'
 
@@ -70,10 +70,11 @@ export async function build(model: Model, workspace: string, spec: string, feedb
 
 // ---- judge ----
 // stop: a limit/stop fired during the LLM call; the deterministic results are still returned so the
-// attempt is recorded, and the caller re-throws it.
+// attempt is recorded, and the caller re-throws it. llmPass null = the judge gave no verdict (call
+// failed, reply unparseable, or stopped); only false is an LLM rejection.
 export type Verdict = { pass: boolean; testsAllPass: boolean; llmPass: boolean | null; reason: string; results: ScenarioResult[]; approvedVersion: string; stop?: Error }
 
-// Owner decision pending: AND (both must pass) is the default. Swap the body to change policy.
+// Owner decision: AND (both must pass).
 export function combineVerdict(testsAllPass: boolean, llmPass: boolean): boolean {
   return testsAllPass && llmPass
 }
@@ -84,7 +85,7 @@ export async function judge(model: Model, workspace: string, sha: string, spec: 
   try {
     await exportTree(workspace, sha, dir)
     return await judgeDir(model, dir, spec, scenarios, approvedVersion, signal)
-  } finally { rmSync(dir, { recursive: true, force: true }) }
+  } finally { removeTree(dir) }
 }
 
 async function judgeDir(model: Model, dir: string, spec: string, scenarios: Scenario[], approvedVersion: string, signal: AbortSignal): Promise<Verdict> {
@@ -94,24 +95,25 @@ async function judgeDir(model: Model, dir: string, spec: string, scenarios: Scen
   let r
   try { r = await model({ ...base, role: 'judge', instruction, workdir: dir, access: 'read' }) }
   catch (e) { return { pass: false, testsAllPass, llmPass: null, reason: 'judge call stopped', results, approvedVersion, stop: e as Error } }
-  let llmPass = false
+  let llmPass: boolean | null = null
   let reason = r.ok ? '' : `judge call failed: ${r.error}`
   if (r.ok) {
     try {
       const j = extractJson(r.text)
-      llmPass = j.pass === true
+      if (typeof j.pass !== 'boolean') throw new Error('no verdict')
+      llmPass = j.pass
       reason = typeof j.reason === 'string' ? j.reason : ''
     } catch { reason = 'judge reply was not parseable' }
   }
-  return { pass: combineVerdict(testsAllPass, llmPass), testsAllPass, llmPass, reason, results, approvedVersion }
+  return { pass: combineVerdict(testsAllPass, llmPass === true), testsAllPass, llmPass, reason, results, approvedVersion }
 }
 
 // What the builder may learn from a rejection. DEFAULT = the drafter's one-line summary of each
-// failed scenario + a bare "LLM judge did not approve" flag. Never steps, values, expectations,
+// failed scenario + a bare "LLM judge did not approve" flag (only on a real rejection, not a judge failure). Never steps, values, expectations,
 // details, or the judge's reason text (which may quote scenarios). Keep this the only path.
 export function feedbackFor(v: Verdict, scenarios: Scenario[]): string {
   const byId = new Map(scenarios.map((s) => [s.id, s.summary]))
   const lines = v.results.filter((r) => !r.pass).map((r) => `- failed: ${byId.get(r.id) ?? 'a hidden scenario'}`)
-  if (v.llmPass !== true) lines.push('- LLM judge did not approve')
+  if (v.llmPass === false) lines.push('- LLM judge did not approve')
   return lines.join('\n')
 }

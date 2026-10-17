@@ -2,10 +2,10 @@
 // model sessions AND builder-written app code. The hidden-scenario guarantee lives here:
 // the child sees / read-only, but $HOME (where the vault must live) is an empty tmpfs,
 // /tmp is fresh, /mnt is hidden, and it has its own pid namespace.
-import { existsSync, openSync, realpathSync } from 'node:fs'
-import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
-import { homedir } from 'node:os'
-import { dirname, resolve, sep } from 'node:path'
+import { existsSync, mkdtempSync, openSync, realpathSync, rmSync } from 'node:fs'
+import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from 'node:child_process'
+import { homedir, tmpdir } from 'node:os'
+import { dirname, join, resolve, sep } from 'node:path'
 import net from 'node:net'
 
 export const HOME = realpathSync(homedir())
@@ -45,7 +45,10 @@ export function sandboxCommand(cmd: string, args: string[], o: SandboxOpts): { c
     if (hit) throw new Error(`sandbox refused: mount ${p} would expose protected ${hit}`)
   }
   const a = ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', HOME, '--tmpfs', '/tmp']
-  if (existsSync('/mnt')) a.push('--tmpfs', '/mnt')
+  // Host runtime sockets (systemd --user, D-Bus session bus, gpg/ssh agent) would let a child run
+  // commands OUTSIDE the sandbox (e.g. systemd-run --user) and so reach the vault.
+  const xdg = process.env.XDG_RUNTIME_DIR ? real(process.env.XDG_RUNTIME_DIR) : ''
+  for (const d of ['/mnt', '/run/user', '/var/tmp', xdg]) if (d && existsSync(d) && !within(d, HOME) && !within(d, '/tmp')) a.push('--tmpfs', d)
   for (const p of ro) a.push('--ro-bind', real(p), real(p))
   a.push(o.writable ? '--bind' : '--ro-bind', real(o.workdir), real(o.workdir))
   for (const p of o.extraRw ?? []) a.push('--bind', real(p), real(p))
@@ -113,9 +116,10 @@ export async function waitPort(port: number, timeoutMs: number, child?: ChildPro
 // hooks / fsmonitor / filters, which would otherwise execute on the host next to the vault.
 export function sandboxExec(cmd: string, args: string[], o: SandboxOpts, env: NodeJS.ProcessEnv): Promise<{ code: number | null; out: string }> {
   const c = sandboxSpawn(cmd, args, o, { env, cwd: o.workdir })
-  let out = ''
-  c.stdout!.on('data', (d) => { out += d })
-  c.stderr!.on('data', (d) => { out += d })
+  let out = '' // tail only: the output is builder-controlled and could exhaust factory memory
+  const add = (d: Buffer) => { out = (out + d).slice(-64_000) }
+  c.stdout!.on('data', add)
+  c.stderr!.on('data', add)
   return new Promise((ok) => {
     c.on('error', () => ok({ code: null, out }))
     c.on('close', (code) => ok({ code, out }))
@@ -129,8 +133,24 @@ export function sandboxGit(workdir: string, args: string[], writable: boolean, e
 
 // The ONE way a commit becomes runnable files. The judge tests and the shipper ships the output of
 // this same export, so what was judged and what ships are the same bytes (ignored files and
-// export-ignore paths are absent from both).
+// export-ignore paths are absent from both). The archive runs from a bare repo the factory creates,
+// never against the builder-written .git/config: its smudge/process filters would otherwise rewrite
+// the exported bytes (and could make the judge's copy differ from the shipped one).
+// ponytail: exports twice (judge, ship); export once + hash if that ever needs proving.
 export async function exportTree(repo: string, sha: string, dest: string): Promise<void> {
-  const a = await sandboxExec('sh', ['-c', 'git archive --format=tar "$1" | tar -x -C "$2"', 'sh', sha, dest], { workdir: repo, writable: false, extraRw: [dest] }, GIT_ENV)
-  if (a.code !== 0) throw new Error(`export of ${sha} failed: ${a.out.trim()}`)
+  const bare = mkdtempSync(join(tmpdir(), 'factory-export-'))
+  try {
+    const script = 'git init -q --bare . && git -c core.hooksPath=/dev/null -c transfer.fsckObjects=true fetch -q "$1" "$2" && git -c core.attributesFile=/dev/null archive --format=tar "$2" | tar -x -C "$3"'
+    const a = await sandboxExec('sh', ['-c', script, 'sh', repo, sha, dest], { workdir: bare, writable: true, extraRo: [repo], extraRw: [dest] }, GIT_ENV)
+    if (a.code !== 0) throw new Error(`export of ${sha} failed: ${a.out.trim()}`)
+  } finally { removeTree(bare) }
+}
+
+// Host-side cleanup of trees sandboxed code wrote: a mode-000 dir must not abort the run. chmod -R
+// does not follow symlinks met during traversal; failures are swallowed (a leftover temp dir only).
+export function removeTree(dir: string): void {
+  try {
+    spawnSync('chmod', ['-R', 'u+rwx', '--', dir])
+    rmSync(dir, { recursive: true, force: true })
+  } catch { /* leftover temp dir; never replaces the real result */ }
 }

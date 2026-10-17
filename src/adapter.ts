@@ -1,6 +1,8 @@
 // The ONE place that knows the model CLI: its binary, flags, files and output shape.
 // Everything outside speaks only Task / Result (job, workplace, access, limits, result, cost).
-import { existsSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { sandboxSpawn, killTree, HOME, SANDBOX_PATH, type SandboxOpts } from './sandbox.ts'
 
 export type Access = 'none' | 'read' | 'write'
@@ -8,7 +10,23 @@ export type Task = { role: string; instruction: string; workdir: string; access:
 export type Result = { ok: boolean; text: string; costUsd: number | null; error?: string }
 export type Model = (task: Task) => Promise<Result>
 
-export const BIN = `${HOME}/.local/bin/claude`
+// The launcher's real file (under ~/.local/share/claude, which is mounted), not the whole ~/.local/bin.
+const LAUNCHER = `${HOME}/.local/bin/claude`
+export const BIN = existsSync(LAUNCHER) ? realpathSync(LAUNCHER) : LAUNCHER
+
+// ~/.claude.json holds other sessions' first prompts (projects[*]), MCP headers, etc. The sandbox gets
+// only the keys the CLI needs to start without onboarding. ponytail: oauthAccount (account metadata,
+// not a token) is kept because auth may need it; unverified offline which keys are strictly required.
+export const CONFIG_KEEP = ['hasCompletedOnboarding', 'lastOnboardingVersion', 'userID', 'oauthAccount', 'bypassPermissionsModeAccepted']
+let configFile: string | undefined
+function minimalConfig(): string {
+  if (configFile) return configFile
+  let j: Record<string, unknown> = {}
+  try { j = JSON.parse(readFileSync(`${HOME}/.claude.json`, 'utf8')) } catch { /* no config: start empty */ }
+  configFile = join(mkdtempSync(join(tmpdir(), 'factory-cfg-')), 'claude.json')
+  writeFileSync(configFile, JSON.stringify(Object.fromEntries(CONFIG_KEEP.filter((k) => Object.hasOwn(j, k)).map((k) => [k, j[k]]))), { mode: 0o600 })
+  return configFile
+}
 
 // Exported so the isolation test checks the exact mounts a model session gets.
 export function cliSandbox(t: Task): SandboxOpts {
@@ -18,8 +36,8 @@ export function cliSandbox(t: Task): SandboxOpts {
     // Only what the CLI needs to start and authenticate. Never the whole config dir: its history,
     // transcripts and file backups can contain scenario text from the drafter / approval sessions.
     // ponytail: credentials are read-only, so an in-sandbox token refresh cannot persist (unverified offline).
-    extraRo: [`${HOME}/.local/share/claude`, `${HOME}/.local/bin`, ...[`${HOME}/.claude/.credentials.json`].filter(existsSync)],
-    copies: { [`${HOME}/.claude.json`]: `${HOME}/.claude.json` }, // writable throwaway copy; host file is never written
+    extraRo: [`${HOME}/.local/share/claude`, ...[`${HOME}/.claude/.credentials.json`].filter(existsSync)],
+    copies: { [`${HOME}/.claude.json`]: minimalConfig() }, // writable throwaway copy of the allowlisted keys
   }
 }
 
@@ -40,7 +58,7 @@ function cliArgs(t: Task): string[] {
 const ENV_KEEP = ['LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy',
   'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'] // last two: explicit auth, if the operator uses env auth
 export function cliEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { PATH: `${HOME}/.local/bin:${SANDBOX_PATH}`, HOME, TMPDIR: '/tmp' }
+  const env: NodeJS.ProcessEnv = { PATH: SANDBOX_PATH, HOME, TMPDIR: '/tmp' }
   for (const k of ENV_KEEP) if (process.env[k] !== undefined) env[k] = process.env[k]
   return env
 }
