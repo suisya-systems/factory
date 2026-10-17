@@ -213,3 +213,26 @@ test('classifyReply: a determined captured value is kept for later steps; an und
   assert.equal(label({ version: 2 }, { version: '{{v}}' }), 'contradicts')
   assert.equal(label({ version: '?' }, { version: '{{v}}' }), 'unstated')
 })
+
+test('a rejected drafter reply gets one repair round with the error, in a fresh call; a second rejection fails', async () => {
+  const leaky = { ...createGet, summary: 'alpha comes back' } // 'alpha' is a value from its steps
+  const run = async (fixed: boolean) => {
+    const seen: Task[] = []
+    let n = 0
+    const m: Model = async (t) => {
+      seen.push(t)
+      const reply = t.role === 'spec-drafter' ? { spec: SPEC, interface: IFACE, assumptions: [] }
+        : t.role === 'scenario-drafter' ? { scenarios: [n++ === 0 || !fixed ? leaky : createGet] }
+          : { steps: [{ status: null, body: null, basis: 'convention', quote: '' }, { status: null, body: null, basis: 'convention', quote: '' }] }
+      return { ok: true, costUsd: 0.1, text: JSON.stringify(reply) }
+    }
+    return { seen, d: await draft(m, 'x').catch((e: Error) => e) }
+  }
+  const good = await run(true)
+  assert.deepEqual(good.seen.map((t) => t.role), ['spec-drafter', 'scenario-drafter', 'scenario-drafter', 'classifier'])
+  assert.match(good.seen[2].instruction, /PREVIOUS REPLY WAS REJECTED: .*concrete value .*"alpha"/)
+  assert.ok(!(good.d instanceof Error) && good.d.scenarios[0].summary === createGet.summary)
+  const bad = await run(false)
+  assert.ok(bad.d instanceof Error && /concrete value/.test(bad.d.message))
+  assert.equal(bad.seen.filter((t) => t.role === 'scenario-drafter').length, 2)
+})

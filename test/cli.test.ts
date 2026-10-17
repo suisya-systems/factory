@@ -15,7 +15,7 @@ test('a failed drafter still records its spend', async () => {
   const req = join(tmp('req'), 'req.txt')
   writeFileSync(req, 'a memo api')
   await assert.rejects(main(['draft', 'd1', '--request', req], async () => ({ ok: true, text: 'sorry', costUsd: 2 })), /no parseable JSON/)
-  assert.equal(JSON.parse(readFileSync(join(sd, 'runs', 'd1', 'draft-cost.json'), 'utf8')).totalUsd, 2)
+  assert.equal(JSON.parse(readFileSync(join(sd, 'runs', 'd1', 'draft-cost.json'), 'utf8')).totalUsd, 4) // the reply and its one repair round
 })
 
 test('probe-isolation over the cap still writes its result, with its own exit code', async () => {
@@ -65,8 +65,8 @@ test('a re-draft adds to the earlier drafter spend instead of overwriting it', a
   await assert.rejects(main(['draft', 'd2', '--request', req], m(2)))
   await assert.rejects(main(['draft', 'd2', '--request', req], m(3)))
   const l = JSON.parse(readFileSync(join(sd, 'runs', 'd2', 'draft-cost.json'), 'utf8'))
-  assert.equal(l.totalUsd, 5)
-  assert.deepEqual(l.byRole, { 'spec-drafter': 5 })
+  assert.equal(l.totalUsd, 10) // (2 + 3), each with its repair round
+  assert.deepEqual(l.byRole, { 'spec-drafter': 10 })
 })
 
 test('probe-isolation: a canary the model wrote into its workdir counts as found; the canary file is removed', async () => {

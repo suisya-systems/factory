@@ -41,7 +41,7 @@ You cannot ask questions: record every guess in assumptions.`
 
 const SCENARIO_FORMAT = `Reply with ONE JSON object and nothing else:
 {"assumptions": ["<one line each: anything YOU assumed beyond the given assumptions>"],
- "scenarios": [{"id": "kebab-id", "title": "...", "summary": "<one line, NO concrete paths/values; this is all the builder sees if it fails>",
+ "scenarios": [{"id": "kebab-id", "title": "...", "summary": "<one line, plain words; this is all the builder sees if it fails. It must NOT contain any path, any status code, or any string value (3+ chars) used in that scenario's steps>",
    "inSpec": <true if the REQUEST or the GIVEN ASSUMPTIONS state this behaviour, false if it is an unstated but reasonable expectation>, "kind": "<crud|validation|not-found|paging|filter|conflict|...>",
    "steps": [{"method": "GET|POST|PUT|PATCH|DELETE", "path": "/...", "body": <json, optional, not on GET>, "headers": {<optional>},
      "expect": {"status": <int or [ints]>, "json": <partial deep subset, optional>, "jsonHas": ["dot.path", ...], "isArray": <bool>, "length": <int, or {"dot.path": int} for arrays inside the body>},
@@ -69,24 +69,33 @@ const strs = (x: unknown, who: string): string[] => {
   return x
 }
 
+// A drafter reply that fails validation gets ONE repair round in a fresh session (same role, same
+// inputs, plus its reply and the error). Nothing is relaxed: the repaired reply must pass the same checks.
+async function ask<T>(model: Model, role: string, instruction: string, parse: (j: any) => T): Promise<T> {
+  let text = '', err = ''
+  for (const repair of [false, true]) {
+    const r = await model(draftTask(role, repair ? `${instruction}\n\nYOUR PREVIOUS REPLY WAS REJECTED: ${err}\nPREVIOUS REPLY:\n${text}\n\nReply again with the whole corrected JSON object.` : instruction))
+    if (!r.ok) throw new Error(`${role} failed: ${r.error}`)
+    text = r.text
+    try { return parse(extractJson(text)) } catch (e) { if (repair) throw e; err = (e as Error).message }
+  }
+  throw new Error('unreachable')
+}
+
 export async function draft(model: Model, request: string, o: { signals?: string; app?: string } = {}): Promise<Omit<Draft, 'base'>> {
   const req = `REQUEST:\n${request}\n` + (o.signals ? `\nPRODUCTION SIGNALS (observed from the running app):\n${o.signals}\n` : '') + appBlock(o.app ?? '')
-  const a = await model(draftTask('spec-drafter', `You are the spec drafter of a software factory. Turn the request into a spec for a builder (HTTP JSON API).\n\n${req}\n${SPEC_FORMAT}`))
-  if (!a.ok) throw new Error(`spec drafter failed: ${a.error}`)
-  const j = extractJson(a.text)
-  if (typeof j.spec !== 'string' || !j.spec.trim()) throw new Error('spec drafter: spec missing')
-  const iface = JSON.stringify(checkInterface(j.interface))
-  const assumptions = [`Interface (names and shapes only): ${iface}`, ...strs(j.assumptions, 'spec drafter')]
+  const j = await ask(model, 'spec-drafter', `You are the spec drafter of a software factory. Turn the request into a spec for a builder (HTTP JSON API).\n\n${req}\n${SPEC_FORMAT}`, (j) => {
+    if (typeof j.spec !== 'string' || !j.spec.trim()) throw new Error('spec drafter: spec missing')
+    return { spec: j.spec as string, iface: JSON.stringify(checkInterface(j.interface)), assumptions: strs(j.assumptions, 'spec drafter') }
+  })
+  const assumptions = [`Interface (names and shapes only): ${j.iface}`, ...j.assumptions]
   // The builder sees the same names the scenarios use.
-  const spec = `${j.spec.trimEnd()}\n\n## Interface (names and shapes, shared with the scenario writer)\n\n\`\`\`json\n${iface}\n\`\`\`\n`
+  const spec = `${j.spec.trimEnd()}\n\n## Interface (names and shapes, shared with the scenario writer)\n\n\`\`\`json\n${j.iface}\n\`\`\`\n`
 
-  const b = await model(draftTask('scenario-drafter', `You are the scenario writer of a software factory. Write hidden acceptance scenarios (HTTP JSON API) for the request. ` +
-    `A builder will implement a spec you do not see; your scenarios judge it.\n\n${req}\nASSUMPTIONS (made by the spec writer; follow them):\n${assumptions.map((x) => `- ${x}`).join('\n')}\n\n${SCENARIO_FORMAT}`))
-  if (!b.ok) throw new Error(`scenario drafter failed: ${b.error}`)
-  const k = extractJson(b.text)
-  const scenarios = validateScenarios(k.scenarios)
-  const more = k.assumptions === undefined ? [] : strs(k.assumptions, 'scenario drafter')
-  return { spec, scenarios, assumptions: [...assumptions, ...more.map((x) => `(scenario writer) ${x}`)], classification: await classify(model, spec, o.app ?? '', scenarios, extractJson) }
+  const k = await ask(model, 'scenario-drafter', `You are the scenario writer of a software factory. Write hidden acceptance scenarios (HTTP JSON API) for the request. ` +
+    `A builder will implement a spec you do not see; your scenarios judge it.\n\n${req}\nASSUMPTIONS (made by the spec writer; follow them):\n${assumptions.map((x) => `- ${x}`).join('\n')}\n\n${SCENARIO_FORMAT}`,
+  (k) => ({ scenarios: validateScenarios(k.scenarios), more: k.assumptions === undefined ? [] : strs(k.assumptions, 'scenario drafter') }))
+  return { spec, scenarios: k.scenarios, assumptions: [...assumptions, ...k.more.map((x) => `(scenario writer) ${x}`)], classification: await classify(model, spec, o.app ?? '', k.scenarios, extractJson) }
 }
 
 // ---- builder ----
