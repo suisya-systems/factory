@@ -8,6 +8,7 @@ import { claudeModel, MODEL_BY_ROLE, parseModels, type Model } from './adapter.t
 import { CAPS, chargeLap, lapSpent, mergeLedger, startGuard, type Ledger } from './limits.ts'
 import { draft, specBody, specIface, type FeedbackMode } from './roles.ts'
 import { lap } from './lap.ts'
+import { approvePlan, assertIdsFree, derivedIds, isPlan, planDir, runPlan, splitRequest, writePlan, type Plan } from './plan.ts'
 import { replicate, tally } from './replicate.ts'
 import { runChange } from './run.ts'
 import { UNDECIDED, type Classification } from './classify.ts'
@@ -26,7 +27,14 @@ const USAGE = `usage: factory <command>
         [--minority-brief <text>]                  (with --minority) the experimenter's extra constraints on those points
         [--service]                                the app calls an external service: the spec names SERVICE_URL and
                                                    the hidden scenarios set and check a fake of it while judging
+        [--iface-from <approved id>]               the spec's interface must stay within that change's interface (plan parts)
+  split <plan> --request <file>                    REAL model call: split a request too big for one change into ordered parts,
+                                                   draft the whole request as <plan>-whole, then STOP for approval
   approve <id> --by <name> --version <hash> [--note <text>]   human entrance approval of the version you read
+                                                   (<id> may be a plan: approves the plan and its whole draft together)
+  plan <plan> --ship-target <repo> [--retries 0-3 (default 1)] [--port N] [--max-cost N] [--max-attempts N] (per run)
+                                                   build an approved plan part by part; stops (exit 3) at each part's
+                                                   approval, runs the whole-request scenarios after the last part ships
   run <id> --ship-target <repo> [--max-cost N (per change, drafter included)] [--max-attempts N] [--port N] [--traffic-base /memos]
       [--feedback summaries|bare]               bare: a rejected builder gets one "failed: a hidden scenario" line per failed scenario
   replicate <id> --k N [--score <id,id>] [--probes <file under vault/>] [--max-cost N] [--rescore]
@@ -42,10 +50,10 @@ const USAGE = `usage: factory <command>
                                                    gate (exit 3) and prints the summary to read and the resume
                                                    command; the same command resumes, skipping finished steps
   serve --port N                                   (internal) production supervisor
---model <role>=<model> (repeatable; draft, replicate, probe-isolation): the model for that role in this command.
+--model <role>=<model> (repeatable; draft, replicate, probe-isolation, split): the model for that role in this command.
 After \`stop\`, every command refuses to start until the STOP file is deleted by hand.`
-const COMMANDS = ['draft', 'approve', 'run', 'serve', 'observe', 'stop', 'probe-isolation', 'replicate', 'tally', 'lap']
-const MODEL_COMMANDS = ['draft', 'replicate', 'probe-isolation']
+const COMMANDS = ['draft', 'approve', 'run', 'serve', 'observe', 'stop', 'probe-isolation', 'replicate', 'tally', 'lap', 'split', 'plan']
+const MODEL_COMMANDS = ['draft', 'replicate', 'probe-isolation', 'split']
 
 // The canary is a random string the probe plants in the vault; seeing it outside means the vault leaked.
 // The probe passes only if the canary is in neither the reply nor any regular file the model left
@@ -130,7 +138,7 @@ export async function main(argv: string[], model: Model = claudeModel): Promise<
       args: argv, allowPositionals: true,
       options: { help: { type: 'boolean', short: 'h' }, request: { type: 'string' }, base: { type: 'string' }, signals: { type: 'string' }, by: { type: 'string' }, version: { type: 'string' }, note: { type: 'string' }, 'ship-target': { type: 'string' },
         'max-cost': { type: 'string' }, 'max-attempts': { type: 'string' }, port: { type: 'string' }, 'traffic-base': { type: 'string' },
-        model: { type: 'string', multiple: true }, 'spec-from': { type: 'string' }, spec: { type: 'string' }, k: { type: 'string' }, score: { type: 'string' }, probes: { type: 'string' }, rescore: { type: 'boolean' }, minority: { type: 'boolean' }, 'minority-brief': { type: 'string' }, service: { type: 'boolean' }, feedback: { type: 'string' }, approve: { type: 'string' } },
+        model: { type: 'string', multiple: true }, 'spec-from': { type: 'string' }, spec: { type: 'string' }, k: { type: 'string' }, score: { type: 'string' }, probes: { type: 'string' }, rescore: { type: 'boolean' }, minority: { type: 'boolean' }, 'minority-brief': { type: 'string' }, service: { type: 'boolean' }, 'iface-from': { type: 'string' }, retries: { type: 'string' }, feedback: { type: 'string' }, approve: { type: 'string' } },
     })
   } catch (e) { console.error(`factory: ${(e as Error).message}\n${USAGE}`); return 2 }
   const { positionals, values: v } = parsed
@@ -173,9 +181,11 @@ export async function main(argv: string[], model: Model = claudeModel): Promise<
           reuse = { body: v.spec ? readFileSync(v.spec, 'utf8') : specBody(src.spec), iface: specIface(src.spec) }
           if (!UNDECIDED.test(reuse.body)) throw new Error('--spec: the spec has no "## Undecided" section')
         } else if (v.spec) throw new Error('--spec needs --spec-from')
+        if (v['iface-from'] && reuse) throw new Error('--iface-from does not go with --spec-from')
+        const iface = v['iface-from'] ? specIface(loadApproved(sd, v['iface-from']).spec) : undefined
         if (v['minority-brief'] !== undefined && (!v.minority || !v['minority-brief'].trim())) throw new Error('--minority-brief needs --minority and a text')
         const app = v.base ? await appSnapshot(resolve(v.base)) : null
-        const drafted = await draft(guard.model(model), request, { signals: v.signals ? readFileSync(v.signals, 'utf8') : undefined, app: app?.text, reuse, minority: v.minority, minorityBrief: v['minority-brief'], service: v.service })
+        const drafted = await draft(guard.model(model), request, { signals: v.signals ? readFileSync(v.signals, 'utf8') : undefined, app: app?.text, reuse, minority: v.minority, minorityBrief: v['minority-brief'], service: v.service, iface })
         const d: Draft = { ...drafted, base: { baseSha: app?.sha ?? null, requestSha256 } }
         const dir = writeDraft(sd, id, d)
         const version = hash(dir)
@@ -195,6 +205,7 @@ export async function main(argv: string[], model: Model = claudeModel): Promise<
     }
     case 'approve': {
       if (!id || !v.by || !v.version) break
+      if (isPlan(sd, id)) { console.log(`approved plan ${id} by ${v.by}; version ${approvePlan(sd, id, { by: v.by, version: v.version, note: v.note })}`); return 0 }
       console.log(`approved ${id} by ${v.by}; version ${approve(sd, id, { by: v.by, version: v.version, note: v.note })}`)
       return 0
     }
@@ -207,6 +218,39 @@ export async function main(argv: string[], model: Model = claudeModel): Promise<
       console.log(`${id}: ${r.status}${r.stopReason ? ` (${r.stopReason})` : ''}; attempts ${r.attempts.length}`)
       console.log(`cost (client-side estimate): ${JSON.stringify(r.cost.byRole)} total $${r.cost.totalUsd.toFixed(4)}; uncounted ${r.cost.uncounted.length}`)
       return r.status === 'shipped' ? 0 : 1
+    }
+    case 'split': {
+      if (!id || !v.request) break
+      const dir = planDir(sd, id)
+      if (isPlan(sd, id)) { console.error(`factory: plan ${id} exists; its parts are fixed. Split under a new name instead.`); return 1 } // before any spend
+      const guard = startGuard(CAPS.maxCostUsd, stopFile, { lapFile })
+      const costFile = join(dir, 'split-cost.json')
+      try {
+        const request = readFileSync(v.request, 'utf8')
+        const parts = await splitRequest(guard.model(model), request, id)
+        const wholeId = `${id}-whole`
+        const changeIds = derivedIds(id, parts)
+        assertIdsFree(sd, id, changeIds)
+        mkdirSync(dir, { recursive: true })
+        const reqFile = join(dir, 'request.md')
+        writeFileSync(reqFile, request)
+        // The whole request is drafted like any change (new app); its scenarios judge the final app, its spec is never built.
+        const code = await main(['draft', wholeId, '--request', reqFile, ...(v.model ?? []).flatMap((m) => ['--model', m])], base)
+        if (code !== 0) return code
+        const plan: Plan = { plan: id, requestSha256: createHash('sha256').update(request).digest('hex'), wholeId, parts, changeIds }
+        const version = writePlan(sd, plan, request)
+        console.log(`split ${id} into ${parts.length} parts (version ${version}). Factory stopped; waiting for human approval. Summary: ${join(dir, 'plan-summary.md')}`)
+        return 0
+      } finally {
+        guard.dispose()
+        mkdirSync(dir, { recursive: true }) // the splitter's spend is recorded even when it failed
+        writeFileSync(costFile, JSON.stringify({ ...guard.ledger, requestedModels }, null, 2))
+      }
+    }
+    case 'plan': {
+      if (!id || !v['ship-target']) break
+      const retries = v.retries === undefined ? undefined : Number(v.retries)
+      return runPlan(sd, id, { shipTarget: resolve(v['ship-target']), port, retries, maxCostUsd: v['max-cost'] ? Number(v['max-cost']) : undefined, maxAttempts: v['max-attempts'] ? Number(v['max-attempts']) : undefined, stopFile }, (argv) => main(argv, base))
     }
     case 'replicate': {
       if (!id || (!v.k && !v.rescore)) break

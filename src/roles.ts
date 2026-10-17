@@ -134,6 +134,17 @@ function checkInterface(raw: unknown): Record<string, unknown> {
   return x
 }
 
+// #18: the flat list of names an interface uses, to check that a part's interface stays within its plan's.
+const flat = (x: Record<string, any>): string[] => [
+  ...(x.endpoints ?? []), ...Object.entries<string[]>(x.queryParams ?? {}).flatMap(([k, ns]) => ns.map((n) => `${k}?${n}`)),
+  ...Object.entries<string[]>(x.fields ?? {}).flatMap(([k, ns]) => ns.map((n) => `${k}.${n}`)),
+  ...(x.listShape === undefined ? [] : [`list:${JSON.stringify(x.listShape)}`]), ...(x.conflictToken === undefined ? [] : [`token:${JSON.stringify(x.conflictToken)}`]),
+]
+export function checkWithin(part: Record<string, unknown>, plan: Record<string, unknown>) {
+  const ok = new Set(flat(plan)), extra = flat(part).filter((n) => !ok.has(n))
+  if (extra.length) throw new Error(`spec drafter: interface names outside the plan's interface: ${extra.join(', ')}`)
+}
+
 const strs = (x: unknown, who: string): string[] => {
   if (!Array.isArray(x) || !x.every((a) => typeof a === 'string')) throw new Error(`${who}: assumptions must be strings`)
   return x
@@ -143,7 +154,7 @@ const strs = (x: unknown, who: string): string[] => {
 // inputs, plus its reply and the error). Nothing is relaxed: the repaired reply must pass the same checks.
 // Both rejected replies travel on the final error (`rejected`), so `draft` can keep them in the hidden run dir (lap 5).
 export type Rejected = { role: string; error: string; reply: string }
-async function ask<T>(model: Model, role: string, instruction: string, parse: (j: any) => T): Promise<T> {
+export async function ask<T>(model: Model, role: string, instruction: string, parse: (j: any) => T): Promise<T> {
   let text = '', err = ''
   const rejected: Rejected[] = []
   for (const repair of [false, true]) {
@@ -171,14 +182,16 @@ export function specIface(spec: string): string {
 // o.reuse (lap 5, `draft --spec-from`): an approved spec (body + interface) is used as is and the spec drafter is not called,
 // so several scenario sets (or a hand-edited control spec) share one spec and one interface.
 // o.service (#17, `draft --service`): the spec declares an external service (fake.ts); a reused spec that already does keeps it.
-export async function draft(model: Model, request: string, o: { signals?: string; app?: string; reuse?: { body: string; iface: string }; minority?: boolean; minorityBrief?: string; service?: boolean } = {}): Promise<Omit<Draft, 'base'>> {
+export async function draft(model: Model, request: string, o: { signals?: string; app?: string; reuse?: { body: string; iface: string }; minority?: boolean; minorityBrief?: string; service?: boolean; iface?: string } = {}): Promise<Omit<Draft, 'base'>> {
   const req = `REQUEST:\n${request}\n` + (o.signals ? `\nPRODUCTION SIGNALS (observed from the running app):\n${o.signals}\n` : '') + appBlock(o.app ?? '')
-  const j = o.reuse ? { spec: o.reuse.body, iface: o.reuse.iface, assumptions: ['(spec reused from an approved change; the spec drafter was not called)'] } : await ask(model, 'spec-drafter', `You are the spec drafter of a software factory. Turn the request into a spec for a builder (HTTP JSON API).\n\n${req}\n${SPEC_FORMAT}`, (j) => {
+  const j = o.reuse ? { spec: o.reuse.body, iface: o.reuse.iface, assumptions: ['(spec reused from an approved change; the spec drafter was not called)'] } : await ask(model, 'spec-drafter', `You are the spec drafter of a software factory. Turn the request into a spec for a builder (HTTP JSON API).\n\n${req}${o.iface ? `\nPLAN INTERFACE (fixed by the approved plan for the whole request; your interface must use only these names, spelled the same, and may leave out what this part does not touch):\n${o.iface}\n` : ''}\n${SPEC_FORMAT}`, (j) => {
     if (typeof j.spec !== 'string' || !j.spec.trim()) throw new Error('spec drafter: spec missing')
     if (!UNDECIDED.test(j.spec)) throw new Error('spec drafter: spec has no "## Undecided" section')
-    return { spec: j.spec as string, iface: JSON.stringify(checkInterface(j.interface)), assumptions: strs(j.assumptions, 'spec drafter') }
+    const iface = checkInterface(j.interface)
+    if (o.iface) checkWithin(iface, JSON.parse(o.iface))
+    return { spec: j.spec as string, iface: JSON.stringify(iface), assumptions: strs(j.assumptions, 'spec drafter') }
   })
-  const assumptions = [`Interface (names and shapes only): ${j.iface}`, ...j.assumptions]
+  const assumptions = [`Interface (names and shapes only): ${j.iface}`, ...(o.iface ? [`(plan) the interface is within the approved plan interface: ${o.iface}`] : []), ...j.assumptions]
   // The builder sees the same names the scenarios use.
   const body = o.service ? withService(j.spec) : j.spec
   const spec = `${body.trimEnd()}${IFACE_HEAD}${j.iface}\n\`\`\`\n`
