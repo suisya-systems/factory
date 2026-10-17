@@ -43,6 +43,7 @@ test('full lap ships a passing build and records signals; builder never sees sce
   assert.equal(r.status, 'shipped', r.stopReason)
   assert.equal(r.attempts.length, 3)
   assert.equal(r.llmOnlyRejections, 1)
+  assert.match(r.attempts[1].llmReason, /looks off/) // kept in the (hidden) record for audit, never fed back
   assert.deepEqual(r.attempts.map((a) => [a.testsAllPass, a.llmPass]), [[false, true], [true, false], [true, true]])
   assert.equal(r.passedWithinCap, true)
   assert.equal(r.approvedVersion, version)
