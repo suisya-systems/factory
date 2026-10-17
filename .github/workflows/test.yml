@@ -1,0 +1,32 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22 # engines: >=22.17; no dependencies, so no install step or npm cache
+      # Tests run untrusted code under bubblewrap. Ubuntu 24.04 restricts unprivileged user
+      # namespaces via AppArmor, which bwrap needs:
+      # https://ubuntu.com/blog/ubuntu-23-10-restricted-unprivileged-user-namespaces
+      - name: Install bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # test/isolation.test.ts runs the real CLI (`--version` only, no auth) via ~/.local/bin/claude
+      # and mounts ~/.local/share/claude. The npm binary lives under the Node dir, which the sandbox
+      # also mounts, so a launcher symlink to it is enough.
+      - name: Install Claude Code CLI
+        run: |
+          npm install -g @anthropic-ai/claude-code
+          mkdir -p ~/.local/bin ~/.local/share/claude
+          ln -s "$(realpath "$(command -v claude)")" ~/.local/bin/claude
+          ~/.local/bin/claude --version
+      - run: npm test
