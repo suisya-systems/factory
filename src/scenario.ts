@@ -164,12 +164,17 @@ async function uiStep(ui: { browser?: Browser }, st: Step, port: number, vars: R
   const status = await ui.browser.act({ ui: st.ui!, target: st.target, path: st.path === undefined ? undefined : fill(st.path, vars) as string, text: st.text === undefined ? undefined : String(fill(st.text, vars)) }, port)
   const end = Date.now() + UI_LIMITS.settleMs
   for (;;) {
-    const page: Record<string, unknown> = await ui.browser.snapshot()
-    for (const [p] of lengthChecks(st.expect ?? {})) { const id = p.split('.')[0]; if (id && !Object.hasOwn(page, id)) page[id] = [] } // none visible: an empty list
-    const v = { ...vars }
-    const failed = checkStep(st, status, page, v)
-    if (!failed) { Object.assign(vars, v); return null }
-    if (Date.now() >= end || signal.aborted) return failed
+    let failed: string | null
+    try {
+      const page: Record<string, unknown> = await ui.browser.snapshot()
+      for (const [p] of lengthChecks(st.expect ?? {})) { const id = p.split('.')[0]; if (id && !Object.hasOwn(page, id)) page[id] = [] } // none visible: an empty list
+      const v = { ...vars }
+      if (!(failed = checkStep(st, status, page, v))) { Object.assign(vars, v); return null }
+    } catch (err) {
+      if (signal.aborted) throw err
+      failed = (err as Error).message // e.g. read while the page navigates: read again
+    }
+    if (Date.now() >= end) return failed
     await new Promise((r) => setTimeout(r, 100))
   }
 }

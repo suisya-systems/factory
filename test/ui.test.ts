@@ -3,14 +3,14 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
-import { readdirSync, readFileSync, readlinkSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, readlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Model } from '../src/adapter.ts'
 import { openBrowser, UI_LIMITS, usesUi, withUi } from '../src/browser.ts'
 import { classifyReply, predictInstruction } from '../src/classify.ts'
 import { checkWithin, draft, RUN_CONTRACT, runContract } from '../src/roles.ts'
 import { runChange } from '../src/run.ts'
-import { freePort, HOME } from '../src/sandbox.ts'
+import { freePort } from '../src/sandbox.ts'
 import { runScenario, validateScenarios, type Scenario, type Step } from '../src/scenario.ts'
 import { stopServer } from '../src/ship.ts'
 import { approve, hash, writeDraft } from '../src/vault.ts'
@@ -109,20 +109,29 @@ test('the app cannot see the browser: they are in separate sandboxes', async () 
   assert.equal(r.pass, true, r.detail)
 })
 
-// Listening TCP sockets in the host network namespace held by this process or its descendants (the browser's sandbox).
-function hostListeners(): number {
+// This process and its descendants (the browser's sandbox among them).
+function ourPids(): string[] {
   const ppid = (p: string) => { try { return readFileSync(`/proc/${p}/stat`, 'utf8').split(') ')[1].split(' ')[1] } catch { return '' } }
   const pids = readdirSync('/proc').filter((p) => /^\d+$/.test(p))
   const ours = new Set([String(process.pid)])
   for (let grew = true; grew;) { grew = false; for (const p of pids) if (!ours.has(p) && ours.has(ppid(p))) { ours.add(p); grew = true } }
-  const inodes = new Set([...ours].flatMap((p) => { try { return readdirSync(`/proc/${p}/fd`).map((f) => { try { return readlinkSync(`/proc/${p}/fd/${f}`) } catch { return '' } }) } catch { return [] } })
+  return [...ours]
+}
+// Listening TCP sockets in the host network namespace held by them.
+function hostListeners(): number {
+  const inodes = new Set(ourPids().flatMap((p) => { try { return readdirSync(`/proc/${p}/fd`).map((f) => { try { return readlinkSync(`/proc/${p}/fd/${f}`) } catch { return '' } }) } catch { return [] } })
     .map((l) => l.match(/^socket:\[(\d+)\]$/)?.[1]).filter(Boolean))
   return ['/proc/net/tcp', '/proc/net/tcp6'].flatMap((f) => readFileSync(f, 'utf8').split('\n').slice(1))
     .map((l) => l.trim().split(/\s+/)).filter((c) => c[3] === '0A' && inodes.has(c[9])).length
 }
-const descendants = (mark: string) => readdirSync('/proc').filter((p) => /^\d+$/.test(p)).filter((p) => { try { return readFileSync(`/proc/${p}/cmdline`, 'utf8').includes(mark) } catch { return false } })
+const chromes = () => ourPids().filter((p) => { try { return readFileSync(`/proc/${p}/cmdline`, 'utf8').split('\0')[0].endsWith('/chrome-headless-shell') } catch { return false } })
+// The sandbox goes down with its bwrap (die-with-parent, pid namespace): give it a moment.
+async function gone() {
+  for (let i = 0; i < 30 && chromes().length; i++) await new Promise((r) => setTimeout(r, 100))
+  return chromes().length === 0
+}
 
-test('the browser has no port a builder could reach, none of the factory environment, and no view of $HOME', async () => {
+test('the browser has no port a builder could reach, none of the factory environment, and no view of the state dir', async () => {
   const srv = http.createServer((_q, r) => { r.writeHead(200, { 'content-type': 'text/html' }); r.end('<p data-testid="hi">hi</p>') }).listen(0, '127.0.0.1')
   await new Promise((ok) => srv.once('listening', ok))
   process.env.FACTORY_TEST_CANARY = 'canary-4f1d'
@@ -132,14 +141,14 @@ test('the browser has no port a builder could reach, none of the factory environ
     assert.equal(await b.act({ ui: 'goto', path: '/' }, (srv.address() as { port: number }).port), 200)
     assert.deepEqual(await b.snapshot(), { hi: ['hi'] })
     assert.equal(hostListeners(), before) // the debugging channel is a pipe; the relay listens in the browser's own namespace
-    const chrome = descendants('--remote-debugging-pipe').filter((p) => readFileSync(`/proc/${p}/cmdline`, 'utf8').includes('chrome-headless-shell'))
+    const chrome = chromes()
     assert.ok(chrome.length > 0)
     for (const p of chrome) {
       assert.doesNotMatch(readFileSync(`/proc/${p}/environ`, 'utf8'), /canary-4f1d/)
-      assert.deepEqual(readdirSync(`/proc/${p}/root${HOME}`), []) // $HOME (the vault) is an empty tmpfs there
+      assert.ok(existsSync(`/proc/${p}/root/proc/self`) && !existsSync(`/proc/${p}/root${sd}`)) // its $HOME is a tmpfs: no vault
     }
   } finally { delete process.env.FACTORY_TEST_CANARY; await b.close(); srv.close() }
-  assert.equal(descendants('--remote-debugging-pipe').length, 0) // close() leaves nothing running
+  assert.ok(await gone(), 'close() leaves nothing running')
 })
 
 test('the page is read in an isolated world: page JS that bends DOM and builtins cannot change what the judge reads', async () => {
@@ -164,7 +173,7 @@ test('a page that hangs is bounded: the step fails, the scenario ends, an emerge
   const ac = new AbortController()
   setTimeout(() => ac.abort(), 1500)
   await assert.rejects(runScenario(app, sc('stall-stop', [ui({ ui: 'goto', path: '/stall' }), ui({ ui: 'click', target: 'x', expect: { length: { x: 1 } } })]), ac.signal, { ui: true }))
-  assert.equal(descendants('--remote-debugging-pipe').length, 0)
+  assert.ok(await gone())
 })
 
 test('ui steps: the right fields per action, test ids as targets, and the summary must not carry the typed text', () => {
