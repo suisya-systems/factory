@@ -57,7 +57,7 @@ export function validateScenarios(x: unknown): Scenario[] {
         .filter((v) => v.length >= 3 && v !== '/').map((v) => v.toLowerCase())
       const leaked = lits.find((v) => s.summary.toLowerCase().includes(v))
         ?? [e.status ?? []].flat().find((c: number) => new RegExp(`\\b${c}\\b`).test(s.summary))
-      if (leaked !== undefined) throw new Error(`${w}: summary contains a concrete value from the steps`)
+      if (leaked !== undefined) throw new Error(`${w}: summary contains a concrete value from the steps (${JSON.stringify(String(leaked))})`)
     }
   }
   return x as Scenario[]
