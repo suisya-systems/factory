@@ -1,0 +1,150 @@
+{
+ "settle-a1": {
+  "remainder": {
+   "accepts": [
+    "even-over-repeats"
+   ],
+   "identifies": true,
+   "testedBy": [
+    "remainder-repeated-split-not-skewed",
+    "remainder-rotating-payers-balance-out",
+    "remainder-odd-amount-two-people-balance-out"
+   ]
+  },
+  "payer-in-shares": {
+   "accepts": [
+    "listed-only"
+   ],
+   "identifies": true,
+   "testedBy": [
+    "settlement-payer-not-beneficiary"
+   ]
+  },
+  "netting": {
+   "accepts": [
+    "group-net"
+   ],
+   "identifies": true,
+   "testedBy": [
+    "settlement-nets-balances"
+   ]
+  }
+ },
+ "settle-a2": {
+  "remainder": {
+   "accepts": [
+    "even-over-repeats"
+   ],
+   "identifies": true,
+   "testedBy": [
+    "remainder-not-skewed-repeated-odd-split",
+    "remainder-cancels-out-in-a-cycle",
+    "remainder-tiny-amounts-three-way"
+   ]
+  },
+  "payer-in-shares": {
+   "accepts": [
+    "listed-only"
+   ],
+   "identifies": true,
+   "testedBy": [
+    "settlement-payer-not-beneficiary"
+   ]
+  },
+  "netting": {
+   "accepts": [
+    "group-net"
+   ],
+   "identifies": true,
+   "testedBy": [
+    "settlement-nets-balances"
+   ]
+  }
+ },
+ "settle-b1": {
+  "remainder": {
+   "accepts": "untested",
+   "identifies": false,
+   "testedBy": []
+  },
+  "payer-in-shares": {
+   "accepts": [
+    "listed-only"
+   ],
+   "identifies": true,
+   "testedBy": [
+    "payer-not-beneficiary",
+    "remainder-two-beneficiaries",
+    "chain-collapses"
+   ]
+  },
+  "netting": {
+   "accepts": [
+    "group-net"
+   ],
+   "identifies": true,
+   "testedBy": [
+    "chain-collapses"
+   ]
+  }
+ },
+ "settle-b2": {
+  "remainder": {
+   "accepts": [
+    "even-over-repeats",
+    "payer-covers",
+    "rotate-non-payers"
+   ],
+   "identifies": false,
+   "testedBy": [
+    "remainder-not-skewed"
+   ]
+  },
+  "payer-in-shares": {
+   "accepts": [
+    "listed-only"
+   ],
+   "identifies": true,
+   "testedBy": [
+    "payer-not-beneficiary",
+    "chain-netting"
+   ]
+  },
+  "netting": {
+   "accepts": [
+    "group-net"
+   ],
+   "identifies": true,
+   "testedBy": [
+    "chain-netting"
+   ]
+  }
+ },
+ "settle-c1": {
+  "remainder": {
+   "accepts": "untested",
+   "identifies": false,
+   "testedBy": []
+  },
+  "payer-in-shares": {
+   "accepts": [
+    "listed-only"
+   ],
+   "identifies": true,
+   "testedBy": [
+    "settlement-payer-not-beneficiary",
+    "settlement-mutual-debts-net",
+    "settlement-chain-simplified"
+   ]
+  },
+  "netting": {
+   "accepts": [
+    "group-net"
+   ],
+   "identifies": true,
+   "testedBy": [
+    "settlement-chain-simplified"
+   ]
+  }
+ }
+}
