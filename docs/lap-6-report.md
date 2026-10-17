@@ -163,7 +163,7 @@
    - 1 行要約の決まりは変えていない。
 2. 工場の外の道具（`docs/lap-6/`）: `entrance.ts`（参照実装による入口の確認）、`baseline.ts`（前の周の作る役の commit で流す）、`attempts.ts`（試行ごとの表と分類。`--self-test` 付き）、`refapps/server.cjs`（参照実装）、`prereg.json`（事前登録）。
 
-検証: `npm test` で 96 件が通る（失敗 0、skip 0。並走の factory-sandbox-netns の 1 件を含む）。`attempts.ts --self-test` も通る。差分は Codex の差分レビューにかけた（下の「レビュー」）。
+検証: `npm test` で 96 件が通る（失敗 0、skip 0。並走の factory-sandbox-netns の 1 件を含む）。`attempts.ts --self-test` も通る。差分は Codex の差分レビュー（review surface）に 2 回かけた。1 回目は P2 が 1 件で、run が始まらずに lap が止まった場合に集計の道具が落ちる不具合だった。これを直した後の 2 回目は、指摘なしだった。
 
 ## 何が言えないか（既知の限界）
 
