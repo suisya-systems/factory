@@ -20,6 +20,8 @@ test('feedbackFor never carries paths, bodies, expectations, details or the judg
   assert.match(fb, /fetching an unknown note is reported as not found/)
   assert.match(fb, /LLM judge did not approve/)
   assert.doesNotMatch(fb, /listing on a fresh app/) // passed scenarios are not mentioned
+  // lap 7 control: one line per failed scenario and the LLM flag, no summary
+  assert.equal(feedbackFor(v, SCENARIOS, 'bare'), '- failed: a hidden scenario\n- failed: a hidden scenario\n- LLM judge did not approve')
   for (const leak of ['zebra-unique-777', 'quokka-missing-42', '/notes', '404', '200', 'status', 'step', '{{', 'PUT']) assert.ok(!fb.includes(leak), `leaked ${leak}`)
 })
 
