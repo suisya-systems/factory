@@ -56,7 +56,7 @@ http.createServer((q, r) => {
     if (u.pathname === '/liar') return html(r, 200, '<p data-testid="real">truth</p><script>Element.prototype.getAttribute = () => "real"; document.querySelectorAll = () => [];' +
       'String.prototype.trim = () => "lie"; JSON.stringify = () => "{}"; Object.defineProperty(HTMLElement.prototype, "innerText", { get: () => "lie" })</script>')
     if (u.pathname === '/many') return html(r, 200, '<ul>' + '<li data-testid="row">r</li>'.repeat(Number(u.searchParams.get('n'))) + '</ul>')
-    if (u.pathname === '/stall') return html(r, 200, '<p data-testid="x">x</p><script>setTimeout(() => { for (;;) {} }, 200)</script>')
+    if (u.pathname === '/stall') return html(r, 200, '<p data-testid="x">x</p><script>for (;;) {}</script>')
     json(r, 404, {})
   })
 }).listen(Number(process.env.PORT), '127.0.0.1')
@@ -145,7 +145,7 @@ test('the browser has no port a builder could reach, none of the factory environ
     assert.ok(chrome.length > 0)
     for (const p of chrome) {
       assert.doesNotMatch(readFileSync(`/proc/${p}/environ`, 'utf8'), /canary-4f1d/)
-      assert.ok(existsSync(`/proc/${p}/root/proc/self`) && !existsSync(`/proc/${p}/root${sd}`)) // its $HOME is a tmpfs: no vault
+      assert.ok(existsSync(`/proc/${p}/root/usr`) && !existsSync(`/proc/${p}/root${sd}`)) // its $HOME is a tmpfs: no vault
     }
   } finally { delete process.env.FACTORY_TEST_CANARY; await b.close(); srv.close() }
   assert.ok(await gone(), 'close() leaves nothing running')
@@ -167,12 +167,12 @@ test('a page past the snapshot cap fails the step, even where a cut snapshot wou
 
 test('a page that hangs is bounded: the step fails, the scenario ends, an emergency stop stops it', async () => {
   const t0 = Date.now()
-  const r = await runScenario(app, sc('stall', [ui({ ui: 'goto', path: '/stall' }), ui({ ui: 'click', target: 'x', expect: { length: { x: 1 } } })]), never, { ui: true })
+  const r = await runScenario(app, sc('stall', [ui({ ui: 'goto', path: '/stall', expect: { length: { x: 1 } } })]), never, { ui: true })
   assert.equal(r.pass, false)
   assert.ok(Date.now() - t0 < 30_000, `took ${Date.now() - t0}ms`)
   const ac = new AbortController()
   setTimeout(() => ac.abort(), 1500)
-  await assert.rejects(runScenario(app, sc('stall-stop', [ui({ ui: 'goto', path: '/stall' }), ui({ ui: 'click', target: 'x', expect: { length: { x: 1 } } })]), ac.signal, { ui: true }))
+  await assert.rejects(runScenario(app, sc('stall-stop', [ui({ ui: 'goto', path: '/stall', expect: { length: { x: 1 } } })]), ac.signal, { ui: true }))
   assert.ok(await gone())
 })
 
