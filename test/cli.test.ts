@@ -1,7 +1,7 @@
 // CLI paths that spend money must record it, and approval binds to the version the owner read.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { main } from '../src/cli.ts'
 import { CAPS } from '../src/limits.ts'
@@ -95,4 +95,18 @@ test('lap-wide cap: once the lap ledger reaches it, no command starts another mo
     await assert.rejects(main(['draft', 'd3', '--request', req], m), /lap cost cap/)
     assert.equal(calls, 0)
   } finally { saved === null ? writeFileSync(lap, '{"totalUsd":0}') : writeFileSync(lap, saved) }
+})
+
+test('with the STOP file present every command but stop, serve (internal) and help refuses before doing anything', async () => {
+  const f = process.env.FACTORY_STOP_FILE!
+  writeFileSync(f, 'x')
+  try {
+    for (const argv of [['approve', 'v1', '--by', 'o', '--version', 'x'], ['observe'], ['probe-isolation', 'p9']]) {
+      assert.equal(await main(argv, async () => { throw new Error('model called') }), 1, argv[0])
+    }
+    assert.ok(!existsSync(join(sd, 'prod', 'signals.json')), 'observe ran')
+    await assert.rejects(main(['serve', '--port', '1']), /ENOENT/) // got past the stop check (no release to serve)
+    assert.equal(await main(['--help']), 0)
+    assert.equal(await main(['stop']), 0)
+  } finally { unlinkSync(f) }
 })

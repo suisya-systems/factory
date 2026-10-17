@@ -2,7 +2,7 @@
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { freePort, killTree, removeTree, spawnApp, waitPort } from './sandbox.ts'
+import { assertLoopbackOnly, freePort, killTree, removeTree, spawnApp, waitPort } from './sandbox.ts'
 
 export type Expect = { status?: number | number[]; json?: unknown; jsonHas?: string[]; isArray?: boolean; length?: number }
 export type Step = { method: string; path: string; body?: unknown; headers?: Record<string, string>; expect: Expect; capture?: Record<string, string> }
@@ -82,6 +82,14 @@ function fill(x: unknown, vars: Record<string, unknown>): unknown {
   return x
 }
 
+// The response body is builder-controlled: cap it instead of buffering whatever the app sends.
+async function text(res: Response, max = 1_000_000): Promise<string> {
+  let raw = ''
+  const dec = new TextDecoder()
+  for await (const chunk of res.body ?? []) if ((raw += dec.decode(chunk, { stream: true })).length > max) throw new Error('response too large')
+  return raw + dec.decode()
+}
+
 async function runSteps(port: number, s: Scenario, signal: AbortSignal): Promise<{ failedStep?: number; detail: string }> {
   const vars: Record<string, unknown> = {}
   for (const [i, st] of s.steps.entries()) {
@@ -93,7 +101,7 @@ async function runSteps(port: number, s: Scenario, signal: AbortSignal): Promise
         method: st.method, body, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...st.headers },
         signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]),
       })
-      const raw = await res.text()
+      const raw = await text(res)
       let json: unknown
       try { json = raw ? JSON.parse(raw) : undefined } catch { json = undefined }
       const e = st.expect
@@ -128,6 +136,7 @@ export async function runScenario(appDir: string, s: Scenario, signal: AbortSign
       if (signal.aborted) throw err
       return { ...base, pass: false, failedStep: 0, detail: `app did not start: ${(err as Error).message}; stderr: ${stderr.trim()}` }
     }
+    try { assertLoopbackOnly(app) } catch (err) { return { ...base, pass: false, failedStep: 0, detail: (err as Error).message } }
     const r = await runSteps(port, s, signal)
     return { ...base, pass: r.failedStep === undefined, ...r }
   } finally {

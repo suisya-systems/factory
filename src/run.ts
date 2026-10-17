@@ -69,7 +69,7 @@ export async function runChange(o: RunOpts) {
     let sha = ''
     for (let n = 1; n <= maxAttempts; n++) {
       guard.check()
-      const b = await build(model, work, approved.spec, feedback)
+      const b = await build(model, work, approved.spec, feedback, guard.signal)
       sha = b.sha
       const v = await judge(model, work, sha, approved.spec, approved.scenarios, approved.version, guard.signal)
       record.attempts.push({ n, sha, builderOk: b.ok, testsAllPass: v.testsAllPass, llmPass: v.llmPass, pass: v.pass, approvedVersion: v.approvedVersion,

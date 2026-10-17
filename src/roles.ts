@@ -47,22 +47,22 @@ export async function draft(model: Model, request: string, signals?: string): Pr
 // ---- builder ----
 export const RUN_CONTRACT = `RUN CONTRACT (fixed, non-negotiable):
 - Node.js 22, standard library only. No dependencies, no package installs, no network at runtime.
-- package.json must have "scripts": {"start": "..."}; \`npm start\` starts the HTTP server on process.env.PORT (bind 127.0.0.1 or all interfaces).
+- package.json must have "scripts": {"start": "..."}; \`npm start\` starts the HTTP server on process.env.PORT (bind 127.0.0.1 only; a listener on any other address fails the run).
 - Persist data only under process.env.DATA_DIR (if at all). The app directory is read-only at runtime.
 - JSON request and response bodies.
 - Work only inside the current directory. The factory commits your work when you finish.`
 
-export async function build(model: Model, workspace: string, spec: string, feedback: string): Promise<{ sha: string; ok: boolean; error?: string }> {
+export async function build(model: Model, workspace: string, spec: string, feedback: string, signal?: AbortSignal): Promise<{ sha: string; ok: boolean; error?: string }> {
   const instruction = `You are the builder of a software factory. Implement the spec below in the current directory.\n\nSPEC:\n${spec}\n\n${RUN_CONTRACT}\n` +
     (feedback ? `\nYOUR PREVIOUS ATTEMPT WAS REJECTED. Feedback:\n${feedback}\n` : '')
   const r = await model({ ...base, role: 'builder', instruction, workdir: workspace, access: 'write' })
   // The workspace (incl. .git/config) is builder-written: a silently failed commit would leave HEAD
   // at the previous attempt's sha while the working tree holds new code.
   for (const args of [['add', '-A'], ['commit', '-q', '--allow-empty', '--no-verify', '-m', 'factory: builder attempt']]) {
-    const g = await sandboxGit(workspace, args, true)
+    const g = await sandboxGit(workspace, args, true, [], signal)
     if (g.code !== 0) throw new Error(`could not commit builder workspace (git ${args[0]} failed)`)
   }
-  const head = await sandboxGit(workspace, ['rev-parse', 'HEAD'], false)
+  const head = await sandboxGit(workspace, ['rev-parse', 'HEAD'], false, [], signal)
   const sha = head.out.trim()
   if (head.code !== 0 || !/^[0-9a-f]{40}$/.test(sha)) throw new Error('could not commit builder workspace')
   return { sha, ok: r.ok, error: r.error }
@@ -83,7 +83,7 @@ export function combineVerdict(testsAllPass: boolean, llmPass: boolean): boolean
 export async function judge(model: Model, workspace: string, sha: string, spec: string, scenarios: Scenario[], approvedVersion: string, signal: AbortSignal): Promise<Verdict> {
   const dir = mkdtempSync(join(tmpdir(), 'factory-judge-'))
   try {
-    await exportTree(workspace, sha, dir)
+    await exportTree(workspace, sha, dir, signal)
     return await judgeDir(model, dir, spec, scenarios, approvedVersion, signal)
   } finally { removeTree(dir) }
 }

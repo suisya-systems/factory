@@ -3,7 +3,7 @@
 import { appendFileSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import { join } from 'node:path'
-import { freePort, killTree, spawnApp, waitPort } from './sandbox.ts'
+import { assertLoopbackOnly, freePort, killTree, spawnApp, waitPort } from './sandbox.ts'
 
 export async function serve(stateDir: string, port: number): Promise<void> {
   const prod = join(stateDir, 'prod')
@@ -19,6 +19,10 @@ export async function serve(stateDir: string, port: number): Promise<void> {
     process.exit(1)
   })
   await waitPort(internal, 15_000, app)
+  try { assertLoopbackOnly(app) } catch (e) {
+    appendFileSync(errorLog, `${new Date().toISOString()} [supervisor] ${(e as Error).message}; refusing to serve\n`)
+    app.removeAllListeners('exit'); killTree(app, 500); process.exit(1)
+  }
 
   const server = http.createServer((req, res) => {
     const t0 = performance.now()

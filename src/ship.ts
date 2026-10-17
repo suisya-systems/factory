@@ -5,30 +5,38 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import net from 'node:net'
-import { exportTree, freePort, killTree, removeTree, sandboxGit, spawnApp, waitPort } from './sandbox.ts'
+import { assertLoopbackOnly, exportTree, freePort, killTree, removeTree, sandboxGit, spawnApp, waitPort } from './sandbox.ts'
 
 export type PassMark = { changeId: string; sha: string; approvedVersion: string }
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), 'cli.ts')
+// ponytail: fixed ship branch (the practice repo's main); make it a run option if targets vary.
+export const SHIP_BRANCH = 'main'
 
 // Order: export + smoke-start the release (nothing visible changed yet) -> last stop check ->
-// flip 'current' + restart (rolled back if the start fails) -> fast-forward the ship target.
-// The target only moves once the new release is actually serving.
+// flip 'current' + restart -> fast-forward the ship target. A failed start OR a failed fast-forward
+// rolls back to the previous release. The target must be clean and on SHIP_BRANCH before anything goes live.
 export async function ship(mark: PassMark, workspace: string, target: string, stateDir: string, port: number, signal?: AbortSignal): Promise<{ release: string }> {
   const { sha } = mark
   const stopped = () => { if (signal?.aborted) throw new Error('stopped before the release went live') }
+  // An aborted git/export reports a plain failure: name the stop instead of a misleading git error.
+  const git = async (...a: Parameters<typeof sandboxGit>) => { const r = await sandboxGit(...a); stopped(); return r }
   if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error('pass mark has no valid sha')
-  if ((await sandboxGit(workspace, ['cat-file', '-e', `${sha}^{commit}`], false)).code !== 0) throw new Error(`sha ${sha} not in workspace`)
+  if ((await git(workspace, ['cat-file', '-e', `${sha}^{commit}`], false, [], signal)).code !== 0) throw new Error(`sha ${sha} not in workspace`)
 
   const releases = join(stateDir, 'releases')
   const rel = join(releases, sha)
   mkdirSync(rel, { recursive: true })
-  await exportTree(workspace, sha, rel) // same export the judge tested
+  await exportTree(workspace, sha, rel, signal).finally(stopped) // same export the judge tested
   await smoke(rel, signal)
   // fetch moves no ref; it runs sandboxed because git reads the (builder-written) source repo.
-  const f = await sandboxGit(target, ['-c', 'transfer.fsckObjects=true', 'fetch', '-q', workspace, sha], true, [workspace])
+  const f = await git(target, ['-c', 'transfer.fsckObjects=true', 'fetch', '-q', workspace, sha], true, [workspace], signal)
   if (f.code !== 0) throw new Error(`fetch into ship target failed: ${f.out.trim()}`)
-  if ((await sandboxGit(target, ['merge-base', '--is-ancestor', 'HEAD', sha], false)).code !== 0) throw new Error('ship target cannot fast-forward to the release')
+  if ((await git(target, ['merge-base', '--is-ancestor', 'HEAD', sha], false, [], signal)).code !== 0) throw new Error('ship target cannot fast-forward to the release')
+  const br = await git(target, ['symbolic-ref', '-q', '--short', 'HEAD'], false, [], signal)
+  if (br.code !== 0 || br.out.trim() !== SHIP_BRANCH) throw new Error(`ship target is not on ${SHIP_BRANCH}`)
+  const st = await git(target, ['--no-optional-locks', 'status', '--porcelain', '--untracked-files=all'], false, [], signal)
+  if (st.code !== 0 || st.out.trim() !== '') throw new Error('ship target has local changes or untracked files; refusing to ship')
   stopped() // last point where a stop cancels the ship; after this it runs to completion
 
   const cur = join(releases, 'current')
@@ -37,12 +45,13 @@ export async function ship(mark: PassMark, workspace: string, target: string, st
   await stopServer(stateDir)
   try {
     await startServer(stateDir, port)
+    const m = await sandboxGit(target, ['merge', '--ff-only', '-q', sha], true) // never push; no signal: past the stop point
+    if (m.code !== 0) throw new Error(`fast-forward of ship target failed: ${m.out.trim()}`)
   } catch (e) {
+    await stopServer(stateDir)
     if (prev) { flip(releases, prev); await startServer(stateDir, port).catch(() => {}) } else unlinkSync(cur)
     throw e
   }
-  const m = await sandboxGit(target, ['merge', '--ff-only', '-q', sha], true) // never push
-  if (m.code !== 0) throw new Error(`fast-forward of ship target failed: ${m.out.trim()}`)
   return { release: rel }
 }
 
@@ -59,6 +68,7 @@ async function smoke(rel: string, signal?: AbortSignal) {
   const app = spawnApp(rel, port, data)
   try {
     await waitPort(port, 15_000, app, signal)
+    assertLoopbackOnly(app)
   } finally {
     killTree(app, 500)
     removeTree(data)

@@ -9,7 +9,7 @@ import { BIN, CONFIG_KEEP, cliSandbox, runCli, type Task } from '../src/adapter.
 import { protect, sandboxCommand, sandboxExec, SANDBOX_PATH } from '../src/sandbox.ts'
 import { runScenario } from '../src/scenario.ts'
 import { vaultDir } from '../src/vault.ts'
-import { freshState, tmp, writeApp } from './helpers.ts'
+import { freshState, MEMO_SERVER, tmp, writeApp } from './helpers.ts'
 
 const sd = freshState()
 const CANARY = `vault-canary-${process.pid}-${Date.now()}`
@@ -131,4 +131,29 @@ test('sandboxExec keeps only the tail of builder-controlled output', async () =>
   const r = await sh('head -c 3000000 /dev/zero | tr "\\0" a; echo END', tmp('iso-out'))
   assert.ok(r.out.length <= 64_000, String(r.out.length))
   assert.ok(r.out.endsWith('END\n'))
+})
+
+test('an app listening on a non-loopback address fails its scenario; the same app on 127.0.0.1 passes', async () => {
+  const sc = { id: 'lo', title: 't', summary: 'the app answers', inSpec: true, kind: 'net', steps: [{ method: 'GET', path: '/notes', expect: { status: 200 } }] }
+  for (const [addr, pass] of [['0.0.0.0', false], ['::', false], ['127.0.0.1', true]] as const) {
+    const app = tmp('lo')
+    writeApp(app, MEMO_SERVER.replace(".listen(Number(process.env.PORT), '127.0.0.1')", `.listen(Number(process.env.PORT), '${addr}')`))
+    const r = await runScenario(app, sc, new AbortController().signal)
+    assert.equal(r.pass, pass, `${addr}: ${r.detail}`)
+    if (!pass) assert.match(r.detail, /app listens on a non-loopback address/)
+  }
+})
+
+test('sandboxExec kills a hanging child on abort and on timeout', async () => {
+  const ac = new AbortController()
+  setTimeout(() => ac.abort(), 200)
+  let t0 = Date.now()
+  const r1 = await sandboxExec('sleep', ['60'], { workdir: tmp('hang'), writable: false }, env, ac.signal)
+  assert.ok(Date.now() - t0 < 5000, `abort took ${Date.now() - t0}ms`)
+  assert.equal(r1.code, null)
+  t0 = Date.now()
+  const r2 = await sandboxExec('sleep', ['60'], { workdir: tmp('hang'), writable: false }, env, undefined, 300)
+  assert.ok(Date.now() - t0 < 5000, `timeout took ${Date.now() - t0}ms`)
+  assert.equal(r2.code, null)
+  assert.match(r2.out, /timeout/)
 })
