@@ -31,6 +31,8 @@ export async function serve(stateDir: string, port: number): Promise<void> {
       res.writeHead(pr.statusCode ?? 502, pr.headers)
       pr.pipe(res)
       pr.on('end', () => log(pr.statusCode ?? 502))
+      // app died mid-body: drop this response, keep the supervisor up
+      pr.on('error', (e) => { res.destroy(); log(502); appendFileSync(errorLog, `${new Date().toISOString()} [supervisor] upstream response failed: ${e.message}\n`) })
     })
     up.on('error', () => { if (!res.headersSent) res.writeHead(502); res.end(); log(502) })
     req.pipe(up)
