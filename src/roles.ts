@@ -65,6 +65,29 @@ Use ONLY the endpoint, parameter and field names in the INTERFACE. Where the req
 Each scenario starts from an EMPTY app.
 Write 8-15 scenarios, a mix of inSpec true and false. You cannot ask questions: record every guess in assumptions.`
 
+// Lap 6 (`draft --minority`): the scenario writer picks, on purpose, reasonable answers most builders would not
+// (in lap 5 builders and scenario writers chose the same answer 16/16 times, so no retry ever happened). Each choice is
+// marked in the assumptions, so the approver and the report know which scenarios carry it. The summary rule is unchanged.
+const MINORITY = `MINORITY CHOICES (an experiment): pick 2 or 3 points that the request and common practice leave open and where more than one
+answer is reasonable. For each, deliberately choose a reasonable answer that most implementers would NOT choose (not the textbook default),
+and write at least one scenario that checks it. Your answer must still satisfy everything the request states. Do not pick a status code.
+For each such point add one assumption in exactly this form:
+"[minority] <the point>: <your answer> (most would: <the usual answer>); scenarios: <id>, <id>"`
+const MINORITY_LINE = /^\[minority\] (.+?): (.+) \(most would: (.+)\); scenarios: (.+)$/
+// ponytail: at least one marked point, well formed, citing real scenario ids; whether the answer is really
+// a minority one is checked outside the factory (lap-6 runbook, entrance check).
+function checkMinority(more: string[], scenarios: Scenario[]) {
+  const lines = more.filter((a) => a.startsWith('[minority]'))
+  if (!lines.length) throw new Error('scenario drafter: no "[minority] ..." assumption')
+  const ids = new Set(scenarios.map((s) => s.id))
+  for (const l of lines) {
+    const m = l.match(MINORITY_LINE)
+    if (!m || m.slice(1, 4).some((x) => !x.trim())) throw new Error(`scenario drafter: malformed minority assumption: ${l}`)
+    const bad = m[4].split(',').map((x) => x.trim()).find((x) => !ids.has(x))
+    if (bad !== undefined) throw new Error(`scenario drafter: minority assumption cites unknown scenario "${bad}"`)
+  }
+}
+
 const appBlock = (app: string) => (app ? `\nEXISTING APP (the current code; the request extends it):\n${app}\n` : '')
 // Each drafter gets at most $1 so the classifier calls (CLASSIFIER_BUDGET each, about 15) still fit in the draft cap.
 const draftTask = (role: string, instruction: string) => ({ ...base, maxCostUsd: 1, role, instruction, workdir: mkdtempSync(join(tmpdir(), 'factory-draft-')), access: 'none' as const })
@@ -133,7 +156,7 @@ export function specIface(spec: string): string {
 
 // o.reuse (lap 5, `draft --spec-from`): an approved spec (body + interface) is used as is and the spec drafter is not called,
 // so several scenario sets (or a hand-edited control spec) share one spec and one interface.
-export async function draft(model: Model, request: string, o: { signals?: string; app?: string; reuse?: { body: string; iface: string } } = {}): Promise<Omit<Draft, 'base'>> {
+export async function draft(model: Model, request: string, o: { signals?: string; app?: string; reuse?: { body: string; iface: string }; minority?: boolean } = {}): Promise<Omit<Draft, 'base'>> {
   const req = `REQUEST:\n${request}\n` + (o.signals ? `\nPRODUCTION SIGNALS (observed from the running app):\n${o.signals}\n` : '') + appBlock(o.app ?? '')
   const j = o.reuse ? { spec: o.reuse.body, iface: o.reuse.iface, assumptions: ['(spec reused from an approved change; the spec drafter was not called)'] } : await ask(model, 'spec-drafter', `You are the spec drafter of a software factory. Turn the request into a spec for a builder (HTTP JSON API).\n\n${req}\n${SPEC_FORMAT}`, (j) => {
     if (typeof j.spec !== 'string' || !j.spec.trim()) throw new Error('spec drafter: spec missing')
@@ -145,8 +168,12 @@ export async function draft(model: Model, request: string, o: { signals?: string
   const spec = `${j.spec.trimEnd()}${IFACE_HEAD}${j.iface}\n\`\`\`\n`
 
   const k = await ask(model, 'scenario-drafter', `You are the scenario writer of a software factory. Write hidden acceptance scenarios (HTTP JSON API) for the request. ` +
-    `A builder will implement a spec you do not see; your scenarios judge it.\n\n${req}\nINTERFACE (names and shapes the builder uses; it says nothing about behaviour):\n${j.iface}\n\n${SCENARIO_FORMAT}`,
-  (k) => ({ scenarios: validateScenarios(k.scenarios), more: k.assumptions === undefined ? [] : strs(k.assumptions, 'scenario drafter') }))
+    `A builder will implement a spec you do not see; your scenarios judge it.\n\n${req}\nINTERFACE (names and shapes the builder uses; it says nothing about behaviour):\n${j.iface}\n\n${SCENARIO_FORMAT}${o.minority ? `\n\n${MINORITY}` : ''}`,
+  (k) => {
+    const scenarios = validateScenarios(k.scenarios), more = k.assumptions === undefined ? [] : strs(k.assumptions, 'scenario drafter')
+    if (o.minority) checkMinority(more, scenarios)
+    return { scenarios, more }
+  })
   return { spec, scenarios: k.scenarios, assumptions: [...assumptions, ...k.more.map((x) => `(scenario writer) ${x}`)], classification: await classify(model, spec, o.app ?? '', k.scenarios, extractJson) }
 }
 
