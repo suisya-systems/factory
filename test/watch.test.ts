@@ -2,7 +2,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Model } from '../src/adapter.ts'
 import { main } from '../src/cli.ts'
@@ -183,6 +183,20 @@ test('a recovered draft is written to the ledger; a second watcher on the state 
   writeFileSync(join(h.sd, 'signal-watch.lock'), '2147483646') // no such process
   assert.equal(await h.watch(), 0)
   assert.equal(existsSync(join(h.sd, 'signal-watch.lock')), false)
+})
+
+test('a lost ledger neither hides an incomplete draft nor lifts the pending cap', async () => {
+  const h = harness()
+  h.put(8787, sig())
+  await h.watch()
+  const [id] = h.drafts()
+  unlinkSync(join(h.sd, 'vault', id, 'approval-summary.md')) // interrupted before the summary
+  writeFileSync(join(h.sd, 'signal-seen.json'), '{}')
+  await h.watch()
+  assert.equal(h.drafterCalls(), 2) // drafted again, not taken for done
+  writeFileSync(join(h.sd, 'signal-seen.json'), '{}')
+  for (let i = 0; i < MAX_PENDING; i++) { h.put(8787, sig({ samples: { errors5xx: [`t GET /q${'x'.repeat(i)} 500 1`], stderr: [] } })); await h.watch() }
+  assert.equal(h.drafts().length, MAX_PENDING)
 })
 
 test('fingerprints ignore time, ids, query and counts', () => {

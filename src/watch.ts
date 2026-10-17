@@ -59,7 +59,8 @@ export async function watchOnce(sd: string, o: WatchOpts, factory: (argv: string
   const seenFile = join(sd, 'signal-seen.json')
   const seen = readJson<Seen>(seenFile) ?? {}
   const save = () => { writeFileSync(`${seenFile}.tmp`, JSON.stringify(seen, null, 2)); renameSync(`${seenFile}.tmp`, seenFile) }
-  const pending = () => [...new Set(Object.values(seen))].filter((id) => !existsSync(join(sd, 'vault', id, 'approval.json'))).length
+  // counted from the vault, not the ledger: a lost ledger must not let the backlog grow
+  const pending = () => (existsSync(join(sd, 'vault')) ? readdirSync(join(sd, 'vault')).filter((d) => d.startsWith('sig-') && !existsSync(join(sd, 'vault', d, 'approval.json'))).length : 0)
   const ports = o.ports ?? (existsSync(join(sd, 'prod')) ? readdirSync(join(sd, 'prod')).filter((d) => /^\d{1,5}$/.test(d)).map(Number) : [])
   for (const port of ports) {
     if (existsSync(o.stopFile)) return 0
@@ -75,7 +76,7 @@ export async function watchOnce(sd: string, o: WatchOpts, factory: (argv: string
     if (!fresh.length) continue
     if (pending() >= MAX_PENDING) { console.error(`watch: ${MAX_PENDING} signal drafts already wait for approval; no new draft for port ${port}`); continue }
     const id = `sig-${port}-${createHash('sha256').update(fresh.map(fp).sort().join()).digest('hex').slice(0, 12)}`
-    if (existsSync(join(sd, 'vault', id))) { for (const i of fresh) seen[`${port}:${fp(i)}`] = id; save(); continue } // drafted before, ledger lost: never re-draft over it
+    if (existsSync(join(sd, 'vault', id, 'approval-summary.md'))) { for (const i of fresh) seen[`${port}:${fp(i)}`] = id; save(); continue } // drafted completely before, ledger lost: never re-draft over it (an interrupted draft has no summary and is drafted again)
     const dir = join(sd, 'runs', id)
     mkdirSync(dir, { recursive: true })
     writeFileSync(join(dir, 'request.md'), request(port, fresh, sig))
