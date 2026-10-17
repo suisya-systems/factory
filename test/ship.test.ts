@@ -151,3 +151,12 @@ test('ship: an app listening on 0.0.0.0 never goes live and nothing changes', as
   assert.equal(existsSync(cur) ? readlinkSync(cur) : null, before)
   assert.ok(!existsSync(join(sd, 'prod', 'server.pid')))
 })
+
+test('scenario runner: a redirect is judged as the redirect, not its target', async () => {
+  const dir = tmp('redirect')
+  writeApp(dir, `require('node:http').createServer((q, s) => { if (q.url === '/r') { s.writeHead(302, { location: '/ok' }); return s.end() } s.writeHead(200, {'content-type':'application/json'}); s.end('{"ok":true}') }).listen(Number(process.env.PORT), '127.0.0.1')`)
+  const sc = (status: number): Scenario => ({ id: `r${status}`, title: 'r', summary: 'redirect handling', inSpec: true, kind: 'edge', steps: [{ method: 'GET', path: '/r', expect: { status } }] })
+  assert.equal((await runScenario(dir, sc(200), never)).pass, false)
+  const r = await runScenario(dir, sc(302), never)
+  assert.equal(r.pass, true, r.detail)
+})

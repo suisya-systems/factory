@@ -99,6 +99,7 @@ async function runSteps(port: number, s: Scenario, signal: AbortSignal): Promise
       const body = st.body === undefined ? undefined : JSON.stringify(fill(st.body, vars))
       const res = await fetch(`http://127.0.0.1:${port}${path}`, {
         method: st.method, body, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...st.headers },
+        redirect: 'manual', // judge the tested endpoint's own response, never a redirect target
         signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]),
       })
       const raw = await text(res)
