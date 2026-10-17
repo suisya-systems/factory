@@ -191,13 +191,16 @@ export async function lap(file: string, o: LapOpts, factory: (argv: string[]) =>
     if (failed && !s.always) continue
     if (s.gate) {
       // Never cached: checked again on every resume against the current definition and files.
-      const { missing, version } = gateVersion(s)
-      const rec = existsSync(gateRecord(s)) ? JSON.parse(readFileSync(gateRecord(s), 'utf8')) : null
-      if (version && rec?.version === version) {
-        for (const [f, h] of Object.entries(rec.files as Record<string, string>)) if (!existsSync(f) || sha256(readFileSync(f)) !== h) throw new Error(`gate "${s.gate}": fixed file ${f} changed after approval`)
-        for (const id of s.approve ?? []) loadApproved(sd, id)
-        continue
-      }
+      let missing: string[], version: string | undefined, rec
+      try {
+        ({ missing, version } = gateVersion(s))
+        rec = existsSync(gateRecord(s)) ? JSON.parse(readFileSync(gateRecord(s), 'utf8')) : null
+        if (version && rec?.version === version) {
+          for (const [f, h] of Object.entries(rec.files as Record<string, string>)) if (!existsSync(f) || sha256(readFileSync(f)) !== h) throw new Error(`fixed file ${f} changed after approval`)
+          for (const id of s.approve ?? []) loadApproved(sd, id)
+          continue
+        }
+      } catch (e) { failed ||= `${at} (gate "${s.gate}") failed: ${(e as Error).message}`; continue } // the report steps still run
       prog.waiting = s.gate!
       save()
       if (!version) { console.log(`lap ${def.name}: waiting at gate "${s.gate}" for ${missing.join(', ')} (the creator writes them); then resume with: ${resume}`); return 3 }
