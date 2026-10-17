@@ -8,7 +8,7 @@ import { claudeModel, type Model } from './adapter.ts'
 import { CAPS, chargeLap, lapSpent, mergeLedger, startGuard, type Ledger } from './limits.ts'
 import { draft } from './roles.ts'
 import { runChange } from './run.ts'
-import type { Classification } from './classify.ts'
+import { UNDECIDED, type Classification } from './classify.ts'
 import { exportTree, removeTree, sandboxGit } from './sandbox.ts'
 import { observe, serve } from './serve.ts'
 import { approve, checkId, hash, stateDir, vaultDir, writeDraft, type Draft } from './vault.ts'
@@ -74,11 +74,14 @@ export function approvalSummary(id: string, d: Draft, version: string): string {
   const disagree = (r: Classification['label']) => d.scenarios.filter((s) => cls.get(s.id)?.label === r).map((s) => `- ${s.id}: ${s.summary} -- ${notM(cls.get(s.id)!, r === 'contradicts' ? 'X' : 'U')}`)
   const contra = disagree('contradicts'), silent = disagree('unstated')
   const keyPoints = d.spec.split('\n').filter((l) => /^\s*(#|[-*]|\d+\.)/.test(l)).slice(0, 25)
+  // The points the spec leaves to the builder (lap 3), shown whole: the key points above are capped.
+  const undecided = UNDECIDED.test(d.spec) ? d.spec.split(UNDECIDED)[1].split(/^## /m)[0].trim().split('\n') : []
   return [
     `# Approval request: ${id}`, '',
     `Version: ${version}`, '',
     `Approve with: \`npm run factory -- approve ${id} --by <name> --version ${version}\`  (approval fixes this exact set; to change anything, draft a new change)`, '',
     '## Spec key points', ...keyPoints, '',
+    ...(undecided.length ? ['## Undecided in the spec (left to the builder)', ...undecided, ''] : []),
     ...(d.base?.baseSha ? [`Extends: ${d.base.baseSha} (the ship target must still be at this commit when the change runs)`, ''] : []),
     `## Scenarios: ${d.scenarios.length} total`,
     'Self-report = the scenario writer\'s own claim that the request states the behaviour (it never saw the spec or the spec writer\'s assumptions).', '',

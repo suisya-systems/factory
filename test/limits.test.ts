@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { runCli, type Model, type Task } from '../src/adapter.ts'
-import { startGuard, Stop } from '../src/limits.ts'
+import { CAPS, startGuard, Stop } from '../src/limits.ts'
 import { runChange } from '../src/run.ts'
 import { freePort } from '../src/sandbox.ts'
 import { approvedChange, freshState, gitTarget, MEMO_SERVER, tmp, writeApp } from './helpers.ts'
@@ -187,4 +187,16 @@ test('run: a dirty ship target -> failed before going live, target untouched', a
   assert.match(r.stopReason, /local changes/)
   assert.equal(r.shipped, null)
   assert.equal(execFileSync('git', ['-C', target, 'rev-parse', 'HEAD']).toString(), head0)
+})
+
+test('run (lap 3): a builder timeout is charged the builder ceiling, so the retries go on', async () => {
+  approvedChange(sd, 'builder-ceiling')
+  const seen: [string, number][] = []
+  const r = await runChange({ changeId: 'builder-ceiling', shipTarget: gitTarget(), stateDir: sd, port: 1, maxCostUsd: 28, maxAttempts: 2, stopFile: join(sd, 'NOSTOP'),
+    model: async (t) => { seen.push([t.role, t.maxCostUsd]); return t.role === 'builder' ? { ok: false, text: '', costUsd: null, error: 'timed out' } : { ok: true, text: '{"pass":false}', costUsd: 0.1 } } })
+  assert.equal(r.attempts.length, 2)
+  assert.match(r.stopReason, /retry cap/)
+  assert.deepEqual(seen.map(([role]) => role), ['builder', 'judge', 'builder', 'judge'])
+  assert.ok(seen.every(([role, usd]) => usd <= (role === 'builder' ? CAPS.builderCallUsd : CAPS.judgeCallUsd))) // the lap ledger of this file may bind lower
+  assert.deepEqual(r.cost.uncounted.map((u) => u.chargedUsd), [CAPS.builderCallUsd, CAPS.builderCallUsd])
 })
