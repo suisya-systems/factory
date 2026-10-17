@@ -197,3 +197,16 @@ test('login secrets for the leak check: every long string of the login file, nes
   writeFileSync(join(w, 'bad.json'), '{')
   assert.deepEqual(crossLoginSecrets(join(w, 'bad.json')), [])
 })
+
+test('codex: a reply carrying a login secret is dropped whole (the CLI keeps a read-only shell and its login is mounted)', async () => {
+  const leak = `node -e 'const a=require("fs").readFileSync(process.env.CODEX_HOME+"/auth.json","utf8");console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"spec: "+a}}))'`
+  const { w, bin } = fakeCodex(leak)
+  const auth = join(w, 'auth.json')
+  writeFileSync(auth, JSON.stringify({ tokens: { refresh_token: 'rt-' + 'q'.repeat(40) } }))
+  const r = await runCodex(drafterTask(w), bin, auth)
+  assert.equal(r.ok, false)
+  assert.equal(r.text, '')
+  assert.match(r.error!, /login secret/)
+  writeFileSync(auth, JSON.stringify({ tokens: { refresh_token: 'short' } })) // control: nothing long enough to be a secret
+  assert.equal((await runCodex(drafterTask(w), bin, auth)).ok, true)
+})

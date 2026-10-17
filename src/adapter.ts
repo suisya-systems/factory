@@ -190,6 +190,9 @@ export async function runCodex(t: Task, bin: string, auth = CODEX_AUTH): Promise
   if (why) return { ok: false, text, costUsd: null, error: why }
   if (events.some((e) => e?.type === 'turn.failed' || e?.type === 'error')) return { ok: false, text, costUsd: null, error: 'model reported an error (turn failed)' }
   if (code !== 0 || !msgs.length) return { ok: false, text, costUsd: null, error: `model process exited (code ${code}) without a reply` }
+  // The CLI keeps a read-only shell, and its login is mounted: a reply carrying a login secret is dropped whole, so it
+  // never reaches a spec, a scenario or a builder. ponytail: verbatim copies only; an encoded one is NOT detected.
+  if (crossLoginSecrets(auth).some((x) => out.includes(x))) return { ok: false, text: '', costUsd: null, error: 'reply contained a second-family login secret (dropped)' }
   return { ok: true, text, costUsd: null }
 }
 

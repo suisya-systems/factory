@@ -1,6 +1,7 @@
 // The hidden-scenario guarantee: nothing the factory runs sandboxed can read the vault.
 // These tests attack with exact absolute paths (the strongest position a builder could have).
 import { test } from 'node:test'
+import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { homedir, networkInterfaces, tmpdir } from 'node:os'
@@ -232,11 +233,12 @@ test('second-family login: mounted for its drafter, invisible to the builder (sy
   const w = tmp('iso-codex')
   mkdirSync(join(w, 'pkg', 'bin'), { recursive: true })
   const fake = join(w, 'pkg', 'bin', 'codex')
-  writeFileSync(fake, `#!/bin/sh\ncat > /dev/null\nS=$(cat "$CODEX_HOME/auth.json" ${vfile} 2>&1 | tr -d '"{}\\\\\\n')\necho "{\\"type\\":\\"item.completed\\",\\"item\\":{\\"type\\":\\"agent_message\\",\\"text\\":\\"$S\\"}}"\n`)
+  // It echoes a hash of its login (a reply carrying the login itself is dropped by the adapter) and its try at the vault.
+  writeFileSync(fake, `#!/bin/sh\ncat > /dev/null\nS="$(sha256sum "$CODEX_HOME/auth.json" | cut -c1-64) $(cat ${vfile} 2>&1 | tr -d '"{}\\\\\\n')"\necho "{\\"type\\":\\"item.completed\\",\\"item\\":{\\"type\\":\\"agent_message\\",\\"text\\":\\"$S\\"}}"\n`)
   chmodSync(fake, 0o755)
   const d = await runCodex({ role: CROSS_ROLES[0], model: 'gpt-6-astra', instruction: '', workdir: w, access: 'none', maxCostUsd: 1, timeoutMs: 30_000 }, fake, login)
   assert.equal(d.ok, true, d.error)
-  assert.ok(d.text.includes(LOGIN), `drafter did not see its login: ${d.text}`)
+  assert.ok(d.text.includes(createHash('sha256').update(readFileSync(login)).digest('hex')), `drafter did not see its login: ${d.text}`)
   assert.ok(!d.text.includes(CANARY))
   // The builder, through the real adapter path, snoops for the canary file and the real login path.
   const b = tmp('iso-builder')

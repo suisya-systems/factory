@@ -296,7 +296,7 @@ export async function main(argv: string[], model: Model = realModel): Promise<nu
         const loginFound = secrets.some((x) => r.text.includes(x)) || foundIn(work, secrets)
         const out = { at: new Date().toISOString(), changeId: id, requestedModels, canaryFound: canaryInReply || canaryInWorkdir, canaryInReply, canaryInWorkdir, loginChecked: secrets.length > 0, loginFound,
           modelOk: r.ok, model: r.model ?? null, error: r.error ?? null,
-          costUsd: r.costUsd, costByModel: r.costByModel ?? null, capUsd, overCap, reply: r.text.slice(0, 4000) }
+          costUsd: r.costUsd, costByModel: r.costByModel ?? null, capUsd, overCap, reply: secrets.reduce((t, x) => t.replaceAll(x, '[second-family login secret]'), r.text).slice(0, 4000) }
         mkdirSync(join(sd, 'runs', id), { recursive: true })
         writeFileSync(join(sd, 'runs', id, 'isolation-probe.json'), JSON.stringify(out, null, 2))
         console.log(`isolation probe: canaryFound=${out.canaryFound} loginFound=${loginFound} (checked=${out.loginChecked}) modelOk=${out.modelOk} cost=${r.costUsd ?? 'unreported'}${out.error ? ` (${out.error})` : ''}`)
