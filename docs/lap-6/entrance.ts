@@ -9,7 +9,8 @@ import { join } from 'node:path'
 import { runScenarios, validateScenarios } from '../../src/scenario.ts'
 
 const [SERVER, STATE, id, declaredJson] = process.argv.slice(2)
-const MAJORITY: Record<string, string> = { rem: 'rotate', net: 'group', payer: 'listed' } // lap 5: 16/16 builds on this spec
+// lap 5: 16/16 builds on this spec chose these (the lap-6 keys: checked with baseline.ts)
+const MAJORITY: Record<string, string> = { rem: 'rotate', net: 'group', payer: 'listed', order: 'oldest', minMembers: '1', emptyBen: 'reject' }
 const declared = { ...MAJORITY, ...JSON.parse(declaredJson) }
 const sc = validateScenarios(JSON.parse(readFileSync(join(STATE, 'vault', id, 'scenarios.json'), 'utf8')))
 const signal = new AbortController().signal

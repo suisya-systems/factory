@@ -1,0 +1,12 @@
+{
+  "note": "lap 6 pre-registration. minority = scenarios that pass on the reference app set to the declared answers, fail when that one answer is reverted (entrance.ts), and that the 16 lap-5 builds of the same spec all fail (baseline.ts). Declared but excluded: minor-1 settlement-largest-transfer-first and minor-2 transfers-sorted-largest-first (16/16 lap-5 builds already pass them: not a minority answer). Verdict lines: docs/lap-6-runbook.md.",
+  "approvedVersions": {
+    "minor-1": "28b0dd3365a087952b7ca68308f89207cd3bd308a7284e5c934b0287f97bc5db",
+    "minor-2": "e287e173e9159364a2035656a51577e19f5fe8d1d92ce97f9d74848398b330ab"
+  },
+  "maxAttempts": 5,
+  "sets": {
+    "minor-1": { "runs": ["minor-1", "minor-1-b", "minor-1-c"], "minority": ["list-expenses-newest-first", "group-requires-two-members"] },
+    "minor-2": { "runs": ["minor-2", "minor-2-b", "minor-2-c"], "minority": ["expense-list-newest-first", "empty-beneficiaries-means-everyone"] }
+  }
+}
