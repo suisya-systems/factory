@@ -1,8 +1,8 @@
 // Deterministic HTTP scenario runner. Each scenario gets a FRESH sandboxed app instance.
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { freePort, killTree, spawnApp, waitPort } from './sandbox.ts'
+import { freePort, killTree, removeTree, spawnApp, waitPort } from './sandbox.ts'
 
 export type Expect = { status?: number | number[]; json?: unknown; jsonHas?: string[]; isArray?: boolean; length?: number }
 export type Step = { method: string; path: string; body?: unknown; headers?: Record<string, string>; expect: Expect; capture?: Record<string, string> }
@@ -137,7 +137,7 @@ export async function runScenario(appDir: string, s: Scenario, signal: AbortSign
       app.once('exit', r)
       setTimeout(r, 3000).unref() // bounded: never hang the factory on a stuck child
     })
-    rmSync(dataDir, { recursive: true, force: true })
+    removeTree(dataDir)
   }
 }
 

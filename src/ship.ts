@@ -1,11 +1,11 @@
 // Shipper: no model, no vault. Acts ONLY on the pass mark + the workspace git.
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import net from 'node:net'
-import { exportTree, freePort, killTree, sandboxGit, spawnApp, waitPort } from './sandbox.ts'
+import { exportTree, freePort, killTree, removeTree, sandboxGit, spawnApp, waitPort } from './sandbox.ts'
 
 export type PassMark = { changeId: string; sha: string; approvedVersion: string }
 
@@ -26,7 +26,7 @@ export async function ship(mark: PassMark, workspace: string, target: string, st
   await exportTree(workspace, sha, rel) // same export the judge tested
   await smoke(rel, signal)
   // fetch moves no ref; it runs sandboxed because git reads the (builder-written) source repo.
-  const f = await sandboxGit(target, ['fetch', '-q', workspace, sha], true, [workspace])
+  const f = await sandboxGit(target, ['-c', 'transfer.fsckObjects=true', 'fetch', '-q', workspace, sha], true, [workspace])
   if (f.code !== 0) throw new Error(`fetch into ship target failed: ${f.out.trim()}`)
   if ((await sandboxGit(target, ['merge-base', '--is-ancestor', 'HEAD', sha], false)).code !== 0) throw new Error('ship target cannot fast-forward to the release')
   stopped() // last point where a stop cancels the ship; after this it runs to completion
@@ -61,7 +61,7 @@ async function smoke(rel: string, signal?: AbortSignal) {
     await waitPort(port, 15_000, app, signal)
   } finally {
     killTree(app, 500)
-    rmSync(data, { recursive: true, force: true })
+    removeTree(data)
   }
 }
 

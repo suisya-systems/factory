@@ -41,15 +41,18 @@ export async function runChange(o: RunOpts) {
   mkdirSync(runDir, { recursive: true })
   const draftFile = join(runDir, 'draft-cost.json') // written by `draft`; reported here so the change's cost is in one record
   const draftCost: Ledger | null = existsSync(draftFile) ? JSON.parse(readFileSync(draftFile, 'utf8')) : null
-  const guard = startGuard(capUsd, o.stopFile ?? process.env.FACTORY_STOP_FILE ?? join(o.stateDir, 'STOP'))
+  // The per-change cap covers all roles: the drafter's spend is already counted against it.
+  const guard = startGuard(capUsd, o.stopFile ?? process.env.FACTORY_STOP_FILE ?? join(o.stateDir, 'STOP'),
+    { spentUsd: draftCost?.totalUsd ?? 0, lapFile: join(o.stateDir, 'lap-ledger.json') })
   const model = guard.model(o.model)
   const record = {
     changeId: id, approvedVersion: approved.version, status: 'running' as 'running' | 'shipped' | 'failed', stopReason: '',
     caps: { maxCostUsd: capUsd, maxAttempts },
     attempts: [] as { n: number; sha: string; builderOk: boolean; testsAllPass: boolean; llmPass: boolean | null; pass: boolean; approvedVersion: string; passRate: { inSpec: object; notInSpec: object }; results: ScenarioResult[] }[],
     llmOnlyRejections: 0, // attempts where every deterministic test passed but the LLM judge did not approve
+    judgeFailures: 0, // attempts where the LLM judge gave no verdict (call failed / unparseable reply)
     passedWithinCap: false, shipped: null as null | { sha: string; release: string }, signals: null as unknown,
-    cost: guard.ledger as Ledger, // build + judge; the per-change cap applies to these
+    cost: guard.ledger as Ledger, // build + judge (the per-change cap applies to these + draftCost)
     draftCost, // drafter, spent before approval
     totalUsdAllRoles: 0,
   }
@@ -71,7 +74,8 @@ export async function runChange(o: RunOpts) {
       const v = await judge(model, work, sha, approved.spec, approved.scenarios, approved.version, guard.signal)
       record.attempts.push({ n, sha, builderOk: b.ok, testsAllPass: v.testsAllPass, llmPass: v.llmPass, pass: v.pass, approvedVersion: v.approvedVersion,
         passRate: { inSpec: rate(v.results, true), notInSpec: rate(v.results, false) }, results: v.results })
-      if (v.testsAllPass && v.llmPass !== true && !v.stop) record.llmOnlyRejections++
+      if (v.testsAllPass && v.llmPass === false) record.llmOnlyRejections++
+      if (v.llmPass === null && !v.stop) record.judgeFailures++
       save()
       if (v.stop) throw v.stop // recorded first: the deterministic results of this attempt are kept
       if (v.pass) { passed = v; break }

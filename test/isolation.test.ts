@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { chmodSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { BIN, cliSandbox, runCli, type Task } from '../src/adapter.ts'
+import { BIN, CONFIG_KEEP, cliSandbox, runCli, type Task } from '../src/adapter.ts'
 import { protect, sandboxCommand, sandboxExec, SANDBOX_PATH } from '../src/sandbox.ts'
 import { runScenario } from '../src/scenario.ts'
 import { vaultDir } from '../src/vault.ts'
@@ -107,4 +107,28 @@ test('control: same app reading a file inside its own dir DOES pass (detection p
   writeApp(app, LEAK_APP(join(app, 'local.txt')))
   const r = await runScenario(app, leakScenario(CANARY), new AbortController().signal)
   assert.equal(r.pass, true, r.detail)
+})
+
+test('host runtime sockets (/run/user, $XDG_RUNTIME_DIR) are hidden', async () => {
+  const dirs = ['/run/user', process.env.XDG_RUNTIME_DIR].filter((d): d is string => !!d && existsSync(d))
+  const r = await sh(dirs.map((d) => `ls -A ${d} 2>/dev/null`).join('; ') + '; true', tmp('iso-run'))
+  assert.equal(r.out.trim(), '', `visible: ${r.out}`)
+})
+
+test('model sandbox: ~/.claude.json holds only allowlisted keys; ~/.local/bin is not mounted', async () => {
+  const w = tmp('iso-cfg')
+  const task: Task = { role: 'builder', instruction: '', workdir: w, access: 'write', maxCostUsd: 1, timeoutMs: 30_000 }
+  const fake = join(w, 'snoop')
+  writeFileSync(fake, `#!/bin/sh\ncat ${homedir()}/.claude.json > cfg.out 2>&1; ls -A ${homedir()}/.local/bin > bin.out 2>&1\ncat > /dev/null\necho '{"result":"done","total_cost_usd":0}'\n`)
+  chmodSync(fake, 0o755)
+  assert.equal((await runCli(task, fake)).ok, true)
+  const keys = Object.keys(JSON.parse(readFileSync(join(w, 'cfg.out'), 'utf8')))
+  for (const k of keys) assert.ok(CONFIG_KEEP.includes(k), `config exposes ${k}`)
+  assert.match(readFileSync(join(w, 'bin.out'), 'utf8'), /No such file/)
+})
+
+test('sandboxExec keeps only the tail of builder-controlled output', async () => {
+  const r = await sh('head -c 3000000 /dev/zero | tr "\\0" a; echo END', tmp('iso-out'))
+  assert.ok(r.out.length <= 64_000, String(r.out.length))
+  assert.ok(r.out.endsWith('END\n'))
 })
