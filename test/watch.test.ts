@@ -160,6 +160,17 @@ test('watch.ts has no way to approve, run or ship', () => {
   assert.doesNotMatch(src, /approve|runChange|\bship\b|from '\.\/(run|ship|plan|vault)\.ts'/)
 })
 
+test('informational stderr lines are not failure signs; an error.log alone is read', async () => {
+  const h = harness()
+  h.put(8787, sig({ errors5xx: 0, stderrErrors: 1, samples: { errors5xx: [], stderr: ['listening on 8787', 'cache warmed'] } }))
+  await h.watch()
+  assert.equal(h.drafts().length, 0)
+  // startup failure before any request: only error.log exists, signals.json is absent
+  writeFileSync(join(h.sd, 'prod', '8787', 'error.log'), '2026-10-18T01:00:00.000Z [supervisor] app exited with code 1\n')
+  await h.watch()
+  assert.equal(h.drafts().length, 1)
+})
+
 test('fingerprints ignore time, ids, query and counts', () => {
   const a = items(parseSignals(sig()))
   const b = items(parseSignals(sig({ requests: 1, samples: { errors5xx: ['2030-01-01T00:00:00.000Z GET /notes/99999?z=1 500 700'], stderr: ['2030-01-01T00:00:00.000Z TypeError: boom at line 78'] } })))

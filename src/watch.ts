@@ -4,7 +4,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { observe } from './serve.ts'
+import { observe, STDERR_ERROR } from './serve.ts'
 import { prodDir } from './ship.ts'
 
 export const MAX_PENDING = 3 // signal drafts waiting for approval; beyond that no new draft (the owner's inbox and the spend stay bounded)
@@ -36,7 +36,7 @@ export function items(s: Signals): Item[] {
     const [, method, path, status] = l.split(' ') // "<time> <method> <path> <status> <ms>", as serve.ts logs it
     return { kind: 'http5xx' as const, text: `${digits(`${method} ${(path ?? '').split('?')[0]}`)} ${/^\d{3}$/.test(status) ? status : '?'}` }
   })
-  const err = s.samples.stderr.map((l) => ({ kind: 'stderr' as const, text: digits(l.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z\s*/, '')) }))
+  const err = s.samples.stderr.filter((l) => STDERR_ERROR.test(l)).map((l) => ({ kind: 'stderr' as const, text: digits(l.replace(/^\d{4}-\d\d-\d\dT[\d:.]+Z\s*/, '')) }))
   const seen = new Set<string>()
   return [...http, ...err].filter((i) => { const k = fp(i); return seen.has(k) ? false : (seen.add(k), true) })
 }
@@ -64,7 +64,7 @@ export async function watchOnce(sd: string, o: WatchOpts, factory: (argv: string
     if (existsSync(o.stopFile)) return 0
     let sig: Signals
     try {
-      if (existsSync(join(prodDir(sd, port), 'access.log'))) observe(sd, port) // signals.json is otherwise only written at ship time
+      if (['access.log', 'error.log'].some((f) => existsSync(join(prodDir(sd, port), f)))) observe(sd, port) // signals.json is otherwise only written at ship time
       const raw = readJson<unknown>(join(prodDir(sd, port), 'signals.json'))
       if (raw === null) continue
       sig = parseSignals(raw)
