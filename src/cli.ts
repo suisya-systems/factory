@@ -223,7 +223,7 @@ export async function main(argv: string[], model: Model = realModel): Promise<nu
       if (!id || !v.request) break
       const dir = planDir(sd, id)
       if (isPlan(sd, id)) { console.error(`factory: plan ${id} exists; its parts are fixed. Split under a new name instead.`); return 1 } // before any spend
-      const guard = startGuard(CAPS.maxCostUsd, stopFile, { lapFile })
+      const guard = startGuard(CAPS.maxCostUsd, stopFile, { lapFile, models: requestedModels })
       const costFile = join(dir, 'split-cost.json')
       try {
         const request = readFileSync(v.request, 'utf8')
@@ -235,7 +235,7 @@ export async function main(argv: string[], model: Model = realModel): Promise<nu
         const reqFile = join(dir, 'request.md')
         writeFileSync(reqFile, request)
         // The whole request is drafted like any change (new app); its scenarios judge the final app, its spec is never built.
-        const code = await main(['draft', wholeId, '--request', reqFile, ...(v.model ?? []).flatMap((m) => ['--model', m])], base)
+        const code = await main(['draft', wholeId, '--request', reqFile, ...(v.model ?? []).flatMap((m) => ['--model', m])], model)
         if (code !== 0) return code
         const plan: Plan = { plan: id, requestSha256: createHash('sha256').update(request).digest('hex'), wholeId, parts, changeIds }
         const version = writePlan(sd, plan, request)
@@ -250,7 +250,7 @@ export async function main(argv: string[], model: Model = realModel): Promise<nu
     case 'plan': {
       if (!id || !v['ship-target']) break
       const retries = v.retries === undefined ? undefined : Number(v.retries)
-      return runPlan(sd, id, { shipTarget: resolve(v['ship-target']), port, retries, maxCostUsd: v['max-cost'] ? Number(v['max-cost']) : undefined, maxAttempts: v['max-attempts'] ? Number(v['max-attempts']) : undefined, stopFile }, (argv) => main(argv, base))
+      return runPlan(sd, id, { shipTarget: resolve(v['ship-target']), port, retries, maxCostUsd: v['max-cost'] ? Number(v['max-cost']) : undefined, maxAttempts: v['max-attempts'] ? Number(v['max-attempts']) : undefined, stopFile }, (argv) => main(argv, model))
     }
     case 'replicate': {
       if (!id || (!v.k && !v.rescore)) break
