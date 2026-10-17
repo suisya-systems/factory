@@ -2,7 +2,7 @@
 // model sessions AND builder-written app code. The hidden-scenario guarantee lives here:
 // the child sees / read-only, but $HOME (where the vault must live) is an empty tmpfs,
 // /tmp is fresh, /mnt is hidden, and it has its own pid namespace.
-import { existsSync, mkdtempSync, openSync, realpathSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, openSync, readdirSync, readFileSync, readlinkSync, realpathSync, rmSync } from 'node:fs'
 import { spawn, spawnSync, type ChildProcess, type SpawnOptions } from 'node:child_process'
 import { homedir, tmpdir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
@@ -86,6 +86,60 @@ export function spawnApp(appDir: string, port: number, dataDir: string, stdio: S
   return sandboxSpawn('npm', ['start', '--silent'], { workdir: appDir, writable: false, extraRw: [dataDir] }, { env: appEnv(port, dataDir), stdio })
 }
 
+// TCP listeners of the app's process tree (rootPid = the bwrap child) on a non-loopback address,
+// e.g. ['0.0.0.0:8080']. The app shares the host network, so such a listener is reachable from outside.
+// --unshare-pid / --new-session rule out pgid, but host /proc lists the inner processes by ppid.
+// ponytail: checked at readiness only (a later bind is not caught); a network namespace + forwarding is the upgrade path.
+export function publicListeners(rootPid: number): string[] {
+  const ppid = new Map<number, number>()
+  for (const p of readdirSync('/proc')) {
+    if (!/^\d+$/.test(p)) continue
+    try { const st = readFileSync(`/proc/${p}/stat`, 'utf8'); ppid.set(Number(p), Number(st.slice(st.lastIndexOf(')') + 2).split(' ')[1])) } catch { /* exited */ }
+  }
+  const inTree = (pid: number) => { for (let p = pid, n = 0; p > 1 && n < 1000; p = ppid.get(p) ?? 0, n++) if (p === rootPid) return true; return false }
+  const inodes = new Set<string>()
+  for (const pid of ppid.keys()) {
+    if (!inTree(pid)) continue
+    try {
+      for (const fd of readdirSync(`/proc/${pid}/fd`)) {
+        try { const m = /^socket:\[(\d+)\]$/.exec(readlinkSync(`/proc/${pid}/fd/${fd}`)); if (m) inodes.add(m[1]) } catch { /* closed */ }
+      }
+    } catch { /* exited */ }
+  }
+  const out: string[] = []
+  for (const file of ['/proc/net/tcp', '/proc/net/tcp6']) {
+    let rows: string[] = []
+    try { rows = readFileSync(file, 'utf8').trim().split('\n').slice(1) } catch { continue }
+    for (const r of rows) {
+      const c = r.trim().split(/\s+/)
+      const [hex, port] = c[1].split(':')
+      if (c[3] !== '0A' || !inodes.has(c[9]) || isLoopbackHex(hex)) continue
+      out.push(`${hexAddr(hex)}:${parseInt(port, 16)}`)
+    }
+  }
+  return out
+}
+
+// Throws unless the app (just reported ready) listens on loopback only.
+export function assertLoopbackOnly(app: ChildProcess): void {
+  const l = app.pid ? publicListeners(app.pid) : []
+  if (l.length) throw new Error(`app listens on a non-loopback address (${l.join(', ')})`)
+}
+
+// /proc/net/tcp{,6} print each 32-bit word of the address in host (little-endian) byte order.
+const wordBytes = (w: string) => [6, 4, 2, 0].map((i) => parseInt(w.slice(i, i + 2), 16))
+function isLoopbackHex(hex: string): boolean {
+  if (hex.length === 8) return wordBytes(hex)[0] === 127
+  const words = hex.toUpperCase().match(/.{8}/g)!
+  if (words.join('') === '00000000000000000000000001000000') return true // ::1
+  return words.slice(0, 3).join('') === '0000000000000000FFFF0000' && wordBytes(words[3])[0] === 127 // ::ffff:127.x
+}
+function hexAddr(hex: string): string {
+  if (hex.length === 8) return wordBytes(hex).join('.')
+  const b = hex.match(/.{8}/g)!.flatMap(wordBytes)
+  return `[${Array.from({ length: 8 }, (_, i) => ((b[2 * i] << 8) | b[2 * i + 1]).toString(16)).join(':')}]`
+}
+
 // ponytail: bind-to-0-then-close has a tiny race window; fine for a local prototype.
 export function freePort(): Promise<number> {
   return new Promise((ok, fail) => {
@@ -114,21 +168,28 @@ export async function waitPort(port: number, timeoutMs: number, child?: ChildPro
 
 // Runs git inside the sandbox: the workspace is builder-written, and git honours repo-local
 // hooks / fsmonitor / filters, which would otherwise execute on the host next to the vault.
-export function sandboxExec(cmd: string, args: string[], o: SandboxOpts, env: NodeJS.ProcessEnv): Promise<{ code: number | null; out: string }> {
+// Those can hang: on abort or timeout the whole sandbox is killed and the result is a failure (code null).
+export function sandboxExec(cmd: string, args: string[], o: SandboxOpts, env: NodeJS.ProcessEnv, signal?: AbortSignal, timeoutMs = 120_000): Promise<{ code: number | null; out: string }> {
   const c = sandboxSpawn(cmd, args, o, { env, cwd: o.workdir })
   let out = '' // tail only: the output is builder-controlled and could exhaust factory memory
-  const add = (d: Buffer) => { out = (out + d).slice(-64_000) }
+  const add = (d: Buffer | string) => { out = (out + d).slice(-64_000) }
   c.stdout!.on('data', add)
   c.stderr!.on('data', add)
+  const kill = (why: string) => { add(`\n[factory] killed: ${why}`); killTree(c, 500) }
+  const timer = setTimeout(() => kill(`timeout after ${timeoutMs}ms`), timeoutMs)
+  const onAbort = () => kill('stopped')
+  if (signal?.aborted) onAbort()
+  else signal?.addEventListener('abort', onAbort, { once: true })
   return new Promise((ok) => {
-    c.on('error', () => ok({ code: null, out }))
-    c.on('close', (code) => ok({ code, out }))
+    const done = (code: number | null) => { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); ok({ code: signal?.aborted ? null : code, out }) }
+    c.on('error', () => done(null))
+    c.on('close', done)
   })
 }
 
 const GIT_ENV = { PATH: '/usr/bin:/bin', HOME: '/tmp', GIT_CONFIG_NOSYSTEM: '1' }
-export function sandboxGit(workdir: string, args: string[], writable: boolean, extraRo: string[] = []) {
-  return sandboxExec('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=factory', '-c', 'user.email=factory@localhost', ...args], { workdir, writable, extraRo }, GIT_ENV)
+export function sandboxGit(workdir: string, args: string[], writable: boolean, extraRo: string[] = [], signal?: AbortSignal) {
+  return sandboxExec('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=factory', '-c', 'user.email=factory@localhost', ...args], { workdir, writable, extraRo }, GIT_ENV, signal)
 }
 
 // The ONE way a commit becomes runnable files. The judge tests and the shipper ships the output of
@@ -137,11 +198,11 @@ export function sandboxGit(workdir: string, args: string[], writable: boolean, e
 // never against the builder-written .git/config: its smudge/process filters would otherwise rewrite
 // the exported bytes (and could make the judge's copy differ from the shipped one).
 // ponytail: exports twice (judge, ship); export once + hash if that ever needs proving.
-export async function exportTree(repo: string, sha: string, dest: string): Promise<void> {
+export async function exportTree(repo: string, sha: string, dest: string, signal?: AbortSignal): Promise<void> {
   const bare = mkdtempSync(join(tmpdir(), 'factory-export-'))
   try {
     const script = 'git init -q --bare . && git -c core.hooksPath=/dev/null -c transfer.fsckObjects=true fetch -q "$1" "$2" && git -c core.attributesFile=/dev/null archive --format=tar "$2" | tar -x -C "$3"'
-    const a = await sandboxExec('sh', ['-c', script, 'sh', repo, sha, dest], { workdir: bare, writable: true, extraRo: [repo], extraRw: [dest] }, GIT_ENV)
+    const a = await sandboxExec('sh', ['-c', script, 'sh', repo, sha, dest], { workdir: bare, writable: true, extraRo: [repo], extraRw: [dest] }, GIT_ENV, signal)
     if (a.code !== 0) throw new Error(`export of ${sha} failed: ${a.out.trim()}`)
   } finally { removeTree(bare) }
 }

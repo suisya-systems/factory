@@ -176,3 +176,15 @@ test('run: a judge failure is not an LLM rejection and the builder is not told t
   assert.equal(r.judgeFailures, 2)
   assert.ok(!instr[1].includes('LLM judge did not approve'))
 })
+
+test('run: a dirty ship target -> failed before going live, target untouched', async () => {
+  approvedChange(sd, 'dirty-target')
+  const target = gitTarget()
+  writeFileSync(join(target, 'stray.txt'), 'local edit')
+  const head0 = execFileSync('git', ['-C', target, 'rev-parse', 'HEAD']).toString()
+  const r = await runChange({ changeId: 'dirty-target', shipTarget: target, model: builderJudge(0.1), stateDir: sd, port: await freePort(), stopFile: join(sd, 'NOSTOP') })
+  assert.equal(r.status, 'failed')
+  assert.match(r.stopReason, /local changes/)
+  assert.equal(r.shipped, null)
+  assert.equal(execFileSync('git', ['-C', target, 'rev-parse', 'HEAD']).toString(), head0)
+})

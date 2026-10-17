@@ -65,13 +65,16 @@ export async function main(argv: string[], model: Model = claudeModel): Promise<
   const sd = stateDir() // refuses to start unless vault + runs are hidden from the sandbox
   const lapFile = join(sd, 'lap-ledger.json')
   const port = Number(v.port ?? 8787)
+  const stopFile = process.env.FACTORY_STOP_FILE ?? join(sd, 'STOP')
+  // 'serve' is exempt: ship launches it only after its own stop checks, and a rollback restart must not be blocked.
+  if (cmd !== 'stop' && cmd !== 'serve' && existsSync(stopFile)) { console.error(`factory: emergency stop is active (${stopFile}); delete it by hand to continue`); return 1 }
   switch (cmd) {
     case 'draft': {
       if (!id || !v.request) break
       const runDir = join(sd, 'runs', checkId(id))
       const costFile = join(runDir, 'draft-cost.json')
       const before: Ledger | null = existsSync(costFile) ? JSON.parse(readFileSync(costFile, 'utf8')) : null // earlier (re-)drafts of this id
-      const guard = startGuard(CAPS.maxCostUsd, process.env.FACTORY_STOP_FILE ?? join(sd, 'STOP'), { spentUsd: before?.totalUsd ?? 0, lapFile })
+      const guard = startGuard(CAPS.maxCostUsd, stopFile, { spentUsd: before?.totalUsd ?? 0, lapFile })
       try {
         const d = await draft(guard.model(model), readFileSync(v.request, 'utf8'), v.signals ? readFileSync(v.signals, 'utf8') : undefined)
         const dir = writeDraft(sd, id, d)
@@ -103,7 +106,7 @@ export async function main(argv: string[], model: Model = claudeModel): Promise<
     case 'serve': await serve(sd, port); return -1 // keeps running
     case 'observe': console.log(JSON.stringify(observe(sd), null, 2)); return 0
     case 'stop': {
-      const f = process.env.FACTORY_STOP_FILE ?? join(sd, 'STOP')
+      const f = stopFile
       writeFileSync(f, new Date().toISOString())
       console.log(`emergency stop requested: ${f}`)
       return 0
@@ -120,7 +123,7 @@ export async function main(argv: string[], model: Model = claudeModel): Promise<
       const work = join(sd, 'work', `${checkId(id)}-probe`)
       mkdirSync(work, { recursive: true })
       const capUsd = Math.min(1, lapLeft)
-      const guard = startGuard(capUsd, process.env.FACTORY_STOP_FILE ?? join(sd, 'STOP')) // stop file / signals only
+      const guard = startGuard(capUsd, stopFile) // stop file / signals only
       try {
         // Raw model + own cap check: the result (and the spend) must be written even when over the cap.
         const r = await model({

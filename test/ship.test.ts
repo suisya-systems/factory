@@ -2,7 +2,7 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readlinkSync, writeFileSync } from 'node:fs'
 import net from 'node:net'
 import { join } from 'node:path'
 import type { Model } from '../src/adapter.ts'
@@ -121,4 +121,33 @@ test('removeTree deletes a tree holding a mode-000 dir instead of throwing', () 
   chmodSync(join(d, 'data', 'locked'), 0o000)
   removeTree(d)
   assert.ok(!existsSync(d))
+})
+
+test('ship: a dirty ship target puts nothing live; the previous release keeps serving', async () => {
+  const target = gitTarget()
+  const ws = tmp('ws')
+  execFileSync('git', ['clone', '-q', target, ws])
+  const port = await freePort()
+  const v1 = await build(builder((d) => writeApp(d, MEMO_SERVER)), ws, 'spec', '')
+  await ship({ changeId: 'c', sha: v1.sha, approvedVersion: 'v' }, ws, target, sd, port)
+  const v2 = await build(builder((d) => writeApp(d, MEMO_SERVER.replace("'not found'", "'gone'"))), ws, 'spec', '')
+  writeFileSync(join(target, 'stray.txt'), 'local edit')
+  await assert.rejects(ship({ changeId: 'c', sha: v2.sha, approvedVersion: 'v' }, ws, target, sd, port), /local changes/)
+  assert.equal(head(target), v1.sha)
+  assert.equal(readlinkSync(join(sd, 'releases', 'current')), join(sd, 'releases', v1.sha))
+  assert.equal((await fetch(`http://127.0.0.1:${port}/notes`)).status, 200)
+  await stopServer(sd)
+})
+
+test('ship: an app listening on 0.0.0.0 never goes live and nothing changes', async () => {
+  const target = gitTarget()
+  const ws = tmp('ws')
+  execFileSync('git', ['clone', '-q', target, ws])
+  const v = await build(builder((d) => writeApp(d, MEMO_SERVER.replace("'127.0.0.1')", "'0.0.0.0')"))), ws, 'spec', '')
+  const cur = join(sd, 'releases', 'current')
+  const before = existsSync(cur) ? readlinkSync(cur) : null
+  await assert.rejects(ship({ changeId: 'c', sha: v.sha, approvedVersion: 'v' }, ws, target, sd, await freePort()), /non-loopback address \(0\.0\.0\.0:\d+\)/)
+  assert.notEqual(head(target), v.sha)
+  assert.equal(existsSync(cur) ? readlinkSync(cur) : null, before)
+  assert.ok(!existsSync(join(sd, 'prod', 'server.pid')))
 })
