@@ -7,7 +7,8 @@ import { sandboxSpawn, killTree, HOME, SANDBOX_PATH, type SandboxOpts } from './
 
 export type Access = 'none' | 'read' | 'write'
 export type Task = { role: string; instruction: string; workdir: string; access: Access; maxCostUsd: number; timeoutMs: number; signal?: AbortSignal }
-export type Result = { ok: boolean; text: string; costUsd: number | null; error?: string; model?: string }
+// costByModel: the cost the CLI reports per model inside the call (its own internal calls included), when it reports one.
+export type Result = { ok: boolean; text: string; costUsd: number | null; error?: string; model?: string; costByModel?: Record<string, number> }
 export type Model = (task: Task) => Promise<Result>
 
 // The launcher's real file (under ~/.local/share/claude, which is mounted), not the whole ~/.local/bin.
@@ -96,12 +97,14 @@ export async function runCli(t: Task, bin: string): Promise<Result> {
   const cost = j && typeof j.total_cost_usd === 'number' && Number.isFinite(j.total_cost_usd) ? j.total_cost_usd : null
   const text = j && typeof j.result === 'string' ? j.result : ''
   // The models that actually answered (per-model usage), else the one requested.
-  const used = j && j.modelUsage && typeof j.modelUsage === 'object' ? Object.keys(j.modelUsage).join(',') : ''
-  const model = used || modelFor(t.role)
-  if (why) return { ok: false, text, costUsd: cost, error: why, model }
+  const usage: [string, any][] = j && j.modelUsage && typeof j.modelUsage === 'object' ? Object.entries(j.modelUsage) : []
+  const model = usage.map(([m]) => m).join(',') || modelFor(t.role)
+  const priced = usage.filter(([, u]) => u && typeof u.costUSD === 'number' && Number.isFinite(u.costUSD))
+  const by = priced.length ? { costByModel: Object.fromEntries(priced.map(([m, u]) => [m, u.costUSD])) } : {}
+  if (why) return { ok: false, text, costUsd: cost, error: why, model, ...by }
   if (!j) return { ok: false, text: '', costUsd: null, error: `model process exited (code ${code}) without a parseable result`, model }
-  if (j.is_error || code !== 0) return { ok: false, text, costUsd: cost, error: `model reported an error (${Object.hasOwn(ERROR_KIND, j.subtype) ? ERROR_KIND[j.subtype] : 'unknown'})`, model }
-  return { ok: true, text, costUsd: cost, model }
+  if (j.is_error || code !== 0) return { ok: false, text, costUsd: cost, error: `model reported an error (${Object.hasOwn(ERROR_KIND, j.subtype) ? ERROR_KIND[j.subtype] : 'unknown'})`, model, ...by }
+  return { ok: true, text, costUsd: cost, model, ...by }
 }
 
 export const claudeModel: Model = (t) => runCli(t, BIN)
