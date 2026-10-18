@@ -354,7 +354,7 @@ test('a failed draft is drafted again under the next name; later steps and gates
     { gate: 'start', read: [req] },
     { factory: ['draft', 'rd-a', '--request', req], redraft: 2 },
     { gate: 'entrance', approve: ['rd-a'] },
-    { factory: ['draft', 'rd-b', '--request', req, '--spec-from=rd-a'] },
+    { factory: ['draft', 'rd-b', '--spec-from=rd-a', '--request', req], redraft: 1 }, // a redraft step names an earlier redraft too
     cmp('rd-a', 'rd-b'),
     { gate: 'screen', approve: ['rd-b'] },
     { copy: 'rd-a', to: ['rd-c'] },
@@ -427,6 +427,7 @@ test('redraft goes with draft only, 1 to 3 times, and no other step may draft it
   bad([{ factory: ['draft', 'a'], redraft: 2 }, { factory: ['draft', 'a-r3', '--request', 'r'] }], /step 2: draft a-r3 is a name step 1 may redraft as/)
   bad([{ factory: ['draft', 'a', '--request', 'q'] }, { factory: ['draft', 'a'], redraft: 1 }], /step 1: draft a is a name step 2/)
   bad([{ factory: ['draft', 'a'.repeat(62)], redraft: 1 }], /bad change id/)
+  bad([{ factory: ['draft', 'a'], redraft: 2 }, { factory: ['draft', 'a-r2'], redraft: 1 }], /step 2: draft a-r2 may redraft as a-r2, a name step 1 may take too/)
   parseLap(JSON.stringify({ name: 'x', steps: [{ factory: ['draft', 'a'], redraft: 1 }, { factory: ['draft', 'a-r3'] }] }))
 })
 

@@ -64,7 +64,11 @@ export function parseLap(text: string): LapDef {
       if (cmd === 'draft') drafts.push([id, at])
       if (s.redraft !== undefined) {
         if (cmd !== 'draft' || !(Number.isInteger(s.redraft) && s.redraft >= 1 && s.redraft <= MAX_REDRAFTS)) throw bad(`${at}: redraft (an integer from 1 to ${MAX_REDRAFTS}) goes with draft only`)
-        for (let k = 0; k <= s.redraft; k++) redrafted.set(checkId(retryId(id ?? '', k)), at) // too long: refused before anything runs
+        for (let k = 0; k <= s.redraft; k++) { // too long: refused before anything runs
+          const n = checkId(retryId(id ?? '', k)), o = redrafted.get(n)
+          if (o) throw bad(`${at}: draft ${id} may redraft as ${n}, a name ${o} may take too`)
+          redrafted.set(n, at)
+        }
       }
     }
     if (k === 'copy') {
@@ -210,12 +214,12 @@ export async function lap(file: string, o: LapOpts, factory: (argv: string[]) =>
       }
     } else if (s.redraft) {
       // A failed draft is drafted again under the next name; its spend stays in the lap ledger. A stop or a cap is not retried.
-      const [cmd, id, ...rest] = s.factory!
+      const [cmd, id] = s.factory!, [, , ...rest] = sub(s.factory!)
       for (let k = 0; ; k++) {
         const as = retryId(id, k)
         if (k > 0 && (existsSync(vaultDir(sd, as)) || existsSync(join(sd, 'runs', as)))) throw new Error(`redraft of ${id}: ${as} already exists`)
         try {
-          const code = await factory([cmd, as, ...sub(rest)])
+          const code = await factory([cmd, as, ...rest])
           if (code !== 0) throw new Error(`factory draft ${as}: exit ${code}`)
           if (k > 0) prog.names = { ...prog.names, [id]: as }
           return
