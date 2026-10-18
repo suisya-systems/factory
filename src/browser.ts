@@ -91,8 +91,14 @@ export type Browser = { act(st: UiStep, port: number): Promise<number>; snapshot
 export async function openBrowser(port: number, signal: AbortSignal): Promise<Browser> {
   const dir = mkdtempSync(join(tmpdir(), 'factory-browser-'))
   const toHost = join(dir, 'up'), toBrowser = join(dir, 'down'), profile = join(dir, 'profile'), pidFile = join(dir, 'pid')
-  mkdirSync(profile)
-  execFileSync('mkfifo', ['-m', '600', toHost, toBrowser])
+  const inner = `node -e "$0" "$1" 3>&- 4>&- & until [ -e ${READY} ]; do sleep 0.05; done; shift; exec "$@" 5<&- 6>&-`
+  const wrapper = join(dir, 'chrome.sh')
+  try { // whatever can refuse (a protected browser path, mkfifo) does so before any handle is open
+    mkdirSync(profile)
+    execFileSync('mkfifo', ['-m', '600', toHost, toBrowser])
+    const s = sandboxCommand('sh', ['-c', inner, RELAY, String(port), EXE], { workdir: dir, writable: true, extraRo: [BROWSER_DIR], isolateNet: true })
+    writeFileSync(wrapper, `#!/bin/sh\necho $$ > ${q(pidFile)}\nexec ${[s.cmd, ...s.args].map(q).join(' ')} "$@" 5<${q(toBrowser)} 6>${q(toHost)}\n`, { mode: 0o700 })
+  } catch (e) { removeTree(dir); throw e }
   // O_RDWR: opening never blocks waiting for the other side, and the browser sandbox dying is handled by close().
   const up = new net.Socket({ fd: openSync(toHost, constants.O_RDWR | constants.O_NONBLOCK), writable: false })
   const down = new net.Socket({ fd: openSync(toBrowser, constants.O_RDWR | constants.O_NONBLOCK), readable: false })
@@ -108,10 +114,6 @@ export async function openBrowser(port: number, signal: AbortSignal): Promise<Br
     c.write(d)
   }, () => kill()))
   down.on('error', () => {})
-  const inner = `node -e "$0" "$1" 3>&- 4>&- & until [ -e ${READY} ]; do sleep 0.05; done; shift; exec "$@" 5<&- 6>&-`
-  const s = sandboxCommand('sh', ['-c', inner, RELAY, String(port), EXE], { workdir: dir, writable: true, extraRo: [BROWSER_DIR], isolateNet: true })
-  const wrapper = join(dir, 'chrome.sh')
-  writeFileSync(wrapper, `#!/bin/sh\necho $$ > ${q(pidFile)}\nexec ${[s.cmd, ...s.args].map(q).join(' ')} "$@" 5<${q(toBrowser)} 6>${q(toHost)}\n`, { mode: 0o700 })
   // Playwright spawns the wrapper detached, so its pid is the browser sandbox's process group.
   const kill = () => { try { process.kill(-Number(readFileSync(pidFile, 'utf8')), 'SIGKILL') } catch { /* not started or gone */ } }
   let ctx: BrowserContext | undefined
