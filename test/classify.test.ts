@@ -243,7 +243,9 @@ test('a rejected drafter reply gets one repair round with the error, in a fresh 
   }
   const good = await run(true)
   assert.deepEqual(good.seen.map((t) => t.role), ['spec-drafter', 'scenario-drafter', 'scenario-drafter', 'classifier'])
-  assert.match(good.seen[2].instruction, /PREVIOUS REPLY WAS REJECTED: .*concrete value .*"alpha"/)
+  assert.match(good.seen[2].instruction, /PREVIOUS REPLY WAS REJECTED: [\s\S]*concrete value [^\n]*"alpha"/)
+  assert.match(good.seen[2].instruction, /scenario "create-get": /) // the repair names the scenario
+  assert.match(good.seen[2].instruction, /Change only what the error names/)
   assert.ok(!(good.d instanceof Error) && good.d.scenarios[0].summary === createGet.summary)
   const bad = await run(false)
   assert.ok(bad.d instanceof Error && /concrete value/.test(bad.d.message))

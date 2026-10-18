@@ -174,7 +174,7 @@ export async function ask<T>(model: Model, role: string, instruction: string, pa
   let text = '', err = ''
   const rejected: Rejected[] = []
   for (const repair of [false, true]) {
-    const r = await model(draftTask(role, repair ? `${instruction}\n\nYOUR PREVIOUS REPLY WAS REJECTED: ${err}\nPREVIOUS REPLY:\n${text}\n\nReply again with the whole corrected JSON object.` : instruction))
+    const r = await model(draftTask(role, repair ? `${instruction}\n\nYOUR PREVIOUS REPLY WAS REJECTED: ${err}\nPREVIOUS REPLY:\n${text}\n\nReply again with the whole JSON object. Change only what the error names (for a rejected summary: that scenario's summary, nothing else); every other field of every scenario stays exactly as in your previous reply.` : instruction))
     if (!r.ok) throw new Error(`${role} failed: ${r.error}`)
     text = r.text
     try { return parse(extractJson(text)) } catch (e) {

@@ -35,6 +35,9 @@ const numbers = (x: unknown) => leaves(x, Number.isInteger as (v: unknown) => v 
 export function validateScenarios(x: unknown): Scenario[] {
   if (!Array.isArray(x) || x.length === 0) throw new Error('scenarios must be a non-empty array')
   const ids = new Set<string>()
+  // Summary problems are collected over all scenarios (id, rule, value) so one repair round can fix every one;
+  // the rules themselves are unchanged. Any other problem still throws at once.
+  const bad: string[] = []
   for (const [i, s] of x.entries()) {
     const w = `scenario[${i}]`
     if (!isObj(s)) throw new Error(`${w}: not an object`)
@@ -42,7 +45,7 @@ export function validateScenarios(x: unknown): Scenario[] {
     if (typeof s.id !== 'string' || !/^[\w.-]{1,64}$/.test(s.id) || ids.has(s.id)) throw new Error(`${w}: bad or duplicate id`)
     ids.add(s.id)
     for (const f of ['title', 'summary', 'kind']) if (typeof s[f] !== 'string' || !s[f].trim()) throw new Error(`${w}: ${f} must be a non-empty string`)
-    if (/[\r\n]/.test(s.summary) || s.summary.length > 200) throw new Error(`${w}: summary must be one line (<=200 chars)`)
+    if (/[\r\n]/.test(s.summary) || s.summary.length > 200) bad.push(`scenario "${s.id}": summary must be one line (<=200 chars); it has ${s.summary.split(/\r?\n/).length} line(s) and ${s.summary.length} chars`)
     if (typeof s.inSpec !== 'boolean') throw new Error(`${w}: inSpec must be boolean`)
     if (!Array.isArray(s.steps) || s.steps.length === 0) throw new Error(`${w}: steps must be a non-empty array`)
     for (const [j, st] of s.steps.entries()) {
@@ -82,9 +85,10 @@ export function validateScenarios(x: unknown): Scenario[] {
         .filter((v) => v.length >= 3 && v !== '/').map((v) => v.toLowerCase())
       const leaked = lits.find((v) => s.summary.toLowerCase().includes(v))
         ?? [e.status ?? [], ...numbers(st.body), ...numbers(e.json)].flat().find((c: number) => Math.abs(c) >= 100 && new RegExp(`(?<!\\d)${c}(?!\\d)`).test(s.summary))
-      if (leaked !== undefined) throw new Error(`${w}: summary contains a concrete value from the steps (${JSON.stringify(String(leaked))})`)
+      if (leaked !== undefined) bad.push(`scenario "${s.id}": summary contains a concrete value from the steps (${JSON.stringify(String(leaked))}; step ${j}); reword it without that value`)
     }
   }
+  if (bad.length) throw new Error(`${bad.length} scenario summar${bad.length === 1 ? 'y' : 'ies'} rejected:\n- ${bad.join('\n- ')}`)
   return x as Scenario[]
 }
 
