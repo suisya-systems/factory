@@ -6,6 +6,8 @@ import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, normalize, resolve } from 'node:path'
+import { noteLap, Stop } from './limits.ts'
+import { retryId } from './plan.ts'
 import { approve, checkId, hash, loadApproved, stateDir, vaultDir } from './vault.ts'
 
 export type Step = {
@@ -15,16 +17,18 @@ export type Step = {
   newShipTarget?: string // run only: README of a fresh ship target $STATE/ship/<id>
   always?: boolean // exec / tally / observe only: runs even after a failed step (reports)
   parallel?: Step[]; max?: number // independent runs (or replicates) of one group, at most `max` at once
+  redraft?: number // draft only (#32): a failed draft is drafted again as <id>-r2, -r3 .. at most this often; later steps say <id>
 }
 export type LapDef = { name: string; home?: string; steps: Step[] }
 
 // Commands a step may run. approve / stop / serve are not steps: approval happens at a gate, by a human.
 const FACTORY_STEPS = ['draft', 'run', 'replicate', 'tally', 'probe-isolation', 'observe']
 const FREE = ['tally', 'observe'] // no model call: may be `always`
-const KEYS: Record<string, string[]> = { factory: ['newShipTarget', 'always'], exec: ['always'], copy: ['from', 'to'], gate: ['approve', 'fix', 'read'], parallel: ['max'] }
+const KEYS: Record<string, string[]> = { factory: ['newShipTarget', 'always', 'redraft'], exec: ['always'], copy: ['from', 'to'], gate: ['approve', 'fix', 'read'], parallel: ['max'] }
 // A group runs side by side only what shares nothing but the lap ledger: each change its own run dir, work dir,
 // ship target and prod port. One command per group: `run x-rep` would share replicate x's work dir.
 const PARALLEL = ['run', 'replicate']
+const MAX_REDRAFTS = 3
 
 // The value of `--name v` / `--name=v` in an argv (as parseArgs reads it: the last one wins).
 function opt(argv: string[], name: string): string | undefined {
@@ -44,6 +48,7 @@ export function parseLap(text: string): LapDef {
   if (d.home !== undefined && typeof d.home !== 'string') throw bad('home must be a path')
   if (!Array.isArray(d.steps) || d.steps.length === 0) throw bad('steps missing')
   const seen = new Set<string>(), gates = new Set<string>()
+  const drafts: [string, string][] = [], redrafted = new Map<string, string>() // a redraft's names -> its step
   const check = (s: Step, at: string) => {
     const kind = Object.keys(KEYS).filter((k) => k in s)
     if (kind.length !== 1) throw bad(`${at}: needs exactly one of ${Object.keys(KEYS).join(', ')}`)
@@ -56,6 +61,11 @@ export function parseLap(text: string): LapDef {
       if (s.newShipTarget !== undefined && (cmd !== 'run' || typeof s.newShipTarget !== 'string')) throw bad(`${at}: newShipTarget (a README text) goes with run only`)
       if (s.always && !FREE.includes(cmd)) throw bad(`${at}: always goes with exec, tally and observe only (no model call after a failure)`)
       if (cmd === 'run') checkId(id ?? '')
+      if (cmd === 'draft') drafts.push([id, at])
+      if (s.redraft !== undefined) {
+        if (cmd !== 'draft' || !(Number.isInteger(s.redraft) && s.redraft >= 1 && s.redraft <= MAX_REDRAFTS)) throw bad(`${at}: redraft (an integer from 1 to ${MAX_REDRAFTS}) goes with draft only`)
+        for (let k = 0; k <= s.redraft; k++) redrafted.set(checkId(retryId(id ?? '', k)), at) // too long: refused before anything runs
+      }
     }
     if (k === 'copy') {
       checkId(s.copy!)
@@ -99,10 +109,14 @@ export function parseLap(text: string): LapDef {
     seen.add(key)
   }
   d.steps.forEach((s: Step, i: number) => check(s, `step ${i + 1}`))
+  // A redraft takes the next names: no other step may draft them (or the same id), or `<id>` would mean two sets.
+  for (const [id, at] of drafts) { const o = redrafted.get(id); if (o && o !== at) throw bad(`${at}: draft ${id} is a name ${o} may redraft as`) }
   return d
 }
 
-type Progress = { steps: Record<string, { status: 'running' | 'done' | 'failed'; reason?: string; at: string }>; waiting: string | null }
+// names: a redrafted id -> the name it was drafted as (#32); redrafts: each failed draft that was drafted again, and why.
+type Redraft = { step: string; id: string; failed: string; as: string; reason: string }
+type Progress = { steps: Record<string, { status: 'running' | 'done' | 'failed'; reason?: string; at: string }>; waiting: string | null; names?: Record<string, string>; redrafts?: Redraft[] }
 
 const sha256 = (b: Buffer | string) => createHash('sha256').update(b).digest('hex')
 // The tree equality `cp -a` + `diff -r` gave: same relative paths, same bytes.
@@ -131,7 +145,10 @@ export async function lap(file: string, o: LapOpts, factory: (argv: string[]) =>
   for (const f of ['lap-ledger.jsonl', 'lap-ledger.json']) if (!existsSync(progFile) && existsSync(join(sd, f))) throw new Error(`${sd} is not a fresh state dir (${f} exists); a lap starts from a fresh FACTORY_HOME`)
   const prog: Progress = existsSync(progFile) ? JSON.parse(readFileSync(progFile, 'utf8')) : { steps: {}, waiting: null }
   const save = () => { mkdirSync(dir, { recursive: true }); writeFileSync(`${progFile}.tmp`, JSON.stringify(prog, null, 2)); renameSync(`${progFile}.tmp`, progFile) }
-  const sub = (argv: string[]) => argv.map((a) => a.replaceAll('{state}', sd))
+  // A redrafted id stands for the name it was drafted as, wherever a step names it: a whole arg, or a piece of a path,
+  // a comma list or `--opt=` (`{state}/vault/<id>/spec.md`, `--score <id>,<id>`).
+  const name = (id: string) => prog.names?.[id] ?? id
+  const sub = (argv: string[]) => argv.map((a) => a.replaceAll('{state}', sd).split(/([/,=])/).map(name).join(''))
 
   // A gate's version binds the whole definition (every later step, run count and cap), each draft's version and
   // each fixed / read file's bytes. Any change after approval asks for approval again.
@@ -139,7 +156,9 @@ export async function lap(file: string, o: LapOpts, factory: (argv: string[]) =>
     const missing = [...Object.values(g.fix ?? {}), ...(g.read ?? [])].filter((f) => !existsSync(f))
     if (missing.length) return { missing }
     const h = createHash('sha256').update(`definition\0${sha256(defBytes)}\0`)
-    for (const id of g.approve ?? []) h.update(`approve\0${id}\0${hash(vaultDir(sd, id))}\0`)
+    // The redrafts before the gate are settled by then (those steps never run again); later ones never move this version.
+    for (const s of def.steps.slice(0, def.steps.indexOf(g))) if (s.redraft && name(s.factory![1]) !== s.factory![1]) h.update(`redraft\0${s.factory![1]}\0${name(s.factory![1])}\0`)
+    for (const id of g.approve ?? []) h.update(`approve\0${id}\0${hash(vaultDir(sd, name(id)))}\0`)
     for (const [dest, src] of Object.entries(g.fix ?? {})) h.update(`fix\0${dest}\0${sha256(readFileSync(src))}\0`)
     for (const f of g.read ?? []) h.update(`read\0${f}\0${sha256(readFileSync(f))}\0`)
     return { missing, version: h.digest('hex') }
@@ -157,7 +176,7 @@ export async function lap(file: string, o: LapOpts, factory: (argv: string[]) =>
     // Everything checked before anything is written, so a refused approval leaves no half-approved gate.
     const fixes = Object.entries(g.fix ?? {}).map(([dest, src]) => ({ dest: join(sd, dest), bytes: readFileSync(src) }))
     for (const f of fixes) if (existsSync(f.dest) && !readFileSync(f.dest).equals(f.bytes)) throw new Error(`${f.dest} is already fixed with other content`)
-    for (const id of g.approve ?? []) {
+    for (const id of (g.approve ?? []).map(name)) {
       if (!existsSync(join(vaultDir(sd, id), 'approval.json'))) approve(sd, id, { by: o.by!, version: hash(vaultDir(sd, id)), note: `lap ${def.name}, gate ${g.gate} (version ${version})` })
       else loadApproved(sd, id) // approved earlier: still the same set
     }
@@ -174,20 +193,40 @@ export async function lap(file: string, o: LapOpts, factory: (argv: string[]) =>
   }
 
   // Throws when the step did not finish as the lap expects.
-  const doStep = async (s: Step) => {
+  const doStep = async (s: Step, at: string) => {
     if (s.exec) {
       const argv = sub(s.exec)
       const r = spawnSync(argv[0], argv.slice(1), { stdio: 'inherit' })
       if (r.error) throw r.error
       if (r.status !== 0) throw new Error(`${argv.join(' ')}: exit ${r.status ?? r.signal}`)
     } else if (s.copy) {
-      const pairs = s.from ? [[join(resolve(s.from), 'vault', s.copy), s.copy]] : s.to!.map((t) => [vaultDir(sd, s.copy!), t])
+      const pairs = s.from ? [[join(resolve(s.from), 'vault', s.copy), s.copy]] : s.to!.map((t) => [vaultDir(sd, name(s.copy!)), t])
       for (const [src, id] of pairs) {
         if (!existsSync(join(src, 'approval.json'))) throw new Error(`copy ${s.copy}: ${src} is not an approved set`)
         const dst = vaultDir(sd, id)
         if (!existsSync(dst)) cpSync(src, dst, { recursive: true, preserveTimestamps: true })
         if (!sameTree(src, dst)) throw new Error(`copy ${s.copy}: ${dst} differs from ${src}`)
         loadApproved(sd, id) // the copy still matches its approval
+      }
+    } else if (s.redraft) {
+      // A failed draft is drafted again under the next name; its spend stays in the lap ledger. A stop or a cap is not retried.
+      const [cmd, id, ...rest] = s.factory!
+      for (let k = 0; ; k++) {
+        const as = retryId(id, k)
+        if (k > 0 && (existsSync(vaultDir(sd, as)) || existsSync(join(sd, 'runs', as)))) throw new Error(`redraft of ${id}: ${as} already exists`)
+        try {
+          const code = await factory([cmd, as, ...sub(rest)])
+          if (code !== 0) throw new Error(`factory draft ${as}: exit ${code}`)
+          if (k > 0) prog.names = { ...prog.names, [id]: as }
+          return
+        } catch (e) {
+          if (k === s.redraft || e instanceof Stop || stopped()) throw e
+          const r: Redraft = { step: at, id, failed: as, as: retryId(id, k + 1), reason: (e as Error).message }
+          prog.redrafts = [...prog.redrafts ?? [], r]
+          save()
+          noteLap(join(sd, 'lap-ledger.jsonl'), 'redraft', { lap: def.name, ...r })
+          console.error(`lap ${def.name}: ${at}: draft ${as} failed (${r.reason}); drafting it again as ${r.as}`)
+        }
       }
     } else {
       const argv = sub(s.factory!)
@@ -227,7 +266,7 @@ export async function lap(file: string, o: LapOpts, factory: (argv: string[]) =>
     prog.steps[key] = { status: 'running', at: new Date().toISOString() } // recorded before any spend: an interrupted step is never re-run silently
     save()
     try {
-      await doStep(s)
+      await doStep(s, at)
       prog.steps[key] = { status: 'done', at: new Date().toISOString() }
     } catch (e) {
       prog.steps[key] = { status: 'failed', reason: (e as Error).message, at: new Date().toISOString() }
@@ -256,7 +295,7 @@ export async function lap(file: string, o: LapOpts, factory: (argv: string[]) =>
         rec = existsSync(gateRecord(s)) ? JSON.parse(readFileSync(gateRecord(s), 'utf8')) : null
         if (version && rec?.version === version) {
           for (const [f, h] of Object.entries(rec.files as Record<string, string>)) if (!existsSync(f) || sha256(readFileSync(f)) !== h) throw new Error(`fixed file ${f} changed after approval`)
-          for (const id of s.approve ?? []) loadApproved(sd, id)
+          for (const id of s.approve ?? []) loadApproved(sd, name(id))
           continue
         }
       } catch (e) { failed ||= `${at} (gate "${s.gate}") failed: ${(e as Error).message}`; continue } // the report steps still run
@@ -270,7 +309,8 @@ export async function lap(file: string, o: LapOpts, factory: (argv: string[]) =>
         `Approve with: \`npm run factory -- lap ${file} --approve ${s.gate} --by <name> --version ${version}\``, '',
         ...(rec ? ['An earlier approval of this gate no longer matches: the definition or one of the files below changed since.', ''] : []),
         `Approving this gate approves the lap definition as it is now (${file}, sha256 ${sha256(defBytes)}): every step after this gate, with its run counts and caps.`, '',
-        ...(s.approve?.length ? ['## Changes to approve at the entrance (read each approval summary)', ...s.approve.map((id) => `- ${id}: ${join(vaultDir(sd, id), 'approval-summary.md')} (version ${hash(vaultDir(sd, id))})`), ''] : []),
+        ...(prog.redrafts?.length ? ['## Redrafts (a failed draft was drafted again under the next name; every step names it by its first name)', ...prog.redrafts.map((r) => `- ${r.step}: ${r.failed} failed (${r.reason}); drafted again as ${r.as}`), ''] : []),
+        ...(s.approve?.length ? ['## Changes to approve at the entrance (read each approval summary)', ...s.approve.map((id) => `- ${id}${name(id) !== id ? ` (drafted as ${name(id)})` : ''}: ${join(vaultDir(sd, name(id)), 'approval-summary.md')} (version ${hash(vaultDir(sd, name(id)))})`), ''] : []),
         ...(s.fix ? ['## Files fixed by this approval (pre-registration; never changed afterwards)', ...Object.entries(s.fix).map(([d, f]) => `- ${join(sd, d)} <- ${f} (sha256 ${sha256(readFileSync(f))})`), ''] : []),
         ...(s.read?.length ? ['## Also read', ...s.read.map((f) => `- ${f} (sha256 ${sha256(readFileSync(f))})`), ''] : []),
       ].join('\n'))

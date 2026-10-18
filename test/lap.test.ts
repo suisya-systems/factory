@@ -335,3 +335,97 @@ test('lap 8 definition: second family first, provenance before each gate, cmp pe
   assert.ok(reps.every((s) => s.factory![s.factory!.indexOf('--k') + 1] === '8'))
   assert.deepEqual(reps.map((s) => s.factory![s.factory!.indexOf('--score') + 1]).sort(), [...d.steps[at('entrance')].approve!].sort()) // scored by exactly the approved sets
 })
+
+// #32: lap 9 renamed failed drafts by hand (memo-sync-strict-cc-pr1, settle-shares-strict-cc-2r2), which changed the
+// definition and asked every gate again. `redraft` drafts again under the next name; every step keeps the first name.
+test('a failed draft is drafted again under the next name; later steps and gates use the first name and no gate asks again', async () => {
+  const sd = home(), dir = scratch(), req = join(dir, 'req.md'), file = join(dir, 'lap.json'), done = join(dir, 'done')
+  writeFileSync(req, 'a memo api')
+  let specCalls = 0, spent = 0
+  const SPEC = JSON.stringify({ spec: '# Memo\n\n## Undecided\n- status codes\n', interface: { endpoints: ['POST /notes'] }, assumptions: [] })
+  const model: Model = async (t) => {
+    spent += 0.25
+    if (t.role === 'spec-drafter') return { ok: true, text: ++specCalls <= 2 ? 'sorry' : SPEC, costUsd: 0.25 } // the first draft and its repair fail
+    if (t.role === 'scenario-drafter') return { ok: true, text: JSON.stringify({ scenarios: SCENARIOS, assumptions: [] }), costUsd: 0.25 }
+    return { ok: false, text: '', costUsd: 0.25, error: 'down' }
+  }
+  const cmp = (a: string, b: string) => ({ exec: ['cmp', `{state}/vault/${a}/spec.md`, `{state}/vault/${b}/spec.md`] })
+  writeFileSync(file, JSON.stringify({ name: 'lapr', steps: [
+    { gate: 'start', read: [req] },
+    { factory: ['draft', 'rd-a', '--request', req], redraft: 2 },
+    { gate: 'entrance', approve: ['rd-a'] },
+    { factory: ['draft', 'rd-b', '--request', req, '--spec-from=rd-a'] },
+    cmp('rd-a', 'rd-b'),
+    { gate: 'screen', approve: ['rd-b'] },
+    { copy: 'rd-a', to: ['rd-c'] },
+    { exec: mark(done) },
+  ] }))
+  const gate = async (g: string) => {
+    const r = await lapOut([file], model)
+    assert.equal(r.code, 3, r.out)
+    const text = readFileSync(r.out.match(/Read (\S+);/)![1], 'utf8')
+    assert.equal(await main(['lap', file, '--approve', g, '--by', 'owner', '--version', text.match(/^Version: (\w+)$/m)![1]], model), 0)
+    return text
+  }
+  await gate('start')
+  const text = await gate('entrance') // the start gate is not asked again: the definition did not change
+  await gate('screen') // nor the entrance gate, whose version binds the redraft before it
+  assert.equal(specCalls, 3)
+  assert.ok(!existsSync(join(sd, 'vault', 'rd-a', 'spec.md')))
+  assert.ok(existsSync(join(sd, 'runs', 'rd-a', 'draft-cost.json'))) // the failed draft's record stays under its own name
+  assert.match(text, /## Redrafts[^\n]*\n- step 2: rd-a failed \([^\n]*no parseable JSON[^\n]*\); drafted again as rd-a-r2\n/)
+  assert.match(text, /- rd-a \(drafted as rd-a-r2\): \S+\/vault\/rd-a-r2\/approval-summary\.md/)
+  assert.ok(existsSync(join(sd, 'vault', 'rd-a-r2', 'approval.json')))
+  assert.ok(existsSync(join(sd, 'vault', 'rd-b', 'approval.json')))
+  assert.ok(!existsSync(join(sd, 'vault', 'rd-a', 'approval.json')))
+  assert.equal(await main(['lap', file], model), 0)
+  assert.equal(count(done), 1)
+  assert.ok(existsSync(join(sd, 'vault', 'rd-c', 'approval.json'))) // copied from rd-a-r2
+  // The lap ledger holds the failed draft's spend (the lap cap counts it) and says why it was drafted again.
+  const ledger = join(sd, 'lap-ledger.jsonl')
+  assert.ok(Math.abs(lapSpent(ledger) - spent) < 1e-9, `${lapSpent(ledger)} != ${spent}`)
+  const ev = readFileSync(ledger, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((l) => l.event)
+  assert.deepEqual(ev.map((l) => [l.event, l.lap, l.id, l.failed, l.as]), [['redraft', 'lapr', 'rd-a', 'rd-a', 'rd-a-r2']])
+  assert.match(ev[0].reason, /no parseable JSON/)
+  // rd-c has rd-a-r2's bytes, so only the redraft itself in the gate's version tells the two apart.
+  const pf = join(sd, 'laps', 'lapr', 'progress.json'), prog = JSON.parse(readFileSync(pf, 'utf8'))
+  writeFileSync(pf, JSON.stringify({ ...prog, names: { 'rd-a': 'rd-c' } }))
+  assert.match((await lapOut([file], model)).out, /stopped at gate "entrance"/)
+})
+
+test('redraft stops at its limit, never retries a stop or a cap, and never drafts over an existing name', async () => {
+  const dir = scratch(), req = join(dir, 'req.md'), file = join(dir, 'lap.json')
+  writeFileSync(req, 'a memo api')
+  let calls = 0, sd = ''
+  const lap = (name: string, step: Step, m: Model) => { sd = home(); writeFileSync(file, JSON.stringify({ name, steps: [step] })); return main(['lap', file], m) }
+  assert.equal(await lap('lapx', { factory: ['draft', 'rx', '--request', req], redraft: 1 }, async () => { calls++; return { ok: true, text: 'sorry', costUsd: 0.1 } }), 1)
+  assert.equal(calls, 4) // two drafts, each with its one repair
+  const prog = JSON.parse(readFileSync(join(sd, 'laps', 'lapx', 'progress.json'), 'utf8'))
+  assert.deepEqual(prog.redrafts.map((r: { as: string }) => r.as), ['rx-r2'])
+  assert.equal(prog.names, undefined) // nothing stands for rx: no draft of it exists
+
+  calls = 0 // the per-change cap: a Stop, not a failed draft
+  assert.equal(await lap('lapc', { factory: ['draft', 'rc', '--request', req], redraft: 2 }, async () => { calls++; return { ok: true, text: 'sorry', costUsd: CAPS.maxCostUsd + 1 } }), 1)
+  assert.equal(calls, 1)
+  calls = 0 // the emergency stop
+  assert.equal(await lap('laps', { factory: ['draft', 'rs', '--request', req], redraft: 2 }, async () => { calls++; writeFileSync(join(sd, 'STOP'), 'x'); return { ok: false, text: '', costUsd: 0.1, error: 'down' } }), 1)
+  unlinkSync(join(sd, 'STOP'))
+  assert.equal(calls, 1)
+  calls = 0
+  assert.equal(await lap('lapo', { factory: ['draft', 'ro', '--request', req], redraft: 2 }, async () => {
+    if (!calls++) mkdirSync(join(sd, 'runs', 'ro-r2'), { recursive: true }) // a name the redraft would take is already in use
+    return { ok: true, text: 'sorry', costUsd: 0.1 }
+  }), 1)
+  assert.equal(calls, 2)
+  assert.match(Object.values(JSON.parse(readFileSync(join(sd, 'laps', 'lapo', 'progress.json'), 'utf8')).steps as Record<string, { reason: string }>)[0].reason, /ro-r2 already exists/)
+})
+
+test('redraft goes with draft only, 1 to 3 times, and no other step may draft its names', () => {
+  const bad = (steps: unknown[], re: RegExp) => assert.throws(() => parseLap(JSON.stringify({ name: 'x', steps })), re)
+  bad([{ factory: ['run', 'a', '--ship-target', 't'], redraft: 1 }], /redraft .* goes with draft only/)
+  for (const n of [0, 4, 1.5, '2']) bad([{ factory: ['draft', 'a'], redraft: n }], /redraft \(an integer from 1 to 3\)/)
+  bad([{ factory: ['draft', 'a'], redraft: 2 }, { factory: ['draft', 'a-r3', '--request', 'r'] }], /step 2: draft a-r3 is a name step 1 may redraft as/)
+  bad([{ factory: ['draft', 'a', '--request', 'q'] }, { factory: ['draft', 'a'], redraft: 1 }], /step 1: draft a is a name step 2/)
+  bad([{ factory: ['draft', 'a'.repeat(62)], redraft: 1 }], /bad change id/)
+  parseLap(JSON.stringify({ name: 'x', steps: [{ factory: ['draft', 'a'], redraft: 1 }, { factory: ['draft', 'a-r3'] }] }))
+})
