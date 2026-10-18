@@ -104,7 +104,8 @@ export function fill(x: unknown, vars: Record<string, unknown>): unknown {
   if (typeof x === 'string' && /^\{\{\w+\}\}$/.test(x)) return need(x.slice(2, -2)) // whole value: keep the captured type
   if (typeof x === 'string') return x.replace(/\{\{(\w+)\}\}/g, (_, n) => String(need(n)))
   if (Array.isArray(x)) return x.map((v) => fill(v, vars))
-  if (isObj(x)) return Object.fromEntries(Object.entries(x).map(([k, v]) => [k, fill(v, vars)]))
+  // Keys too: an object keyed by captured ids ({"{{a}}": 1}) is common, and an unfilled key reaches the app as is.
+  if (isObj(x)) return Object.fromEntries(Object.entries(x).map(([k, v]) => [k.replace(/\{\{(\w+)\}\}/g, (_, n) => String(need(n))), fill(v, vars)]))
   return x
 }
 

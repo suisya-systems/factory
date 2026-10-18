@@ -5,7 +5,7 @@ import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from
 import { join } from 'node:path'
 import type { Model, Task } from '../src/adapter.ts'
 import { main, approvalSummary } from '../src/cli.ts'
-import { classify, classifyReply, predictInstruction, withoutUndecided } from '../src/classify.ts'
+import { classify, classifyReply, compareStep, predictInstruction, withoutUndecided } from '../src/classify.ts'
 import { startGuard, Stop } from '../src/limits.ts'
 import { draft, extractJson } from '../src/roles.ts'
 import { runScenario, type Scenario } from '../src/scenario.ts'
@@ -334,4 +334,13 @@ test('classifyReply (lap 3 review): "?" inside a captured object, header name ca
   assert.equal(withoutUndecided(SPEC + '\n\n## Interface\nx'), SPEC.split('## Undecided')[0] + '## Interface\nx')
   const r = classifyReply(SCENARIOS[3], SPEC, '', { steps: [{ status: [404], body: null, basis: 'spec', quote: 'the status code for an unknown id' }] })
   assert.equal(r.basis, 'convention')
+})
+
+test('compareStep: keys naming captured ids are filled on both sides, as in the runner (lap 9)', () => {
+  const st = { method: 'POST', path: '/x', expect: { status: 201, json: { owed: { '{{a}}': 2 } } } }
+  const p = (owed: unknown) => ({ status: [201], body: { owed }, basis: 'spec' as const, quote: '' })
+  const res = (owed: unknown) => compareStep(st, p(owed), { a: 'm1' }).find((c) => c.check !== 'status 201')?.result
+  assert.equal(res({ '{{a}}': 2 }), 'M')
+  assert.equal(res({ m1: 2 }), 'M')
+  assert.equal(res({ '{{a}}': 3 }), 'X')
 })
