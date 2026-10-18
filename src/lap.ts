@@ -216,10 +216,11 @@ export async function lap(file: string, o: LapOpts, factory: (argv: string[]) =>
 
   let failed = ''
   // A step other than a gate: skipped when done, recorded before any spend, never re-run after a failure.
+  // An `always` step makes no model call (a report), so one that failed or was cut off runs again on the next pass.
   const runStep = async (s: Step, at: string) => {
     const key = JSON.stringify(s), st = prog.steps[key]
     if (st?.status === 'done') return
-    if (st) { failed ||= `${at} ${st.status === 'running' ? 'was interrupted (the lap ended during it)' : `failed: ${st.reason}`}`; return }
+    if (st && !s.always) { failed ||= `${at} ${st.status === 'running' ? 'was interrupted (the lap ended during it)' : `failed: ${st.reason}`}`; return }
     // While the STOP file exists only `always` exec steps (the report) run; nothing is recorded for the skipped ones.
     if (stopped() && !(s.always && s.exec)) { failed ||= stopped() as string; return }
     if (failed && !s.always) return

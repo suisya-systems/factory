@@ -145,8 +145,12 @@ export function checkStep(st: Step, status: number, json: unknown, vars: Record<
 async function send(port: number, st: Omit<Step, 'expect'>, vars: Record<string, unknown>, signal: AbortSignal) {
   const path = fill(st.path, vars) as string
   const body = st.body === undefined ? undefined : JSON.stringify(fill(st.body, vars))
+  // Header names are case-insensitive: a scenario's own "Content-Type" replaces the default, never joins it
+  // (a plain-object merge sent "application/json, application/json").
+  const headers = new Headers(fill(st.headers ?? {}, vars) as Record<string, string>)
+  if (body && !headers.has('content-type')) headers.set('content-type', 'application/json')
   const res = await fetch(`http://127.0.0.1:${port}${path}`, {
-    method: st.method, body, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...(fill(st.headers ?? {}, vars) as Record<string, string>) },
+    method: st.method, body, headers,
     redirect: 'manual', // judge the tested endpoint's own response, never a redirect target
     signal: AbortSignal.any([signal, AbortSignal.timeout(5000)]),
   })

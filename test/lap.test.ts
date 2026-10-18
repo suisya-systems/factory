@@ -150,6 +150,16 @@ test('a failed step stops the lap and is never re-run; always-steps still report
   } finally { unlinkSync(stop) }
 })
 
+// Lap 8: the report step failed once (no prereg yet) and the lap kept reporting that old failure after the builds.
+test('an always step that failed runs again on the next pass (no model call), and the lap can finish', async () => {
+  home()
+  const dir = scratch(), flag = join(dir, 'ready'), file = join(dir, 'lap.json')
+  writeFileSync(file, JSON.stringify({ name: 'lapa', steps: [{ exec: [process.execPath, '-e', "process.exit(require('fs').existsSync(process.argv[1]) ? 0 : 1)", flag], always: true }] }))
+  assert.equal(await main(['lap', file]), 1)
+  writeFileSync(flag, '')
+  assert.equal(await main(['lap', file]), 0)
+})
+
 test('a definition home sets the state dir; another FACTORY_HOME is refused', async () => {
   const dir = scratch(), file = join(dir, 'lap.json')
   writeFileSync(file, JSON.stringify({ name: 'laph', home: join(dir, 'state'), steps: [{ exec: mark(join(dir, 'm')) }] }))
