@@ -6,7 +6,7 @@ import http from 'node:http'
 import { existsSync, readdirSync, readFileSync, readlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Model } from '../src/adapter.ts'
-import { openBrowser, UI_LIMITS, usesUi, withUi } from '../src/browser.ts'
+import { EXE, openBrowser, UI_LIMITS, usesUi, withUi } from '../src/browser.ts'
 import { classifyReply, predictInstruction } from '../src/classify.ts'
 import { checkWithin, draft, RUN_CONTRACT, runContract } from '../src/roles.ts'
 import { runChange } from '../src/run.ts'
@@ -19,6 +19,8 @@ import { CLASSIFICATION, freshState, gitTarget, tmp, writeApp } from './helpers.
 const sd = freshState()
 after(() => stopServer(sd))
 const never = new AbortController().signal
+// Without the pinned browser, launching it fails and the servers the tests opened keep the process alive: skip instead.
+const browserTest: typeof test = (name: string, fn: any) => test(name, { skip: existsSync(EXE) ? false : 'headless Chromium is not installed: npx playwright-core install --with-deps --only-shell chromium (see README)' }, fn)
 
 // Stands in for the builder: a memo page (form + list) over the app's own JSON API, plus pages that probe the isolation.
 const page = (body: string) => `<!doctype html><html><body>${body}</body></html>`
@@ -77,7 +79,7 @@ const ADD = sc('add', [
   { method: 'GET', path: '/api/memos', expect: { status: 200, json: [{ title: '{{first}}' }] } },
 ])
 
-test('a ui scenario drives the page in the browser: fill, click, the list updates later, mixed with HTTP steps', async () => {
+browserTest('a ui scenario drives the page in the browser: fill, click, the list updates later, mixed with HTTP steps', async () => {
   const r = await runScenario(app, ADD, never, { ui: true })
   assert.equal(r.pass, true, r.detail)
   const bad = tmp('ui-bug')
@@ -93,7 +95,7 @@ test('no declared UI: a ui step fails instead of running', async () => {
   assert.match(r.detail, /step 1: the spec declares no browser UI/)
 })
 
-test('the browser reaches the app and nothing else: page JS gets no connection to a host listener', async () => {
+browserTest('the browser reaches the app and nothing else: page JS gets no connection to a host listener', async () => {
   let hits = 0
   const host = http.createServer((_q, r) => { hits++; r.end('x') }).listen(0, '127.0.0.1')
   await new Promise((ok) => host.once('listening', ok))
@@ -105,7 +107,7 @@ test('the browser reaches the app and nothing else: page JS gets no connection t
   } finally { host.close() }
 })
 
-test('the app cannot see the browser: they are in separate sandboxes', async () => {
+browserTest('the app cannot see the browser: they are in separate sandboxes', async () => {
   const r = await runScenario(app, sc('procs', [
     ui({ ui: 'goto', path: '/', expect: { status: 200 } }), // the browser is up from here on
     { method: 'GET', path: '/procs', expect: { status: 200, length: 0 } },
@@ -135,7 +137,7 @@ async function gone() {
   return chromes().length === 0
 }
 
-test('the browser has no port a builder could reach, none of the factory environment, and no view of the state dir', async () => {
+browserTest('the browser has no port a builder could reach, none of the factory environment, and no view of the state dir', async () => {
   const srv = http.createServer((_q, r) => { r.writeHead(200, { 'content-type': 'text/html' }); r.end('<p data-testid="hi">hi</p>') }).listen(0, '127.0.0.1')
   await new Promise((ok) => srv.once('listening', ok))
   process.env.FACTORY_TEST_CANARY = 'canary-4f1d'
@@ -155,12 +157,12 @@ test('the browser has no port a builder could reach, none of the factory environ
   assert.ok(await gone(), 'close() leaves nothing running')
 })
 
-test('the page is read in an isolated world: page JS that bends DOM and builtins cannot change what the judge reads', async () => {
+browserTest('the page is read in an isolated world: page JS that bends DOM and builtins cannot change what the judge reads', async () => {
   const r = await runScenario(app, sc('liar', [ui({ ui: 'goto', path: '/liar', expect: { json: { real: ['truth'] }, length: { real: 1 } } })]), never, { ui: true })
   assert.equal(r.pass, true, r.detail)
 })
 
-test('tagged SVG, open shadow roots, display:contents and odd ids are read as actions see them', async () => {
+browserTest('tagged SVG, open shadow roots, display:contents and odd ids are read as actions see them', async () => {
   const r = await runScenario(app, sc('odd', [
     ui({ ui: 'goto', path: '/odd', expect: { json: { icon: ['s'], item: ['light', 'shadow'], b: ['0'], ['__proto__']: ['wrapped'] }, length: { hid: 0 } } }),
     ui({ ui: 'click', target: 'b', expect: { json: { b: ['1'] } } }),
@@ -168,7 +170,7 @@ test('tagged SVG, open shadow roots, display:contents and odd ids are read as ac
   assert.equal(r.pass, true, r.detail)
 })
 
-test('a page past the snapshot cap fails the step, even where a cut snapshot would have passed', async () => {
+browserTest('a page past the snapshot cap fails the step, even where a cut snapshot would have passed', async () => {
   const n = UI_LIMITS.elements
   const at = (k: number, len: number) => runScenario(app, sc('many', [ui({ ui: 'goto', path: `/many?n=${k}`, expect: { length: { row: len } } })]), never, { ui: true })
   assert.equal((await at(n, n)).pass, true)
@@ -177,7 +179,7 @@ test('a page past the snapshot cap fails the step, even where a cut snapshot wou
   assert.match(over.detail, /more than the judge reads/)
 })
 
-test('a page that hangs is bounded: the step fails, the scenario ends, an emergency stop stops it', async () => {
+browserTest('a page that hangs is bounded: the step fails, the scenario ends, an emergency stop stops it', async () => {
   const t0 = Date.now()
   const r = await runScenario(app, sc('stall', [ui({ ui: 'goto', path: '/stall', expect: { length: { x: 1 } } })]), never, { ui: true })
   assert.equal(r.pass, false)
@@ -244,7 +246,7 @@ test('classifier: a ui step is compared like any response: the page object, stat
   assert.doesNotMatch(predictInstruction('# s', '', { ...ADD, steps: [ADD.steps[3]] }), /browser action/)
 })
 
-test('practice change end to end with a fake model: drafted with --ui, judged in the browser, retried once, shipped', async () => {
+browserTest('practice change end to end with a fake model: drafted with --ui, judged in the browser, retried once, shipped', async () => {
   const d = await draft(drafting({}), 'a memo page: type a title, add it, see it listed', { ui: true })
   const dir = writeDraft(sd, 'memo-ui-1', { ...d, classification: [{ ...CLASSIFICATION[0], id: 'add' }] })
   approve(sd, 'memo-ui-1', { by: 'test', version: hash(dir) })
