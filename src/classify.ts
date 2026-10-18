@@ -83,7 +83,8 @@ const fillOpen = (x: unknown, vars: Record<string, unknown>): unknown => {
     return names.every((n) => Object.hasOwn(vars, n)) ? fill(x, vars) : '?'
   }
   if (Array.isArray(x)) return x.map((v) => fillOpen(v, vars))
-  if (isObj(x)) return Object.fromEntries(Object.entries(x).map(([k, v]) => [k, fillOpen(v, vars)]))
+  // A key is filled as the expectation's keys are (a key with an uncaptured name stays as written).
+  if (isObj(x)) return Object.fromEntries(Object.entries(x).map(([k, v]) => { const f = fillOpen(k, vars); return [f === '?' ? k : String(f), fillOpen(v, vars)] }))
   return x
 }
 
