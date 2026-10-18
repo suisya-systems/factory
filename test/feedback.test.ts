@@ -47,6 +47,19 @@ test('scenario validation rejects malformed drafter output and value-carrying su
   assert.doesNotThrow(() => split('amounts like 10000 are fine when the steps do not use them'))
 })
 
+test('every bad summary is reported at once, each with its scenario id, the rule and the value (#31)', () => {
+  const sc = (id: string, summary: string, body: object) => ({ ...SCENARIOS[3], id, summary, steps: [{ method: 'POST', path: '/x', body, expect: { status: 201 } }] })
+  const all = [sc('a', 'fine summary', {}), sc('b', 'ann pays', { who: 'ann' }), sc('c', 'two\nlines', {}), sc('d', 'x'.repeat(201), {})]
+  try { validateScenarios(all); assert.fail('should throw') } catch (e) {
+    const m = (e as Error).message
+    assert.match(m, /3 scenario summaries rejected/)
+    assert.match(m, /scenario "b": .*concrete value .*"ann"/)
+    assert.match(m, /scenario "c": .*one line.* 2 line/)
+    assert.match(m, /scenario "d": .*201 chars/)
+    assert.doesNotMatch(m, /scenario "a"/)
+  }
+})
+
 test('combineVerdict defaults to AND; extractJson handles fenced and embedded JSON', () => {
   assert.deepEqual([combineVerdict(true, true), combineVerdict(true, false), combineVerdict(false, true)], [true, false, false])
   assert.deepEqual(extractJson('sure:\n```json\n{"pass":true}\n```'), { pass: true })
