@@ -429,3 +429,26 @@ test('redraft goes with draft only, 1 to 3 times, and no other step may draft it
   bad([{ factory: ['draft', 'a'.repeat(62)], redraft: 1 }], /bad change id/)
   parseLap(JSON.stringify({ name: 'x', steps: [{ factory: ['draft', 'a'], redraft: 1 }, { factory: ['draft', 'a-r3'] }] }))
 })
+
+test('a redraft renames neither the state dir nor an inherited name, and cannot make two steps of a group one change', async () => {
+  const dir = scratch(), req = join(dir, 'req.md'), file = join(dir, 'lap.json')
+  writeFileSync(req, 'a memo api')
+  let specCalls = 0
+  const model: Model = async (t) => t.role === 'spec-drafter'
+    ? { ok: true, text: ++specCalls <= 2 ? 'sorry' : JSON.stringify({ spec: '# Memo\n\n## Undecided\n- x\n', interface: { endpoints: ['POST /notes'] }, assumptions: [] }), costUsd: 0.1 }
+    : t.role === 'scenario-drafter' ? { ok: true, text: JSON.stringify({ scenarios: SCENARIOS, assumptions: [] }), costUsd: 0.1 } : { ok: false, text: '', costUsd: 0.1, error: 'down' }
+  delete process.env.FACTORY_HOME
+  const sd = join(dir, 'rh') // the state dir's own name is the redrafted id
+  writeFileSync(file, JSON.stringify({ name: 'laph', home: sd, steps: [
+    { factory: ['draft', 'rh', '--request', req], redraft: 1 },
+    { exec: [process.execPath, '-e', "process.exit(require('fs').existsSync(process.argv[1]) ? 0 : 1)", '{state}/vault/rh/spec.md'] },
+    { exec: [process.execPath, '-e', "process.exit(process.argv[1] === 'to' + 'String' ? 0 : 1)", 'toString'] },
+    { parallel: [{ factory: ['replicate', 'rh', '--k', '1'] }, { factory: ['replicate', 'rh-r2', '--k', '1'] }], max: 2 },
+  ] }))
+  homes.push(sd)
+  try {
+    assert.equal(await main(['lap', file], model), 1)
+    const prog = JSON.parse(readFileSync(join(sd, 'laps', 'laph', 'progress.json'), 'utf8'))
+    assert.deepEqual(Object.values(prog.steps as Record<string, { status: string }>).map((x) => x.status), ['done', 'done', 'done']) // no step of the group started
+  } finally { delete process.env.FACTORY_HOME }
+})

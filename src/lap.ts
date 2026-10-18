@@ -146,9 +146,9 @@ export async function lap(file: string, o: LapOpts, factory: (argv: string[]) =>
   const prog: Progress = existsSync(progFile) ? JSON.parse(readFileSync(progFile, 'utf8')) : { steps: {}, waiting: null }
   const save = () => { mkdirSync(dir, { recursive: true }); writeFileSync(`${progFile}.tmp`, JSON.stringify(prog, null, 2)); renameSync(`${progFile}.tmp`, progFile) }
   // A redrafted id stands for the name it was drafted as, wherever a step names it: a whole arg, or a piece of a path,
-  // a comma list or `--opt=` (`{state}/vault/<id>/spec.md`, `--score <id>,<id>`).
-  const name = (id: string) => prog.names?.[id] ?? id
-  const sub = (argv: string[]) => argv.map((a) => a.replaceAll('{state}', sd).split(/([/,=])/).map(name).join(''))
+  // a comma list or `--opt=` (`{state}/vault/<id>/spec.md`, `--score <id>,<id>`); never a piece of the state dir itself.
+  const name = (id: string) => (prog.names && Object.hasOwn(prog.names, id) ? prog.names[id] : id)
+  const sub = (argv: string[]) => argv.map((a) => a.split(/([/,=])/).map(name).join('').replaceAll('{state}', sd))
 
   // A gate's version binds the whole definition (every later step, run count and cap), each draft's version and
   // each fixed / read file's bytes. Any change after approval asks for approval again.
@@ -279,8 +279,10 @@ export async function lap(file: string, o: LapOpts, factory: (argv: string[]) =>
     if (s.parallel) {
       // The same rules per step; after the first failure (or a STOP) no step of the group starts, the running ones finish.
       const real = (t: string) => (existsSync(t) ? realpathSync(t) : resolve(t)) // two spellings of one checkout are one app
-      const targets = s.parallel.filter((t) => t.factory![0] === 'run').map((t) => real(shipTargetOf(t)!.replaceAll('{state}', sd)))
+      const group = s.parallel.map((t) => ({ ...t, factory: sub(t.factory!) })) // as they will run: a redraft may make two names one
+      const targets = group.filter((t) => t.factory[0] === 'run').map((t) => real(shipTargetOf(t)!.replaceAll('{state}', sd)))
       if (new Set(targets).size !== targets.length) { failed ||= `${at}: two runs of the group ship to the same checkout`; continue }
+      if (new Set(group.map((t) => t.factory[1])).size !== group.length) { failed ||= `${at}: two steps of the group name one change (after a redraft)`; continue }
       const todo = s.parallel.map((t, j) => [t, `${at}.${j + 1}`] as const)
       await Promise.all(Array.from({ length: Math.min(s.max!, todo.length) }, async () => { while (todo.length) await runStep(...todo.shift()!) }))
       continue
