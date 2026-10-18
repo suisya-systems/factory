@@ -150,6 +150,16 @@ test('a failed step stops the lap and is never re-run; always-steps still report
   } finally { unlinkSync(stop) }
 })
 
+// Lap 8: the report step failed once (no prereg yet) and the lap kept reporting that old failure after the builds.
+test('an always step that failed runs again on the next pass (no model call), and the lap can finish', async () => {
+  home()
+  const dir = scratch(), flag = join(dir, 'ready'), file = join(dir, 'lap.json')
+  writeFileSync(file, JSON.stringify({ name: 'lapa', steps: [{ exec: [process.execPath, '-e', "process.exit(require('fs').existsSync(process.argv[1]) ? 0 : 1)", flag], always: true }] }))
+  assert.equal(await main(['lap', file]), 1)
+  writeFileSync(flag, '')
+  assert.equal(await main(['lap', file]), 0)
+})
+
 test('a definition home sets the state dir; another FACTORY_HOME is refused', async () => {
   const dir = scratch(), file = join(dir, 'lap.json')
   writeFileSync(file, JSON.stringify({ name: 'laph', home: join(dir, 'state'), steps: [{ exec: mark(join(dir, 'm')) }] }))
@@ -314,13 +324,14 @@ test('lap 8 definition: second family first, provenance before each gate, cmp pe
   }
   for (const id of d.steps[at('entrance')].approve!) {
     const draft = d.steps.find((s) => s.factory?.[0] === 'draft' && s.factory[1] === id)!
-    const [req, fam, k] = id.split('-'), src = `${req}-${fam[0]}${fam[0]}-${k}`
+    const [req, fam, k] = id.replace(/r\d+$/, '').split('-'), src = `${req}-${fam[0]}${fam[0]}-${k}` // a redraft keeps its source
     assert.equal(draft.factory![draft.factory!.indexOf('--spec-from') + 1], src, id)
     assert.equal(draft.factory!.includes('scenario-drafter=gpt-6-astra'), fam[1] === 'x', id)
     assert.ok(d.steps.some((s) => s.exec?.[0] === 'cmp' && s.exec[1] === `{state}/vault/${src}/spec.md` && s.exec[2] === `{state}/vault/${id}/spec.md`), id)
   }
   const reps = d.steps.find((s) => s.parallel)!.parallel!
-  assert.deepEqual(reps.map((s) => [s.factory![1], s.factory![s.factory!.indexOf('--score') + 1]]).sort(),
+  assert.deepEqual(reps.map((s) => [s.factory![1], s.factory![s.factory!.indexOf('--score') + 1].replace(/r\d+$/, '')]).sort(),
     d.steps[at('specs')].approve!.map((id) => [id, id.replace(/-(cc|xx)-/, (_, f) => (f === 'cc' ? '-cx-' : '-xc-'))]).sort())
   assert.ok(reps.every((s) => s.factory![s.factory!.indexOf('--k') + 1] === '8'))
+  assert.deepEqual(reps.map((s) => s.factory![s.factory!.indexOf('--score') + 1]).sort(), [...d.steps[at('entrance')].approve!].sort()) // scored by exactly the approved sets
 })
