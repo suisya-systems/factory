@@ -146,9 +146,9 @@ export async function lap(file: string, o: LapOpts, factory: (argv: string[]) =>
   const prog: Progress = existsSync(progFile) ? JSON.parse(readFileSync(progFile, 'utf8')) : { steps: {}, waiting: null }
   const save = () => { mkdirSync(dir, { recursive: true }); writeFileSync(`${progFile}.tmp`, JSON.stringify(prog, null, 2)); renameSync(`${progFile}.tmp`, progFile) }
   // A redrafted id stands for the name it was drafted as, wherever a step names it: a whole arg, or a piece of a path,
-  // a comma list or `--opt=` (`{state}/vault/<id>/spec.md`, `--score <id>,<id>`); never a piece of the state dir itself.
+  // a comma list or `--opt=` (`{state}/vault/<id>/spec.md`, `--score <id>,<id>`); never the command itself or a piece of the state dir.
   const name = (id: string) => (prog.names && Object.hasOwn(prog.names, id) ? prog.names[id] : id)
-  const sub = (argv: string[]) => argv.map((a) => a.split(/([/,=])/).map(name).join('').replaceAll('{state}', sd))
+  const sub = (argv: string[]) => argv.map((a, i) => (i ? a.split(/([/,=])/).map(name).join('') : a).replaceAll('{state}', sd))
 
   // A gate's version binds the whole definition (every later step, run count and cap), each draft's version and
   // each fixed / read file's bytes. Any change after approval asks for approval again.
