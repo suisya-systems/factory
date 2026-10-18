@@ -56,7 +56,8 @@ export type Guard = {
 // settled (the process died mid-call, or the charge could not be written) counts in full.
 // A state dir from before #13 has lap-ledger.json (totals); it is still counted, never written.
 // counted: a call of a model priced in calls, not USD (lap 8). It holds and charges $0; every hold is one call.
-type LapLine = { call: string; role: string; hold?: number; usd?: number; byModel?: Record<string, number>; counted?: true }
+// event: a line that moves no money, so the ledger also reads as the lap's history (#32: a redraft and why).
+type LapLine = { call: string; role: string; hold?: number; usd?: number; byModel?: Record<string, number>; counted?: true; event?: string }
 const finite = (x: unknown): x is number => typeof x === 'number' && Number.isFinite(x)
 const usdOk = (x: unknown): x is number => finite(x) && x >= 0
 export function lapTotals(f: string): { totalUsd: number; byRoleModel: CostSplit; countedCalls: number } {
@@ -70,6 +71,7 @@ export function lapTotals(f: string): { totalUsd: number; byRoleModel: CostSplit
   for (const [i, l] of (existsSync(f) ? readFileSync(f, 'utf8').split('\n').filter(Boolean) : []).entries()) {
     let x: LapLine
     try { x = JSON.parse(l) } catch { throw bad(`line ${i + 1} is not JSON`) }
+    if (x?.event !== undefined) { if (typeof x.event !== 'string' || x.hold !== undefined || x.usd !== undefined) throw bad(`line ${i + 1}: an event moves no money`); continue }
     if (typeof x?.call !== 'string' || typeof x.role !== 'string' || (x.hold === undefined) === (x.usd === undefined)) throw bad(`line ${i + 1} is neither a hold nor a charge`)
     if (x.counted !== undefined && x.counted !== true) throw bad(`line ${i + 1}: bad counted mark`)
     if (x.hold !== undefined) { if (!usdOk(x.hold)) throw bad(`line ${i + 1}: bad hold`); if (x.counted) countedCalls++; held.set(x.call, x); continue }
@@ -84,6 +86,7 @@ export function lapTotals(f: string): { totalUsd: number; byRoleModel: CostSplit
 // ponytail: re-reads and sums the whole file on every call (O(lines)); a lap has hundreds of calls.
 export const lapSpent = (f: string): number => lapTotals(f).totalUsd
 const line = (f: string, l: LapLine) => appendFileSync(f, `${JSON.stringify({ at: new Date().toISOString(), ...l })}\n`) // one write: O_APPEND keeps lines whole
+export const noteLap = (f: string, event: string, o: Record<string, unknown>) => appendFileSync(f, `${JSON.stringify({ at: new Date().toISOString(), event, ...o })}\n`)
 const mark = (counted: boolean) => (counted ? { counted: true as const } : {})
 export function holdLap(f: string, usd: number, role: string, counted = false): string {
   const call = randomUUID()

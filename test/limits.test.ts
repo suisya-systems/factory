@@ -134,10 +134,12 @@ test('lap ledger: an unsettled hold and a throwing model count in full; a malfor
   g.dispose()
   near(lapSpent(lapFile), 1.2)
   assert.deepEqual(g.ledger.uncounted, [{ role: 'builder', reason: 'model threw: boom', chargedUsd: 0.5 }])
-  for (const bad of ['{"call":"x"', '{}', '{"call":"x","role":"b","usd":-5}', '{"call":"x","role":"b","usd":"1"}', '{"call":"x","role":"b","hold":1,"usd":1}']) {
+  for (const bad of ['{"call":"x"', '{}', '{"call":"x","role":"b","usd":-5}', '{"call":"x","role":"b","usd":"1"}', '{"call":"x","role":"b","hold":1,"usd":1}', '{"event":"redraft","usd":1}', '{"event":1}']) {
     writeFileSync(lapFile, `${bad}\n`)
     assert.throws(() => lapSpent(lapFile), /refusing to guess/, bad)
   }
+  writeFileSync(lapFile, '{"event":"redraft","reason":"x"}\n') // a record that moves no money (#32)
+  near(lapSpent(lapFile), 0)
   writeFileSync(join(dir, 'lap-ledger.json'), JSON.stringify({ totalUsd: 'x' })) // a pre-#13 totals file
   writeFileSync(lapFile, '')
   assert.throws(() => lapSpent(lapFile), /no valid totalUsd/)
