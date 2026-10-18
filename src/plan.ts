@@ -9,7 +9,7 @@ import type { Model } from './adapter.ts'
 import { approve, checkId, hash, loadApproved, vaultDir } from './vault.ts'
 import { ask, checkWithin, specIface } from './roles.ts'
 import { exportTree, removeTree, sandboxGit } from './sandbox.ts'
-import { isObj, runScenarios } from './scenario.ts'
+import { isObj, judgeOpts, runScenarios } from './scenario.ts'
 
 export type Part = { id: string; title: string; request: string }
 export type Plan = { plan: string; requestSha256: string; wholeId: string; parts: Part[]; changeIds: string[] }
@@ -245,7 +245,8 @@ export async function runPlan(sd: string, plan: string, o: PlanOpts, factory: (a
       const ac = new AbortController(), poll = setInterval(() => { if (stopped()) ac.abort() }, 500)
       try {
         await exportTree(target, prev, tmp, ac.signal)
-        const results = await runScenarios(tmp, loadApproved(sd, p.wholeId).scenarios, ac.signal)
+        const whole = loadApproved(sd, p.wholeId)
+        const results = await runScenarios(tmp, whole.scenarios, ac.signal, judgeOpts(whole.spec))
         if (stopped()) return report('failed', `emergency stop is active (${o.stopFile}); the whole request was not recorded`)
         writeFileSync(wf, JSON.stringify({ sha: prev, pass: results.every((r) => r.pass), results }, null, 2))
       } finally { clearInterval(poll); removeTree(tmp) }

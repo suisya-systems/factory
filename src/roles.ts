@@ -6,9 +6,10 @@ import { join } from 'node:path'
 import type { Model } from './adapter.ts'
 import { CAPS } from './limits.ts'
 import { classify, UNDECIDED } from './classify.ts'
+import { TEST_ID, UI_LIMITS, usesUi, withUi } from './browser.ts'
 import { usesService, withService } from './fake.ts'
 import { exportTree, removeTree, sandboxGit } from './sandbox.ts'
-import { isObj, runScenarios, validateScenarios, type Scenario, type ScenarioResult } from './scenario.ts'
+import { isObj, judgeOpts, runScenarios, validateScenarios, type Scenario, type ScenarioResult } from './scenario.ts'
 import type { Draft } from './vault.ts'
 
 // Each call also gets at most what is left of the change / lap caps (the guard).
@@ -31,7 +32,7 @@ export function extractJson(text: string): any {
 // interface (names and shapes only, so both use one vocabulary). Not the spec drafter's assumptions:
 // in lap 2 they carried nearly every rule of the spec (owner decision 2026-10-17: pass the interface only).
 // Then every scenario is classified by a third, spec-only procedure (classify.ts).
-export const INTERFACE_KEYS = ['endpoints', 'queryParams', 'fields', 'listShape', 'conflictToken']
+export const INTERFACE_KEYS = ['endpoints', 'queryParams', 'fields', 'listShape', 'conflictToken', 'testIds']
 
 // Lap 3 (owner decision 2026-10-17): a deliberately coarse spec, so the hidden scenarios have room to
 // check behaviour the spec does not state. The spec carries only what the request says and the interface.
@@ -75,6 +76,19 @@ const SERVICE_STEPS = `EXTERNAL SERVICE: the app calls the external service the 
   each {"method", "path" (with query), "headers" (lower-case names), "body" (parsed JSON, else text)}: use it to check what the app sent.
 Service steps before the scenario's first app step run before the app starts. The fake starts empty in every scenario.
 Use the service's API exactly as the request describes it. The summary rule covers service steps too.`
+
+// #4: only for a spec that declares a browser UI (browser.ts). The spec drafter names the elements; the scenario writer drives them.
+const UI_IFACE = `BROWSER UI: the app has pages a user works in a browser. Add "testIds": ["name", ...] to the interface: the data-testid of every element
+a page shows or a user acts on (inputs, buttons, list items, texts to read), bare names without ".". Pages are endpoints too ("GET /path").`
+const UI_STEPS = `BROWSER UI: the app's pages are judged in a headless browser. Besides HTTP steps, a step with "ui" drives the page (no method, body or headers):
+- {"ui": "goto", "path": "/<page>", "expect": {...}} opens the page; "status" is the page's HTTP status.
+- {"ui": "fill", "target": "<testId>", "text": "<what the user types>"} types into an input (replacing what is there).
+- {"ui": "click", "target": "<testId>"} clicks it. "<testId>.<n>" is the n-th visible element with that test id (0-based); a bare "<testId>" must be the only visible one.
+After a ui step its optional "expect" and "capture" read the page as JSON: {"<testId>": [the visible text of each visible element with that test id, in page order]}
+(whitespace collapsed; an input gives its value). E.g. "json": {"<testId>": ["<text>"]} (positional prefix), "length": {"<testId>": 2} (0 = none visible),
+"capture": {"name": "<testId>.0"}. The checks are retried for up to ${UI_LIMITS.settleMs / 1000} s, as the page may update after the action. A scenario may mix
+ui and HTTP steps. Use ONLY the test ids in the INTERFACE; you do not know any label or text the builder chooses, so check only texts the scenario itself entered
+or that the request fixes. The summary rule covers ui steps too.`
 
 // Lap 6 (`draft --minority`): the scenario writer picks, on purpose, reasonable answers most builders would not
 // (in lap 5 builders and scenario writers chose the same answer 16/16 times, so no retry ever happened). Each choice is
@@ -127,6 +141,7 @@ function checkInterface(raw: unknown): Record<string, unknown> {
     if (!isObj(m)) throw bad(`${k} must be an object`)
     for (const [key, names] of Object.entries(m)) { if (!re.test(key)) throw bad(`${k} key "${key}" is not a name`); list(names, NAME, `${k}["${key}"] must be a list of bare names`) }
   }
+  if (x.testIds !== undefined) list(x.testIds, TEST_ID, 'testIds must be a list of bare names without "."')
   if (x.listShape !== undefined && x.listShape !== 'bare array') list(x.listShape, NAME, 'listShape must be "bare array" or a list of key names')
   const t = x.conflictToken
   if (t !== undefined && !(isObj(t) && Object.keys(t).length === 2 && typeof t.name === 'string'
@@ -138,6 +153,7 @@ function checkInterface(raw: unknown): Record<string, unknown> {
 const flat = (x: Record<string, any>): string[] => [
   ...(x.endpoints ?? []), ...Object.entries<string[]>(x.queryParams ?? {}).flatMap(([k, ns]) => ns.map((n) => `${k}?${n}`)),
   ...Object.entries<string[]>(x.fields ?? {}).flatMap(([k, ns]) => ns.map((n) => `${k}.${n}`)),
+  ...(x.testIds ?? []).map((n: string) => `testId:${n}`),
   ...(x.listShape === undefined ? [] : [`list:${Array.isArray(x.listShape) ? [...x.listShape].sort().join(',') : x.listShape}`]), ...(x.conflictToken === undefined ? [] : [`token:${x.conflictToken.in}:${x.conflictToken.name}`]), // key order and list order do not matter
 ]
 export function checkWithin(part: Record<string, unknown>, plan: Record<string, unknown>) {
@@ -182,9 +198,10 @@ export function specIface(spec: string): string {
 // o.reuse (lap 5, `draft --spec-from`): an approved spec (body + interface) is used as is and the spec drafter is not called,
 // so several scenario sets (or a hand-edited control spec) share one spec and one interface.
 // o.service (#17, `draft --service`): the spec declares an external service (fake.ts); a reused spec that already does keeps it.
-export async function draft(model: Model, request: string, o: { signals?: string; app?: string; reuse?: { body: string; iface: string }; minority?: boolean; minorityBrief?: string; service?: boolean; iface?: string } = {}): Promise<Omit<Draft, 'base'>> {
+// o.ui (#4, `draft --ui`): the spec declares a browser UI (browser.ts), the same way.
+export async function draft(model: Model, request: string, o: { signals?: string; app?: string; reuse?: { body: string; iface: string }; minority?: boolean; minorityBrief?: string; service?: boolean; ui?: boolean; iface?: string } = {}): Promise<Omit<Draft, 'base'>> {
   const req = `REQUEST:\n${request}\n` + (o.signals ? `\nPRODUCTION SIGNALS (observed from the running app):\n${o.signals}\n` : '') + appBlock(o.app ?? '')
-  const j = o.reuse ? { spec: o.reuse.body, iface: o.reuse.iface, assumptions: ['(spec reused from an approved change; the spec drafter was not called)'] } : await ask(model, 'spec-drafter', `You are the spec drafter of a software factory. Turn the request into a spec for a builder (HTTP JSON API).\n\n${req}${o.iface ? `\nPLAN INTERFACE (fixed by the approved plan for the whole request; your interface must use only these names, spelled the same, and may leave out what this part does not touch):\n${o.iface}\n` : ''}\n${SPEC_FORMAT}`, (j) => {
+  const j = o.reuse ? { spec: o.reuse.body, iface: o.reuse.iface, assumptions: ['(spec reused from an approved change; the spec drafter was not called)'] } : await ask(model, 'spec-drafter', `You are the spec drafter of a software factory. Turn the request into a spec for a builder (HTTP JSON API${o.ui ? ' with browser pages' : ''}).\n\n${req}${o.iface ? `\nPLAN INTERFACE (fixed by the approved plan for the whole request; your interface must use only these names, spelled the same, and may leave out what this part does not touch):\n${o.iface}\n` : ''}\n${SPEC_FORMAT}${o.ui ? `\n${UI_IFACE}` : ''}`, (j) => {
     if (typeof j.spec !== 'string' || !j.spec.trim()) throw new Error('spec drafter: spec missing')
     if (!UNDECIDED.test(j.spec)) throw new Error('spec drafter: spec has no "## Undecided" section')
     const iface = checkInterface(j.interface)
@@ -193,11 +210,12 @@ export async function draft(model: Model, request: string, o: { signals?: string
   })
   const assumptions = [`Interface (names and shapes only): ${j.iface}`, ...(o.iface ? [`(plan) the interface is within the approved plan interface: ${o.iface}`] : []), ...j.assumptions]
   // The builder sees the same names the scenarios use.
-  const body = o.service ? withService(j.spec) : j.spec
+  let body = o.service ? withService(j.spec) : j.spec
+  if (o.ui) body = withUi(body)
   const spec = `${body.trimEnd()}${IFACE_HEAD}${j.iface}\n\`\`\`\n`
 
   const k = await ask(model, 'scenario-drafter', `You are the scenario writer of a software factory. Write hidden acceptance scenarios (HTTP JSON API) for the request. ` +
-    `A builder will implement a spec you do not see; your scenarios judge it.\n\n${req}\nINTERFACE (names and shapes the builder uses; it says nothing about behaviour):\n${j.iface}\n\n${SCENARIO_FORMAT}${usesService(spec) ? `\n\n${SERVICE_STEPS}` : ''}${o.minority ? minorityPrompt(o.minorityBrief) : ''}`,
+    `A builder will implement a spec you do not see; your scenarios judge it.\n\n${req}\nINTERFACE (names and shapes the builder uses; it says nothing about behaviour):\n${j.iface}\n\n${SCENARIO_FORMAT}${usesService(spec) ? `\n\n${SERVICE_STEPS}` : ''}${usesUi(spec) ? `\n\n${UI_STEPS}` : ''}${o.minority ? minorityPrompt(o.minorityBrief) : ''}`,
   (k) => {
     const scenarios = validateScenarios(k.scenarios), more = k.assumptions === undefined ? [] : strs(k.assumptions, 'scenario drafter')
     if (o.minority) checkMinority(more, scenarios)
@@ -215,8 +233,13 @@ export const RUN_CONTRACT = `RUN CONTRACT (fixed, non-negotiable):
 - Work only inside the current directory. The factory commits your work when you finish.`
 
 // #17: a spec that declares an external service lifts "no network" for that one address.
-export const runContract = (spec: string) => (usesService(spec)
-  ? RUN_CONTRACT.replace('no network at runtime.', 'no network at runtime except the external service at process.env.SERVICE_URL (see the spec).') : RUN_CONTRACT)
+// #4: a spec that declares a browser UI serves HTML pages besides its JSON.
+export function runContract(spec: string): string {
+  let c = RUN_CONTRACT
+  if (usesService(spec)) c = c.replace('no network at runtime.', 'no network at runtime except the external service at process.env.SERVICE_URL (see the spec).')
+  if (usesUi(spec)) c = c.replace('JSON request and response bodies.', 'JSON request and response bodies for the API; pages are HTML served by the app (see the spec).')
+  return c
+}
 
 // The builder gets the spec only. assumptions.json carries scenario-writer text: never pass it here.
 export async function build(model: Model, workspace: string, spec: string, feedback: string, signal?: AbortSignal): Promise<{ sha: string; ok: boolean; error?: string }> {
@@ -257,7 +280,7 @@ export async function judge(model: Model, workspace: string, sha: string, spec: 
 }
 
 async function judgeDir(model: Model, dir: string, spec: string, scenarios: Scenario[], approvedVersion: string, signal: AbortSignal): Promise<Verdict> {
-  const results = await runScenarios(dir, scenarios, signal, { service: usesService(spec) })
+  const results = await runScenarios(dir, scenarios, signal, judgeOpts(spec))
   const testsAllPass = results.every((r) => r.pass)
   const instruction = `You are the judge of a software factory. The deterministic hidden scenarios have already run. Read the code in the current directory (read-only) and decide whether it satisfies the spec as a whole. Points the spec lists under "Undecided" were left to the builder: any sensible choice satisfies the spec.\n\nSPEC:\n${spec}\n\nSCENARIOS:\n${JSON.stringify(scenarios)}\n\nRESULTS:\n${JSON.stringify(results)}\n\nReply with ONE JSON object: {"pass": true|false, "reason": "..."}`
   let r
