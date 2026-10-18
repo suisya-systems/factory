@@ -38,7 +38,7 @@ const require = createRequire(import.meta.url)
 const REV = JSON.parse(readFileSync(join(dirname(require.resolve('playwright-core/package.json')), 'browsers.json'), 'utf8'))
   .browsers.find((b: { name: string }) => b.name === 'chromium-headless-shell').revision as string
 export const BROWSER_DIR = join(process.env.PLAYWRIGHT_BROWSERS_PATH || join(HOME, '.cache', 'ms-playwright'), `chromium_headless_shell-${REV}`)
-const EXE = join(BROWSER_DIR, 'chrome-headless-shell-linux64', 'chrome-headless-shell')
+export const EXE = join(BROWSER_DIR, 'chrome-headless-shell-linux64', 'chrome-headless-shell')
 
 // Inside the browser's sandbox: 127.0.0.1:<port> -> frames on fd 6, frames from fd 5 -> those connections (len 0 closes
 // an id). The ready file (in the sandbox's own /tmp) lets Chromium start only once the listener is up.
