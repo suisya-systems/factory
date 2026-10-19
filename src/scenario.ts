@@ -147,13 +147,20 @@ export function checkStep(st: Step, status: number, json: unknown, vars: Record<
   return null
 }
 
-async function send(port: number, st: Omit<Step, 'expect'>, vars: Record<string, unknown>, signal: AbortSignal) {
+// The request exactly as it is sent (the approval summary shows the same object): path and body after
+// placeholder substitution, headers with the default content-type applied.
+export function buildRequest(st: Omit<Step, 'expect'>, vars: Record<string, unknown>) {
   const path = fill(st.path, vars) as string
   const body = st.body === undefined ? undefined : JSON.stringify(fill(st.body, vars))
   // Header names are case-insensitive: a scenario's own "Content-Type" replaces the default, never joins it
   // (a plain-object merge sent "application/json, application/json").
   const headers = new Headers(fill(st.headers ?? {}, vars) as Record<string, string>)
   if (body && !headers.has('content-type')) headers.set('content-type', 'application/json')
+  return { method: st.method, path, body, headers }
+}
+
+async function send(port: number, st: Omit<Step, 'expect'>, vars: Record<string, unknown>, signal: AbortSignal) {
+  const { path, body, headers } = buildRequest(st, vars)
   const res = await fetch(`http://127.0.0.1:${port}${path}`, {
     method: st.method, body, headers,
     redirect: 'manual', // judge the tested endpoint's own response, never a redirect target

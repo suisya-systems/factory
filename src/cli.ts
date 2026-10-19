@@ -12,6 +12,7 @@ import { approvePlan, assertIdsFree, derivedIds, isPlan, planDir, runPlan, split
 import { replicate, tally } from './replicate.ts'
 import { runChange } from './run.ts'
 import { UNDECIDED, type Classification } from './classify.ts'
+import { buildRequest, isObj, type Scenario } from './scenario.ts'
 import { exportTree, removeTree, sandboxGit } from './sandbox.ts'
 import { observe, serve } from './serve.ts'
 import { watch } from './watch.ts'
@@ -96,6 +97,31 @@ export async function appSnapshot(repo: string): Promise<{ sha: string; text: st
 const SELF = (inSpec: boolean) => (inSpec ? 'stated' : 'unstated')
 const labelOf = (c: Classification | undefined) => (c ? (c.label === 'readable' ? `readable (${c.basis})` : c.label) : 'unknown')
 
+// Header values that may carry a secret are not printed (names only).
+const SECRET_HEADER = /authorization|cookie|token|key|secret/i
+const BODY_MAX = 600
+const keysOf = (x: unknown): string[] => (Array.isArray(x) ? x.flatMap(keysOf) : isObj(x) ? Object.entries(x).flatMap(([k, v]) => [k, ...keysOf(v)]) : [])
+// Each step as the runner will send it (same buildRequest). Values captured from earlier responses are not known yet: they show as <name>.
+export function requestLines(s: Scenario): string[] {
+  const vars: Record<string, unknown> = {}
+  return s.steps.flatMap((st, i) => {
+    let out: string[]
+    if (st.ui || st.service) out = [st.ui ? `ui ${st.ui} ${st.target ?? st.path ?? ''}${st.text !== undefined ? ` text=${JSON.stringify(st.text)}` : ''}` : `service ${st.method} ${st.path}`]
+    else {
+      try {
+        const r = buildRequest(st, vars)
+        const h = [...r.headers].map(([k, v]) => (SECRET_HEADER.test(k) ? `${k}: <hidden>` : `${k}: ${v}`))
+        let b = r.body ?? 'none'
+        if (b.length > BODY_MAX) b = `${b.slice(0, BODY_MAX)}... (truncated, ${b.length} chars)`
+        const bodyKeys = r.body === undefined ? [] : [...new Set(keysOf(JSON.parse(r.body)))]
+        out = [`${r.method} ${r.path}`, `  headers: ${h.join('; ') || 'none'}`, `  body: ${b}${bodyKeys.length ? ` (keys: ${bodyKeys.join(', ')})` : ''}`]
+      } catch (e) { out = [`${st.method} ${st.path}`, `  (cannot build: ${(e as Error).message})`] }
+    }
+    for (const n of Object.keys(st.capture ?? {})) vars[n] = `<${n}>`
+    return [`${i + 1}. ${out[0]}`, ...out.slice(1)]
+  })
+}
+
 export function approvalSummary(id: string, d: Draft, version: string): string {
   const counts: Record<string, { inSpec: number; notInSpec: number }> = {}
   for (const s of d.scenarios) {
@@ -133,6 +159,8 @@ export function approvalSummary(id: string, d: Draft, version: string): string {
     `### (a) The spec says otherwise (${contra.length})`, ...(contra.length ? contra : ['- none']), '',
     `### (b) The scenario requires what the spec does not determine (${silent.length})`, ...(silent.length ? silent : ['- none']), '',
     `## Assumptions (${d.assumptions.length})`, ...d.assumptions.map((a) => `- ${a}`), '',
+    '## Requests as the factory will send them (placeholders filled; <name> = captured from an earlier response; secret-looking header values hidden)', '',
+    ...d.scenarios.flatMap((s) => [`### ${s.id}`, '```', ...requestLines(s), '```', '']),
     '## Scenario bodies (for the approver only; never shown to the builder)', '```json', JSON.stringify(d.scenarios, null, 2), '```', '',
     '## Classifier predictions (per scenario and step)', '```json', JSON.stringify(d.classification ?? [], null, 2), '```', '',
   ].join('\n')
