@@ -168,15 +168,16 @@ export function spawnApp(appDir: string, port: number, dataDir: string, stdio: S
   const pipe = app.stdio[3] as net.Socket
   const conns = new Map<number, Duplex>()
   const opened = new Set<number>() // reverse ids already handed to the fake: a late frame never reopens one
-  let next = 1, started = false, listening = false
+  let next = 1, listening = false
   const tcp = net.createServer((c) => {
+    if (!listening) return void c.destroy() // bound early to hold the port; the app does not accept yet
     const id = next++
     conns.set(id, c)
     c.on('data', (d) => pipe.write(frame(id, d))).on('error', () => {}).on('close', () => { if (conns.delete(id)) pipe.write(frame(id)) })
   })
   pipe.on('error', () => {}).on('data', frameReader((id, d) => {
     if (id === 0) {
-      if (!started) { started = true; tcp.listen(port, '127.0.0.1', () => { listening = true }) }
+      if (tcp.listening) listening = true
       return
     }
     if (id >= REVERSE && service && d.length && !opened.has(id)) {
@@ -200,6 +201,9 @@ export function spawnApp(appDir: string, port: number, dataDir: string, stdio: S
   }
   app.once('exit', close).once('error', close)
   tcp.on('error', () => killTree(app, 500)) // e.g. port taken meanwhile: waitPort then sees the app exit
+  // Bind now, not when the app is ready: freePort() only found the port free, and the app takes seconds to start,
+  // long enough for another run's freePort() to be handed the same port (the bridge then lost the bind and killed the app).
+  tcp.listen(port, '127.0.0.1')
   bridged.set(app, () => listening)
   return app
 }
