@@ -168,7 +168,7 @@ export function spawnApp(appDir: string, port: number, dataDir: string, stdio: S
   const pipe = app.stdio[3] as net.Socket
   const conns = new Map<number, Duplex>()
   const opened = new Set<number>() // reverse ids already handed to the fake: a late frame never reopens one
-  let next = 1, listening = false
+  let next = 1, listening = false, bindFailed = false
   const tcp = net.createServer((c) => {
     if (!listening) return void c.destroy() // bound early to hold the port; the app does not accept yet
     const id = next++
@@ -177,7 +177,8 @@ export function spawnApp(appDir: string, port: number, dataDir: string, stdio: S
   })
   pipe.on('error', () => {}).on('data', frameReader((id, d) => {
     if (id === 0) {
-      if (tcp.listening) listening = true
+      if (bindFailed) killTree(app, 500)
+      else listening = true
       return
     }
     if (id >= REVERSE && service && d.length && !opened.has(id)) {
@@ -200,7 +201,10 @@ export function spawnApp(appDir: string, port: number, dataDir: string, stdio: S
     pipe.destroy()
   }
   app.once('exit', close).once('error', close)
-  tcp.on('error', () => killTree(app, 500)) // e.g. port taken meanwhile: waitPort then sees the app exit
+  // Port taken: the app is stopped once it signals ready, not on the spot. Killing the sandbox while bwrap is still
+  // setting up can orphan its inner process, which then holds the stderr pipe and keeps the factory process alive.
+  // waitPort then sees the app exit.
+  tcp.on('error', () => { bindFailed = true })
   // Bind now, not when the app is ready: freePort() only found the port free, and the app takes seconds to start,
   // long enough for another run's freePort() to be handed the same port (the bridge then lost the bind and killed the app).
   tcp.listen(port, '127.0.0.1')
