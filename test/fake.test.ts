@@ -12,7 +12,7 @@ import { draft, RUN_CONTRACT, runContract } from '../src/roles.ts'
 import type { Replicate } from '../src/replicate.ts'
 import { runChange } from '../src/run.ts'
 import { freePort } from '../src/sandbox.ts'
-import { runScenario, runScenarios, validateScenarios, type Scenario, type Step } from '../src/scenario.ts'
+import { BODY_MAX, runScenario, runScenarios, validateScenarios, type Scenario, type Step } from '../src/scenario.ts'
 import { stopServer } from '../src/ship.ts'
 import { approve, hash, vaultDir, writeDraft } from '../src/vault.ts'
 import { CLASSIFICATION, freshState, gitTarget, tmp, writeApp } from './helpers.ts'
@@ -288,7 +288,28 @@ fetch(S + '/config').then((x) => x.status === 200 ? x.json() : { mode: 'none' },
     { 'lap-own': [['a-boot', true], ['a-convert', false]], 'lap-cross': [['b-unset', true], ['b-convert', false]] },
   ], JSON.stringify(rs.map((r) => r.results)))
   assert.deepEqual(rs[1].results['lap-own'][1].failedStep, 3)
+  // #45: a failed service step keeps what the app sent the fake
+  assert.equal(rs[1].results['lap-own'][1].detail, 'step 3: response body did not match expected subset; the fake received 2 request(s)\n  1. GET /config body: none\n  2. GET /rates/eur body: none')
   assert.equal(await main(['replicate', 'lap-own', '--rescore', '--score', 'lap-cross'], model), 0)
   assert.equal(builds, 2) // no build on rescore
   assert.deepEqual(read().map((r) => r.results), rs.map((r) => r.results))
+})
+
+// #45: the fake's log is kept in the detail of a failed service step (bodies cut like the approval summary),
+// and the detail stays out of the builder's feedback (roles.ts: feedbackFor is the only path).
+test('a failed service step keeps the fake log in its detail; the next builder attempt never sees it', async () => {
+  const noisy = RATES_APP.replace(`const x = await fetch(S + '/rates/'`, `await fetch(S + '/audit', { method: 'POST', body: JSON.stringify({ pad: 'canary-${'x'.repeat(BODY_MAX)}' }) }); const x = await fetch(S + '/rates/'`)
+  const dir = writeDraft(sd, 'rates-2', { spec: withService('# Rates\n- GET /convert/{currency}?amount=N\n'), scenarios: [CONVERT], assumptions: [], classification: [{ ...CLASSIFICATION[0], id: 'convert' }] })
+  approve(sd, 'rates-2', { by: 'test', version: hash(dir) })
+  const seen: string[] = []
+  const model: Model = async (t) => {
+    if (t.role === 'builder') { seen.push(t.instruction); writeApp(t.workdir, seen.length === 1 ? noisy : RATES_APP); return { ok: true, text: 'built', costUsd: 0.1 } }
+    return { ok: true, text: '{"pass": true, "reason": "ok"}', costUsd: 0.1 }
+  }
+  const r = await runChange({ changeId: 'rates-2', shipTarget: gitTarget(), model, stateDir: sd, port: await freePort(), stopFile: join(sd, 'NOSTOP'), trafficBase: '/env' })
+  assert.equal(r.status, 'shipped', r.stopReason)
+  const d = r.attempts[0].results[0].detail
+  assert.match(d, /^step 3: expected length 1, got 2; the fake received 2 request\(s\)\n  1\. POST \/audit body: \{"pad":"canary-x+\.\.\. \(truncated, \d+ chars\)\n  2\. GET \/rates\/eur body: none$/)
+  assert.match(seen[1], /YOUR PREVIOUS ATTEMPT WAS REJECTED/)
+  for (const lit of ['canary', '/audit', '/rates/eur', 'the fake received']) assert.ok(!seen[1].includes(lit), `builder saw ${lit}`)
 })

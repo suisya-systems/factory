@@ -159,6 +159,17 @@ export function buildRequest(st: Omit<Step, 'expect'>, vars: Record<string, unkn
   return { method: st.method, path, body, headers }
 }
 
+// A body as the approval summary shows it: past BODY_MAX chars it is cut, and the cut is said.
+export const BODY_MAX = 600
+export const clip = (b: string) => (b.length > BODY_MAX ? `${b.slice(0, BODY_MAX)}... (truncated, ${b.length} chars)` : b)
+
+// #45: what the app sent the fake, for the detail of a failed service step (the fake goes with the scenario).
+// Method, path and body only; the detail never reaches a builder (roles.ts: feedbackFor).
+function fakeLog(fake: Fake): string {
+  const log = fake.control('GET', '/requests', undefined).json as { method: string; path: string; body: unknown }[]
+  return `; the fake received ${log.length} request(s)${log.map((r, i) => `\n  ${i + 1}. ${r.method} ${r.path} body: ${r.body === undefined ? 'none' : clip(typeof r.body === 'string' ? r.body : JSON.stringify(r.body))}`).join('')}`
+}
+
 async function send(port: number, st: Omit<Step, 'expect'>, vars: Record<string, unknown>, signal: AbortSignal) {
   const { path, body, headers } = buildRequest(st, vars)
   const res = await fetch(`http://127.0.0.1:${port}${path}`, {
@@ -211,10 +222,10 @@ async function runSteps(port: number, steps: Step[], from: number, vars: Record<
         const { res, json } = await send(port, st, vars, signal)
         failed = checkStep(st, res.status, json, vars, res.headers)
       }
-      if (failed) return { failedStep: n, detail: `step ${n}: ${failed}` }
+      if (failed) return { failedStep: n, detail: `step ${n}: ${failed}${st.service ? fakeLog(fake!) : ''}` }
     } catch (err) {
       if (signal.aborted) throw err
-      return { failedStep: n, detail: `step ${n}: ${(err as Error).message}` }
+      return { failedStep: n, detail: `step ${n}: ${(err as Error).message}${st.service && fake ? fakeLog(fake) : ''}` }
     }
   }
   return { detail: 'ok' }
