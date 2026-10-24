@@ -12,7 +12,7 @@ import { approvePlan, assertIdsFree, derivedIds, isPlan, planDir, runPlan, split
 import { replicate, tally } from './replicate.ts'
 import { runChange } from './run.ts'
 import { UNDECIDED, type Classification } from './classify.ts'
-import { buildRequest, fill, isObj, type Scenario } from './scenario.ts'
+import { buildRequest, clip, fill, isObj, type Scenario } from './scenario.ts'
 import { CONTROL } from './fake.ts'
 import { exportTree, removeTree, sandboxGit } from './sandbox.ts'
 import { observe, serve } from './serve.ts'
@@ -100,9 +100,7 @@ const labelOf = (c: Classification | undefined) => (c ? (c.label === 'readable' 
 
 // Header values that may carry a secret are not printed (names only).
 const SECRET_HEADER = /authorization|cookie|token|key|secret/i
-const BODY_MAX = 600
 const keysOf = (x: unknown): string[] => (Array.isArray(x) ? x.flatMap(keysOf) : isObj(x) ? Object.entries(x).flatMap(([k, v]) => [k, ...keysOf(v)]) : [])
-const clip = (b: string) => (b.length > BODY_MAX ? `${b.slice(0, BODY_MAX)}... (truncated, ${b.length} chars)` : b)
 const headerList = (h: Iterable<[string, string]>) => [...h].map(([k, v]) => (SECRET_HEADER.test(k) ? `${k}: <hidden>` : `${k}: ${v}`)).join('; ') || 'none'
 const bodyLine = (b: string | undefined) => {
   const k = b === undefined ? [] : [...new Set(keysOf(JSON.parse(b)))]

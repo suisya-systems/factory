@@ -2,17 +2,19 @@
 // app (over its loopback only), and by nothing else: no builder, no other process, never with the scenario side.
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { readdirSync, readFileSync, readlinkSync } from 'node:fs'
+import { readdirSync, readFileSync, readlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Model } from '../src/adapter.ts'
 import { classifyReply, predictInstruction } from '../src/classify.ts'
+import { main } from '../src/cli.ts'
 import { FAKE_LIMITS, startFake, usesService, withService } from '../src/fake.ts'
 import { draft, RUN_CONTRACT, runContract } from '../src/roles.ts'
+import type { Replicate } from '../src/replicate.ts'
 import { runChange } from '../src/run.ts'
 import { freePort } from '../src/sandbox.ts'
-import { runScenario, runScenarios, validateScenarios, type Scenario, type Step } from '../src/scenario.ts'
+import { BODY_MAX, runScenario, runScenarios, validateScenarios, type Scenario, type Step } from '../src/scenario.ts'
 import { stopServer } from '../src/ship.ts'
-import { approve, hash, writeDraft } from '../src/vault.ts'
+import { approve, hash, vaultDir, writeDraft } from '../src/vault.ts'
 import { CLASSIFICATION, freshState, gitTarget, tmp, writeApp } from './helpers.ts'
 
 const sd = freshState()
@@ -240,4 +242,82 @@ test('sequential connections that finished do not count as open', async () => {
     { service: true, method: 'GET', path: '/requests', expect: { length: FAKE_LIMITS.connections + 5 } },
   ]), never, { service: true })
   assert.equal(r.pass, true, r.detail)
+})
+
+// #44: the lap path. `draft --service` makes one set, `draft --spec-from` a second one (another drafter), and
+// `replicate --score` judges every build with both, each set against the fake (judgeOpts of the shared spec).
+test('replicate --score: both sets of a service spec are judged against a fresh fake per scenario; --rescore agrees', async () => {
+  // Reads its configuration from the service at startup; build 2 forgets the API key.
+  const LAP_APP = `
+const http = require('node:http')
+const S = process.env.SERVICE_URL
+fetch(S + '/config').then((x) => x.status === 200 ? x.json() : { mode: 'none' }, () => ({ mode: 'down' })).then((cfg) => http.createServer(async (q, r) => {
+  const send = (s, b) => { r.writeHead(s, { 'content-type': 'application/json' }); r.end(JSON.stringify(b)) }
+  if (q.url === '/mode') return send(200, cfg)
+  const m = q.url.match(/^\\/convert\\/(\\w+)\\?amount=(\\d+)$/)
+  if (!m) return send(404, {})
+  const x = await fetch(S + '/rates/' + m[1], { headers: { 'x-api-key': 'k1' } })
+  if (x.status !== 200) return send(502, { upstream: x.status })
+  send(200, { amount: Number(m[2]) * (await x.json()).rate })
+}).listen(Number(process.env.PORT), '127.0.0.1'))`
+  const setConfig: Step = { service: true, method: 'POST', path: '/responses', body: { method: 'GET', path: '/config', status: 200, json: { mode: 'blue' } }, expect: { status: 204 } }
+  const own = (key: unknown): Step => ({ service: true, method: 'GET', path: '/requests', expect: { length: 2, json: [{ method: 'GET', path: '/config' }, { method: 'GET', path: '/rates/eur', headers: key }] } })
+  const setA = [
+    { ...sc('a-boot', [setConfig, { method: 'GET', path: '/mode', expect: { json: { mode: 'blue' } } }]), summary: 'the app uses the configuration the service gives at startup' },
+    { ...sc('a-convert', [setRate(3), { method: 'GET', path: '/convert/eur?amount=5', expect: { status: 200, json: { amount: 15 } } }, own({ 'x-api-key': 'k1' })]), summary: 'an amount is converted with what the service answers' },
+  ]
+  const setB = [ // what set A set or recorded is not seen here
+    { ...sc('b-unset', [{ method: 'GET', path: '/mode', expect: { json: { mode: 'none' } } }, { method: 'GET', path: '/convert/eur?amount=5', expect: { status: 502, json: { upstream: 404 } } }, own({})]), summary: 'with nothing set on the service the app falls back' },
+    { ...sc('b-convert', [setRate(2), { method: 'GET', path: '/convert/eur?amount=4', expect: { status: 200, json: { amount: 8 } } }, own({ 'x-api-key': 'k1' })]), summary: 'a converted amount follows what the service answers' },
+  ]
+  let set = setA, builds = 0
+  const model: Model = async (t) => {
+    if (t.role === 'builder') { writeApp(t.workdir, ++builds === 2 ? LAP_APP.replace(`{ 'x-api-key': 'k1' }`, '{}') : LAP_APP); return { ok: true, text: 'built', costUsd: 0 } }
+    const text = t.role === 'spec-drafter' ? JSON.stringify({ spec: '# Rates\n- GET /convert/{currency}?amount=N\n- GET /mode\n\n## Undecided\n- rounding\n', interface: { endpoints: ['GET /convert/{currency}', 'GET /mode'] }, assumptions: [] })
+      : t.role === 'scenario-drafter' ? JSON.stringify({ scenarios: set, assumptions: [] }) : null
+    return text ? { ok: true, text, costUsd: 0 } : { ok: false, text: '', costUsd: 0, error: 'classifier down' }
+  }
+  const req = join(sd, 'lap-req.md')
+  writeFileSync(req, 'convert amounts with the rates service; the mode comes from the service')
+  const draftOk = async (argv: string[]) => {
+    assert.equal(await main(['draft', ...argv, '--request', req], model), 0)
+    approve(sd, argv[0], { by: 'test', version: hash(vaultDir(sd, argv[0])) })
+  }
+  await draftOk(['lap-own', '--service'])
+  set = setB
+  await draftOk(['lap-cross', '--spec-from', 'lap-own'])
+  assert.equal(await main(['replicate', 'lap-own', '--k', '2', '--score', 'lap-cross'], model), 0)
+  const dir = join(sd, 'runs', 'lap-own', 'replicates')
+  const read = () => readdirSync(dir).sort().map((f) => JSON.parse(readFileSync(join(dir, f), 'utf8')) as Replicate)
+  const rs = read()
+  const pass = (r: Replicate) => Object.fromEntries(Object.entries(r.results).map(([cid, x]) => [cid, x.map((s) => [s.id, s.pass])]))
+  assert.deepEqual(rs.map(pass), [
+    { 'lap-own': [['a-boot', true], ['a-convert', true]], 'lap-cross': [['b-unset', true], ['b-convert', true]] },
+    { 'lap-own': [['a-boot', true], ['a-convert', false]], 'lap-cross': [['b-unset', true], ['b-convert', false]] },
+  ], JSON.stringify(rs.map((r) => r.results)))
+  assert.deepEqual(rs[1].results['lap-own'][1].failedStep, 3)
+  // #45: a failed service step keeps what the app sent the fake
+  assert.equal(rs[1].results['lap-own'][1].detail, 'step 3: response body did not match expected subset; the fake received 2 request(s)\n  1. GET /config body: none\n  2. GET /rates/eur body: none')
+  assert.equal(await main(['replicate', 'lap-own', '--rescore', '--score', 'lap-cross'], model), 0)
+  assert.equal(builds, 2) // no build on rescore
+  assert.deepEqual(read().map((r) => r.results), rs.map((r) => r.results))
+})
+
+// #45: the fake's log is kept in the detail of a failed service step (bodies cut like the approval summary),
+// and the detail stays out of the builder's feedback (roles.ts: feedbackFor is the only path).
+test('a failed service step keeps the fake log in its detail; the next builder attempt never sees it', async () => {
+  const noisy = RATES_APP.replace(`const x = await fetch(S + '/rates/'`, `await fetch(S + '/audit', { method: 'POST', body: JSON.stringify({ pad: 'canary-${'x'.repeat(BODY_MAX)}' }) }); const x = await fetch(S + '/rates/'`)
+  const dir = writeDraft(sd, 'rates-2', { spec: withService('# Rates\n- GET /convert/{currency}?amount=N\n'), scenarios: [CONVERT], assumptions: [], classification: [{ ...CLASSIFICATION[0], id: 'convert' }] })
+  approve(sd, 'rates-2', { by: 'test', version: hash(dir) })
+  const seen: string[] = []
+  const model: Model = async (t) => {
+    if (t.role === 'builder') { seen.push(t.instruction); writeApp(t.workdir, seen.length === 1 ? noisy : RATES_APP); return { ok: true, text: 'built', costUsd: 0.1 } }
+    return { ok: true, text: '{"pass": true, "reason": "ok"}', costUsd: 0.1 }
+  }
+  const r = await runChange({ changeId: 'rates-2', shipTarget: gitTarget(), model, stateDir: sd, port: await freePort(), stopFile: join(sd, 'NOSTOP'), trafficBase: '/env' })
+  assert.equal(r.status, 'shipped', r.stopReason)
+  const d = r.attempts[0].results[0].detail
+  assert.match(d, /^step 3: expected length 1, got 2; the fake received 2 request\(s\)\n  1\. POST \/audit body: \{"pad":"canary-x+\.\.\. \(truncated, \d+ chars\)\n  2\. GET \/rates\/eur body: none$/)
+  assert.match(seen[1], /YOUR PREVIOUS ATTEMPT WAS REJECTED/)
+  for (const lit of ['canary', '/audit', '/rates/eur', 'the fake received']) assert.ok(!seen[1].includes(lit), `builder saw ${lit}`)
 })
