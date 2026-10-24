@@ -80,8 +80,11 @@ export function validateScenarios(x: unknown): Scenario[] {
       if (e.isArray !== undefined && typeof e.isArray !== 'boolean') throw new Error(`${ws}: bad expect.isArray`)
       if (e.length !== undefined && !(Number.isInteger(e.length) || (isObj(e.length) && Object.keys(e.length).length > 0 && Object.values(e.length).every(Number.isInteger)))) throw new Error(`${ws}: bad expect.length`)
       // The summary is the only thing the builder may see on failure: it must not carry concrete values.
-      // A service step's body is the fake's canned answer: its keys are scenario data too.
-      const lits = [(st.path ?? '').split('?')[0].replace(/\{\{\w+\}\}/g, ''), ...strings(st.text), ...strings(st.body), ...strings(e.json), ...strings(st.headers), ...(st.service ? objKeys(st.body) : [])]
+      // A service set step's body is the control envelope {method, path, status, json?, headers?}: only the canned
+      // answer in it (json and headers, keys too, and the path) is scenario data; the envelope keys and method are not (#42).
+      const bare = (p: unknown) => (typeof p === 'string' ? [p.split('?')[0].replace(/\{\{\w+\}\}/g, '')] : [])
+      const canned = st.service && isObj(st.body) ? [st.body.json, st.body.headers] : []
+      const lits = [...bare(st.path), ...strings(st.text), ...(st.service ? [...(isObj(st.body) ? bare(st.body.path) : []), ...strings(canned), ...objKeys(canned)] : strings(st.body)), ...strings(e.json), ...strings(st.headers)]
         .filter((v) => v.length >= 3 && v !== '/').map((v) => v.toLowerCase())
       const leaked = lits.find((v) => s.summary.toLowerCase().includes(v))
         ?? [e.status ?? [], ...numbers(st.body), ...numbers(e.json)].flat().find((c: number) => Math.abs(c) >= 100 && new RegExp(`(?<!\\d)${c}(?!\\d)`).test(s.summary))
