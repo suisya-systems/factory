@@ -12,7 +12,8 @@ import { approvePlan, assertIdsFree, derivedIds, isPlan, planDir, runPlan, split
 import { replicate, tally } from './replicate.ts'
 import { runChange } from './run.ts'
 import { UNDECIDED, type Classification } from './classify.ts'
-import { buildRequest, clip, isObj, type Scenario } from './scenario.ts'
+import { buildRequest, clip, fill, isObj, type Scenario } from './scenario.ts'
+import { CONTROL } from './fake.ts'
 import { exportTree, removeTree, sandboxGit } from './sandbox.ts'
 import { observe, serve } from './serve.ts'
 import { watch } from './watch.ts'
@@ -100,20 +101,30 @@ const labelOf = (c: Classification | undefined) => (c ? (c.label === 'readable' 
 // Header values that may carry a secret are not printed (names only).
 const SECRET_HEADER = /authorization|cookie|token|key|secret/i
 const keysOf = (x: unknown): string[] => (Array.isArray(x) ? x.flatMap(keysOf) : isObj(x) ? Object.entries(x).flatMap(([k, v]) => [k, ...keysOf(v)]) : [])
+const headerList = (h: Iterable<[string, string]>) => [...h].map(([k, v]) => (SECRET_HEADER.test(k) ? `${k}: <hidden>` : `${k}: ${v}`)).join('; ') || 'none'
+const bodyLine = (b: string | undefined) => {
+  const k = b === undefined ? [] : [...new Set(keysOf(JSON.parse(b)))]
+  return `  body: ${clip(b ?? 'none')}${k.length ? ` (keys: ${k.join(', ')})` : ''}`
+}
 // Each step as the runner will send it (same buildRequest). Values captured from earlier responses are not known yet: they show as <name>.
+// A service step shows what the fake will answer (set) or what is checked against the requests it recorded (#43).
 export function requestLines(s: Scenario): string[] {
   const vars: Record<string, unknown> = {}
   return s.steps.flatMap((st, i) => {
     let out: string[]
-    if (st.ui || st.service) out = [st.ui ? `ui ${st.ui} ${st.target ?? st.path ?? ''}${st.text !== undefined ? ` text=${JSON.stringify(st.text)}` : ''}` : `service ${st.method} ${st.path}`]
+    if (st.ui) out = [`ui ${st.ui} ${st.target ?? st.path ?? ''}${st.text !== undefined ? ` text=${JSON.stringify(st.text)}` : ''}`]
+    else if (st.service && `${st.method} ${st.path.split('?')[0]}` === CONTROL.list) out = ['service requests', `  expect: ${clip(JSON.stringify(st.expect))}`]
     else {
       try {
-        const r = buildRequest(st, vars)
-        const h = [...r.headers].map(([k, v]) => (SECRET_HEADER.test(k) ? `${k}: <hidden>` : `${k}: ${v}`))
-        const b = clip(r.body ?? 'none')
-        const bodyKeys = r.body === undefined ? [] : [...new Set(keysOf(JSON.parse(r.body)))]
-        out = [`${r.method} ${r.path}`, `  headers: ${h.join('; ') || 'none'}`, `  body: ${b}${bodyKeys.length ? ` (keys: ${bodyKeys.join(', ')})` : ''}`]
-      } catch (e) { out = [`${st.method} ${st.path}`, `  (cannot build: ${(e as Error).message})`] }
+        if (st.service) {
+          const b = fill(st.body, vars) as Record<string, any>
+          const h = Object.entries(b.headers ?? {}) as [string, string][]
+          out = [`service set ${b.method} ${b.path} -> ${b.status}`, `  headers: ${headerList(h)}`, bodyLine(b.json === undefined ? undefined : JSON.stringify(b.json))]
+        } else {
+          const r = buildRequest(st, vars)
+          out = [`${r.method} ${r.path}`, `  headers: ${headerList(r.headers)}`, bodyLine(r.body)]
+        }
+      } catch (e) { out = [`${st.service ? 'service ' : ''}${st.method} ${st.path}`, `  (cannot build: ${(e as Error).message})`] }
     }
     for (const n of Object.keys(st.capture ?? {})) vars[n] = `<${n}>`
     return [`${i + 1}. ${out[0]}`, ...out.slice(1)]

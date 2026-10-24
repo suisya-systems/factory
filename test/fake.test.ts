@@ -134,6 +134,14 @@ test('service steps: only the two control forms, and the summary must not carry 
   assert.throws(() => one({ ...setRate(3), service: false as unknown as true }), /a service step is/)
   const keyed: Step = { ...setRate(3), body: { method: 'GET', path: '/x', status: 200, json: { 'secret-canary-key': true } } }
   assert.throws(() => one(keyed, 'secret-canary-key is passed on'), /summary contains a concrete value/)
+  // #42: the envelope keys and the method are not canned data; the canned json, headers and path are.
+  // (The issue's json was {rate: 151}; "from the rate" then rightly hits the canned key "rate", so another key here.)
+  const rates = (method: string): Step => ({ ...setRate(3), body: { method, path: '/rates', status: 200, json: { value: 151 }, headers: { 'x-quota': 'left-few' } } })
+  for (const [m, summary] of [['GET', 'a failed service status gives an error'], ['GET', 'each method of payment is quoted'],
+    ['GET', 'the target currency comes from the service'], ['PUT', 'the converted amount is computed from the rate']])
+    assert.doesNotThrow(() => one(rates(m), summary), summary)
+  for (const leak of ['the value is used', 'the /rates answer is used', 'x-quota is ignored', 'left-few is ignored'])
+    assert.throws(() => one(rates('GET'), leak), /summary contains a concrete value/, leak)
 })
 
 test('the declaration lives in the spec: idempotent, and it lifts "no network" for SERVICE_URL only', () => {
