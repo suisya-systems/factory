@@ -32,3 +32,14 @@ test('approval summary carries the section', () => {
   const s = approvalSummary('x', { spec: '# S', scenarios: [sc([{ method: 'GET', path: '/n', ...ex }], 'one')], assumptions: [] }, 'v')
   assert.match(s, /## Requests as the factory will send them[\s\S]*### one\n```\n1\. GET \/n/)
 })
+
+test('#43: a service set step shows the canned answer; a requests step shows what it checks', () => {
+  const l = requestLines(sc([
+    { method: 'POST', path: '/items', body: { n: 1 }, capture: { id: 'id' }, ...ex },
+    { service: true, method: 'POST', path: '/responses', body: { method: 'GET', path: '/rates/{{id}}', status: 503, json: { rate: 'z'.repeat(2000) }, headers: { 'Retry-After': '5', 'X-Api-Key': 'k9' } }, expect: { status: 204 } },
+    { service: true, method: 'GET', path: '/requests', expect: { length: 1, json: [{ path: '/rates/<id>?b=2&a=1', headers: { 'x-api-key': 'k1' } }] } },
+  ])).join('\n')
+  assert.match(l, /2\. service set GET \/rates\/<id> -> 503\n  headers: Retry-After: 5; X-Api-Key: <hidden>\n  body: \{"rate":"z+\.\.\. \(truncated, \d+ chars\) \(keys: rate\)/)
+  assert.doesNotMatch(l, /k9/)
+  assert.match(l, /3\. service requests\n  expect: \{"length":1,"json":\[\{"path":"\/rates\/<id>\?b=2&a=1"/)
+})
