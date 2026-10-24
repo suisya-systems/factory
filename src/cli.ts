@@ -12,7 +12,7 @@ import { approvePlan, assertIdsFree, derivedIds, isPlan, planDir, runPlan, split
 import { replicate, tally } from './replicate.ts'
 import { runChange } from './run.ts'
 import { UNDECIDED, type Classification } from './classify.ts'
-import { buildRequest, isObj, type Scenario } from './scenario.ts'
+import { buildRequest, clip, isObj, type Scenario } from './scenario.ts'
 import { exportTree, removeTree, sandboxGit } from './sandbox.ts'
 import { observe, serve } from './serve.ts'
 import { watch } from './watch.ts'
@@ -99,7 +99,6 @@ const labelOf = (c: Classification | undefined) => (c ? (c.label === 'readable' 
 
 // Header values that may carry a secret are not printed (names only).
 const SECRET_HEADER = /authorization|cookie|token|key|secret/i
-const BODY_MAX = 600
 const keysOf = (x: unknown): string[] => (Array.isArray(x) ? x.flatMap(keysOf) : isObj(x) ? Object.entries(x).flatMap(([k, v]) => [k, ...keysOf(v)]) : [])
 // Each step as the runner will send it (same buildRequest). Values captured from earlier responses are not known yet: they show as <name>.
 export function requestLines(s: Scenario): string[] {
@@ -111,8 +110,7 @@ export function requestLines(s: Scenario): string[] {
       try {
         const r = buildRequest(st, vars)
         const h = [...r.headers].map(([k, v]) => (SECRET_HEADER.test(k) ? `${k}: <hidden>` : `${k}: ${v}`))
-        let b = r.body ?? 'none'
-        if (b.length > BODY_MAX) b = `${b.slice(0, BODY_MAX)}... (truncated, ${b.length} chars)`
+        const b = clip(r.body ?? 'none')
         const bodyKeys = r.body === undefined ? [] : [...new Set(keysOf(JSON.parse(r.body)))]
         out = [`${r.method} ${r.path}`, `  headers: ${h.join('; ') || 'none'}`, `  body: ${b}${bodyKeys.length ? ` (keys: ${bodyKeys.join(', ')})` : ''}`]
       } catch (e) { out = [`${st.method} ${st.path}`, `  (cannot build: ${(e as Error).message})`] }
