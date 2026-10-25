@@ -1,0 +1,26 @@
+# Request: orders paid through a payment service, with discounts and partial refunds
+
+An HTTP API for a shop that takes card payments through an outside payment service and refunds parts of orders. Every request and response body is JSON. Ids are strings the server assigns. Amounts are integers in yen.
+
+- **The external service.** The payment service is at the base URL in `process.env.SERVICE_URL` and has two endpoints. Each request carries a JSON body and an `Idempotency-Key` header.
+  - `POST /charges` with `{"reference": orderId, "amount": yen, "token": string}` answers 201 with `{"id": string, "amount": integer}` when the card was charged, 402 with `{"declineCode": string}` when the card was declined, and 500 to 599 when it fails.
+  - `POST /refunds` with `{"charge": chargeId, "amount": yen, "reference": refundId}` answers 201 with `{"id": string, "amount": integer}` when the money was returned, 400 to 499 when it refuses, and 500 to 599 when it fails.
+  Any answer not listed above (another status, or a body without those fields), or no answer, is a **failure**.
+- `POST /orders` with `{"lines": [{"sku": string, "unitPrice": integer, "qty": integer}, ...], "discount"?: integer}` creates an unpaid order: 1 to 10 lines, sku 1 to 40 characters, `unitPrice` 1 to 1,000,000, `qty` 1 to 100, `discount` from 0 (the default) to less than the subtotal. Nothing is sent. 201 with the order `{"id", "status": "unpaid", "lines", "subtotal", "discount", "total", "chargeId": null, "attempts": 0, "declines": [], "refunded": 0, "refunds": []}`. Each line is `{"sku", "unitPrice", "qty", "net", "refundedQty": 0, "refundedAmount": 0}`.
+- **Discount.** A line's subtotal is `unitPrice * qty`; `subtotal` is their sum and `total` is `subtotal - discount`. The discount is split over the lines in proportion to their subtotals: each line gets `floor(discount * lineSubtotal / subtotal)`, and the yen left over go one each to the lines with the largest fractional parts of `discount * lineSubtotal / subtotal` (ties: the earlier line). A line's `net` is its subtotal minus its share; the nets add up to `total`.
+- **Paying.** `POST /orders/{id}/pay` with `{"token": string}` (1 to 200 characters) is allowed for an `unpaid` order (409 otherwise). It adds 1 to `attempts` and sends `POST /charges` with the order's id, its `total` and the token, and the header `Idempotency-Key: charge-{orderId}-{attempts}`. Then:
+  - 201 with `amount` equal to `total`: the order is `paid` and `chargeId` is the answer's `id`; 200 with the order;
+  - 201 with another `amount`: refused with 502, and the order stays unpaid;
+  - 402: refused with 402 and `{"error": string, "declineCode"}`; the code is appended to `declines`. After the third decline the order is `blocked`: it can no longer be paid;
+  - a failure: refused with 503, and the order stays unpaid.
+  Only `attempts`, `declines` and `status` change on a refused payment.
+- **Refunding.** `POST /orders/{id}/refunds` with `{"lines": [{"line": index, "qty"}, ...]}` refunds units of a `paid` or `partially_refunded` order (409 otherwise). `line` is a 0-based line index (400 if there is no such line), listed at most once, and `qty` is 1 to that line's `qty - refundedQty` (409 if more). Each listed line's amount is `floor(net * q / qty)` for `q` of the line's `qty` units, except when the refund takes the line's last remaining units: then it is `net - refundedAmount`. The refund's `amount` is the sum. The app creates the refund with an id and sends `POST /refunds` with the order's `chargeId`, the amount and the refund's id, and the header `Idempotency-Key: refund-{refundId}`.
+  - 201 with `amount` equal to the refund's amount: the refund `succeeded`. Each line's `refundedQty` and `refundedAmount` grow, the order's `refunded` grows by the amount, and the order becomes `refunded` when every unit of every line is refunded, else `partially_refunded`. 201 with the refund.
+  - Anything else: the refund is `failed` and nothing else changes; 502 with `{"error": string, "refundId"}`.
+  A refund is `{"id", "amount", "status", "lines": [{"line", "qty", "amount"}, ...], "attempts"}` and is appended to the order's `refunds` in either case; `attempts` counts the requests sent for it.
+- **Retrying a refund.** `POST /refunds/{id}/retry` sends a `failed` refund again (409 for a refund that succeeded). Its lines must still fit the remaining units (409 otherwise); the amounts are not recomputed. It is sent with the same `reference` and the same `Idempotency-Key` as before, and the answer is handled as above (201 with the refund on success, 502 on failure).
+- `DELETE /orders/{id}` deletes an `unpaid` or `blocked` order (409 otherwise). Nothing is sent. 204.
+- `GET /orders/{id}` returns 200 with the order. `GET /refunds/{id}` returns 200 with the refund plus its `orderId`.
+- The app sends to the service only after every other check of the request passed: a request refused with 400, 404 or 409 sends nothing and changes nothing.
+- Errors: a body that is not valid JSON, a missing or wrong-typed field, or a value outside the rules above is 400; an unknown order or refund is 404; the conflicts named above are 409. Every error body is `{"error": string}`, with the extra fields named above.
+- Data is kept in memory; it does not have to survive a restart.
