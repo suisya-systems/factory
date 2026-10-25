@@ -149,6 +149,10 @@ fetch(process.env.SERVICE_URL + '/config').then((x) => x.status === 200 ? x.json
   assert.deepEqual(seen.map((x) => x.status), [204, 200, 200])
   assert.equal(JSON.parse(seen[1].body!).mode, 'blue')
   assert.match(seen[2].body!, /"path":"\/config"/)
+  // past the fake's limits every later result says so
+  writeApp(boot, `require('node:http').createServer(async (q, r) => { for (let i = 0; i < 120; i++) await fetch(process.env.SERVICE_URL + '/x').catch(() => {}); r.end('{}') }).listen(Number(process.env.PORT), '127.0.0.1')`)
+  const over = await withSession(boot, never, { service: true }, async (act) => [await act({ method: 'GET', path: '/' }), await act({ service: true, method: 'GET', path: '/requests' })], () => [])
+  assert.match(over[1].error!, /more than the fake keeps/)
   // an app that never comes up: the session ends with why, not with an action error
   writeApp(boot, 'process.exit(3)')
   assert.match(await withSession(boot, never, {}, async (act) => { await act({ method: 'GET', path: '/' }); return 'went on' }, (why) => why), /^app did not start/)

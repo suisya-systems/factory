@@ -304,7 +304,12 @@ export async function withSession<T>(appDir: string, signal: AbortSignal, o: Jud
     const run = withApp(appDir, signal, (p) => { up(p); return end }, (why) => down(new Down(why)), fake).catch(down)
     return { port, done, run }
   }
+  // Past the fake's limits it cuts the app's traffic: every later result says so, as a scenario fails then.
   const act = async (a: Action): Promise<Seen> => {
+    const seen = await act1(a)
+    return fake?.overflow() ? { ...seen, error: `${seen.error ? `${seen.error}; ` : ''}the app sent the external service more than the fake keeps (later traffic was cut)` } : seen
+  }
+  const act1 = async (a: Action): Promise<Seen> => {
     try {
       if (a.service) {
         if (!fake) return { error: 'this app declares no external service' }
