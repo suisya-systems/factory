@@ -3,7 +3,7 @@
 // share its spec) and by the experimenter's probes, which name the answer the build chose per open decision.
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { constants, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Model, Result } from './adapter.ts'
@@ -30,6 +30,12 @@ export type Replicate = {
 
 const readJson = (f: string) => JSON.parse(readFileSync(f, 'utf8'))
 export const replicatesDir = (sd: string, id: string) => join(sd, 'runs', checkId(id), 'replicates')
+// #56: a rescore keeps the judgement it replaces, numbered per build: history/<build>.<k>.json (k = 1 is the oldest).
+const historyOf = (dir: string, build: string) => {
+  const h = join(dir, 'history')
+  return existsSync(h) ? readdirSync(h).filter((f) => f.startsWith(`${build}.`) && /^\d+\.json$/.test(f.slice(build.length + 1)))
+    .sort((a, b) => Number(a.slice(build.length + 1, -5)) - Number(b.slice(build.length + 1, -5))).map((f) => join(h, f)) : []
+}
 
 async function evaluate(ws: string, sha: string, scored: [string, Approved][], probes: Probe[], signal: AbortSignal) {
   const dir = mkdtempSync(join(tmpdir(), 'factory-rep-'))
@@ -74,7 +80,11 @@ export async function replicate(o: ReplicateOpts): Promise<Replicate[]> {
       for (const f of readdirSync(dir).filter((f) => f.endsWith('.json')).sort()) {
         guard.check()
         const r: Replicate = readJson(join(dir, f))
-        Object.assign(r, await evaluate(join(o.stateDir, 'work', `${id}-rep`, f.slice(0, -5)), r.sha, scored, probes, guard.signal), { probesSha256, rescoredAt: new Date().toISOString() })
+        const e = await evaluate(join(o.stateDir, 'work', `${id}-rep`, f.slice(0, -5)), r.sha, scored, probes, guard.signal)
+        // archived only once the new judgement exists: a failed rescore leaves no duplicate of the old one
+        mkdirSync(join(dir, 'history'), { recursive: true })
+        copyFileSync(join(dir, f), join(dir, 'history', `${f.slice(0, -5)}.${historyOf(dir, f.slice(0, -5)).length + 1}.json`), constants.COPYFILE_EXCL)
+        Object.assign(r, e, { probesSha256, rescoredAt: new Date().toISOString() })
         writeFileSync(join(dir, f), JSON.stringify(r, null, 2))
         out.push(r)
       }
@@ -151,5 +161,21 @@ export function tally(sd: string, id: string): string {
   const scored = [...new Set(rs.flatMap((r) => Object.keys(r.passed)))].sort()
   lines.push('## Scenarios passed (per build)', '', `| scored change | scenarios | ${models.join(' | ')} |`, `|---|---|${models.map(() => '---|').join('')}`,
     ...scored.map((cid) => `| ${cid} | ${rs.find((r) => r.results[cid])!.results[cid].length} | ${models.map((m) => of(m).map((r) => r.passed[cid] ?? '-').join(', ')).join(' | ')} |`), '')
+  // #56: every judgement of a build (kept rescores, oldest first, then the current record); a scenario whose
+  // verdict differs between them is judge-side noise, not a property of the build. A judgement without it shows "-".
+  const changed: string[] = []
+  let rejudged = false
+  for (const r of rs) {
+    const build = `${r.builderModel}-${r.n}`
+    const js: Replicate[] = [...historyOf(dir, build).map(readJson), r]
+    if (js.length < 2) continue
+    rejudged = true
+    for (const cid of [...new Set(js.flatMap((j) => Object.keys(j.results)))].sort())
+      for (const sid of [...new Set(js.flatMap((j) => (j.results[cid] ?? []).map((x) => x.id)))]) {
+        const vs = js.map((j) => j.results[cid]?.find((x) => x.id === sid)?.pass)
+        if (new Set(vs.filter((v) => v !== undefined)).size > 1) changed.push(`| ${build} | ${cid} | ${sid} | ${vs.map((v) => v === undefined ? '-' : v ? 'pass' : 'fail').join(', ')} |`)
+      }
+  }
+  if (rejudged) lines.push('## Verdicts that changed across judgements (oldest first)', '', ...(changed.length ? ['| build | scored change | scenario | verdicts |', '|---|---|---|---|', ...changed] : ['none']), '')
   return lines.join('\n')
 }

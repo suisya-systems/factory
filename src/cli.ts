@@ -46,7 +46,9 @@ const USAGE = `usage: factory <command>
   replicate <id> --k N [--score <id,id>] [--probes <file under vault/>] [--max-cost N] [--rescore]
                                                    K independent builds from the approved spec in empty repos;
                                                    scenarios + probes only, no LLM judge, nothing ships
-  tally <id>                                       tables of the replicates' probe answers and scenario passes
+                                                   (--rescore keeps each replaced record in replicates/history/)
+  tally <id>                                       tables of the replicates' probe answers and scenario passes,
+                                                   and the scenario verdicts that changed between rescores
   user-judge <id> --request <file> [--sessions 0-5 (default 1)] [--max-cost N (default 10, this arm only)] [--mutants <file under vault/>]
                                                    REAL model calls: a separate judge arm (#30). A user agent uses each
                                                    recorded build of <id> (run attempts or replicates) and gives a verdict;
