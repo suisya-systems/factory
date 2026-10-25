@@ -80,9 +80,11 @@ export async function replicate(o: ReplicateOpts): Promise<Replicate[]> {
       for (const f of readdirSync(dir).filter((f) => f.endsWith('.json')).sort()) {
         guard.check()
         const r: Replicate = readJson(join(dir, f))
+        const e = await evaluate(join(o.stateDir, 'work', `${id}-rep`, f.slice(0, -5)), r.sha, scored, probes, guard.signal)
+        // archived only once the new judgement exists: a failed rescore leaves no duplicate of the old one
         mkdirSync(join(dir, 'history'), { recursive: true })
         copyFileSync(join(dir, f), join(dir, 'history', `${f.slice(0, -5)}.${historyOf(dir, f.slice(0, -5)).length + 1}.json`), constants.COPYFILE_EXCL)
-        Object.assign(r, await evaluate(join(o.stateDir, 'work', `${id}-rep`, f.slice(0, -5)), r.sha, scored, probes, guard.signal), { probesSha256, rescoredAt: new Date().toISOString() })
+        Object.assign(r, e, { probesSha256, rescoredAt: new Date().toISOString() })
         writeFileSync(join(dir, f), JSON.stringify(r, null, 2))
         out.push(r)
       }

@@ -83,6 +83,10 @@ test('K builds from empty repos, scored by this change, a same-spec change and t
   const stop = join(sd, 'STOP-rescore')
   writeFileSync(stop, 'x')
   await assert.rejects(replicate({ changeId: 'rep-a', model: builder([]), stateDir: sd, k: 0, builderModel: 'm1', rescore: true, stopFile: stop }), /emergency stop/)
+  // a rescore that fails to judge a build (here: its workspace is gone) keeps no history copy of it
+  writeFileSync(join(rep, 'zz-1.json'), readFileSync(join(rep, 'm1-1.json')))
+  await assert.rejects(replicate({ changeId: 'rep-a', model: builder([]), stateDir: sd, k: 0, builderModel: 'm1', rescore: true }))
+  assert.ok(!readdirSync(join(rep, 'history')).some((f) => f.startsWith('zz-1.')))
 })
 
 test('tally lists the (scenario x build) verdicts that differ across kept judgements, oldest first', () => {
