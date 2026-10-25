@@ -3,17 +3,19 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
-import { existsSync, readdirSync, readFileSync, readlinkSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, readlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Model } from '../src/adapter.ts'
 import { EXE, openBrowser, UI_LIMITS, usesUi, withUi } from '../src/browser.ts'
 import { classifyReply, predictInstruction } from '../src/classify.ts'
+import { main } from '../src/cli.ts'
+import type { Replicate } from '../src/replicate.ts'
 import { checkWithin, draft, RUN_CONTRACT, runContract } from '../src/roles.ts'
 import { runChange } from '../src/run.ts'
 import { freePort } from '../src/sandbox.ts'
 import { runScenario, validateScenarios, type Scenario, type Step } from '../src/scenario.ts'
 import { stopServer } from '../src/ship.ts'
-import { approve, hash, writeDraft } from '../src/vault.ts'
+import { approve, hash, vaultDir, writeDraft } from '../src/vault.ts'
 import { CLASSIFICATION, freshState, gitTarget, tmp, writeApp } from './helpers.ts'
 
 const sd = freshState()
@@ -263,4 +265,43 @@ browserTest('practice change end to end with a fake model: drafted with --ui, ju
   assert.match(seen[0], /pages are HTML served by the app/)
   assert.match(seen[1], /a memo typed into the page shows up in its list/) // the summary is the feedback
   for (const lit of ['buy kiwis', '"fill"', 'memoItem.0']) assert.ok(!seen.join('\n').includes(lit), `builder saw ${lit}`)
+})
+
+// #59: the lap 12 path. `draft --ui` makes one set, `draft --spec-from` a second one, and `replicate --score` judges
+// every build with both (ui steps need the declaration in the shared spec); `--rescore` keeps each earlier judgement.
+browserTest('replicate --score / --rescore twice: both sets of a ui spec are judged in the browser, history keeps two earlier judgements per build', async () => {
+  const ADD2 = sc('add-2', JSON.parse(JSON.stringify(ADD.steps).replace(/buy kiwis/g, 'buy plums')))
+  let set = ADD, builds = 0
+  const model: Model = async (t) => {
+    if (t.role === 'builder') { writeApp(t.workdir, UI_APP(++builds === 2)); return { ok: true, text: 'built', costUsd: 0 } }
+    const text = t.role === 'spec-drafter' ? JSON.stringify({ spec: '# Memo page\nAdd memos from a page.\n\n## Undecided\n- order\n', interface: IFACE, assumptions: [] })
+      : t.role === 'scenario-drafter' ? JSON.stringify({ scenarios: [set] }) : JSON.stringify({ steps: set.steps.map(() => pred(null)) })
+    return { ok: true, text, costUsd: 0 }
+  }
+  const req = join(sd, 'ui-lap-req.md')
+  writeFileSync(req, 'a memo page: type a title, add it, see it listed')
+  const draftOk = async (argv: string[]) => {
+    assert.equal(await main(['draft', ...argv, '--request', req], model), 0)
+    approve(sd, argv[0], { by: 'test', version: hash(vaultDir(sd, argv[0])) })
+  }
+  await draftOk(['ui-own', '--ui'])
+  set = ADD2
+  await draftOk(['ui-cross', '--spec-from', 'ui-own'])
+  assert.equal(await main(['replicate', 'ui-own', '--k', '2', '--score', 'ui-cross'], model), 0)
+  const dir = join(sd, 'runs', 'ui-own', 'replicates')
+  const read = (d: string) => readdirSync(d).filter((f) => f.endsWith('.json')).sort().map((f) => JSON.parse(readFileSync(join(d, f), 'utf8')) as Replicate)
+  const pass = (r: Replicate) => Object.fromEntries(Object.entries(r.results).map(([cid, x]) => [cid, x.map((s) => [s.id, s.pass])]))
+  const want = [{ 'ui-own': [['add', true]], 'ui-cross': [['add-2', true]] }, { 'ui-own': [['add', false]], 'ui-cross': [['add-2', false]] }]
+  const rs = read(dir)
+  assert.deepEqual(rs.map(pass), want, JSON.stringify(rs.map((r) => r.results)))
+  for (const r of rs.slice(1)) for (const cid of ['ui-own', 'ui-cross']) assert.equal(r.results[cid][0].failedStep, 3) // the click step: the buggy build never lists the memo
+  for (let i = 0; i < 2; i++) assert.equal(await main(['replicate', 'ui-own', '--rescore', '--score', 'ui-cross'], model), 0)
+  assert.equal(builds, 2) // no build on rescore
+  assert.deepEqual(read(dir).map(pass), want)
+  const hist = join(dir, 'history')
+  assert.equal(readdirSync(hist).length, 4) // two earlier judgements per build
+  assert.deepEqual(read(hist).map(pass), [want[0], want[0], want[1], want[1]])
+  for (const [name, r] of [['current', read(dir)], ['history', read(hist)]] as const) {
+    for (const x of r) for (const cid of ['ui-own', 'ui-cross']) assert.doesNotMatch(x.results[cid][0].detail, /declares no browser UI/, name)
+  }
 })
