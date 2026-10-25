@@ -73,9 +73,33 @@ test('K builds from empty repos, scored by this change, a same-spec change and t
   const again = await replicate({ changeId: 'rep-a', model: async () => { throw new Error('model called') }, stateDir: sd, k: 0, builderModel: 'm1', rescore: true })
   assert.equal(again.length, 3)
   assert.ok(again.every((r) => r.probes.length === 0 && r.probesSha256 === null && r.rescoredAt))
+  // #56: each rescore keeps the record it replaces; two rescores leave all three judgements readable
+  await replicate({ changeId: 'rep-a', model: async () => { throw new Error('model called') }, stateDir: sd, k: 0, builderModel: 'm1', rescore: true })
+  const rep = join(sd, 'runs', 'rep-a', 'replicates')
+  assert.deepEqual(readdirSync(join(rep, 'history')).sort(), ['m1-1.1.json', 'm1-1.2.json', 'm1-2.1.json', 'm1-2.2.json', 'm2-1.1.json', 'm2-1.2.json'])
+  const js = ['history/m1-1.1.json', 'history/m1-1.2.json', 'm1-1.json'].map((f) => JSON.parse(readFileSync(join(rep, f), 'utf8')))
+  assert.deepEqual(js.map((j) => [!!j.rescoredAt, j.probes.length]), [[false, 5], [true, 0], [true, 0]])
+  assert.match(tally(sd, 'rep-a'), /## Verdicts that changed across judgements \(oldest first\)\n\nnone\n/) // the same commits judged alike
   const stop = join(sd, 'STOP-rescore')
   writeFileSync(stop, 'x')
   await assert.rejects(replicate({ changeId: 'rep-a', model: builder([]), stateDir: sd, k: 0, builderModel: 'm1', rescore: true, stopFile: stop }), /emergency stop/)
+})
+
+test('tally lists the (scenario x build) verdicts that differ across kept judgements, oldest first', () => {
+  const dir = join(sd, 'runs', 'rep-flip', 'replicates')
+  mkdirSync(join(dir, 'history'), { recursive: true })
+  const rec = (n: number, a: boolean[], b?: boolean[]) => JSON.stringify({ changeId: 'rep-flip', n, builderModel: 'm1', sha: 'x', builderOk: true, costUsd: 0, answeredBy: null, probes: [], probesSha256: null,
+    results: { 'rep-flip': a.map((pass, i) => ({ id: `s${i}`, pass })), ...(b ? { other: b.map((pass, i) => ({ id: `o${i}`, pass })) } : {}) },
+    passed: {} })
+  writeFileSync(join(dir, 'm1-1.json'), rec(1, [true, true]))
+  writeFileSync(join(dir, 'm1-2.json'), rec(2, [true, false]))
+  writeFileSync(join(dir, 'history', 'm1-1.1.json'), rec(1, [true, false], [true])) // other: scored only here, so "-" later
+  writeFileSync(join(dir, 'history', 'm1-1.10.json'), rec(1, [true, true], [false])) // numeric order: 10 after 2
+  writeFileSync(join(dir, 'history', 'm1-1.2.json'), rec(1, [true, true]))
+  writeFileSync(join(dir, 'history', 'm1-10.1.json'), rec(10, [false, false])) // another build's history
+  const t = tally(sd, 'rep-flip')
+  assert.match(t, /## Verdicts that changed across judgements \(oldest first\)\n\n\| build \| scored change \| scenario \| verdicts \|\n\|---\|---\|---\|---\|\n\| m1-1 \| other \| o0 \| pass, -, fail, - \|\n\| m1-1 \| rep-flip \| s1 \| fail, pass, pass, pass \|\n$/)
+  assert.doesNotMatch(t, /m1-2 \|.*(pass|fail)/) // judged once: nothing to compare
 })
 
 test('refused before any model call: other spec, probes outside the vault, a change that ran; run refuses after replicate', async () => {
