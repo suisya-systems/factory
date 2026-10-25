@@ -3,15 +3,15 @@
 // share its spec) and by the experimenter's probes, which name the answer the build chose per open decision.
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, relative } from 'node:path'
+import { join } from 'node:path'
 import type { Model, Result } from './adapter.ts'
 import { CAPS, mergeLedger, startGuard, type Ledger } from './limits.ts'
 import { build } from './roles.ts'
 import { exportTree, removeTree } from './sandbox.ts'
 import { BLOCKED, judgeOpts, OTHER, runProbe, runScenarios, validateProbes, type Probe, type ProbeResult, type ScenarioResult } from './scenario.ts'
-import { checkId, loadApproved, type Approved } from './vault.ts'
+import { checkId, hiddenFile, loadApproved, type Approved } from './vault.ts'
 
 export type ReplicateOpts = {
   changeId: string; model: Model; stateDir: string; k: number
@@ -58,9 +58,7 @@ export async function replicate(o: ReplicateOpts): Promise<Replicate[]> {
   }
   let probes: Probe[] = [], probesSha256: string | null = null
   if (o.probesFile) {
-    const f = realpathSync(o.probesFile) // a symlink under vault/ must not point outside it
-    if (relative(realpathSync(join(o.stateDir, 'vault')), f).startsWith('..')) throw new Error(`--probes must be under ${join(o.stateDir, 'vault')} (hidden from every sandbox)`)
-    const raw = readFileSync(f)
+    const raw = hiddenFile(o.stateDir, o.probesFile, '--probes')
     probes = validateProbes(JSON.parse(raw.toString('utf8')))
     probesSha256 = createHash('sha256').update(raw).digest('hex')
   }
