@@ -86,7 +86,8 @@ const UI_STEPS = `BROWSER UI: the app's pages are judged in a headless browser. 
 - {"ui": "click", "target": "<testId>"} clicks it. "<testId>.<n>" is the n-th visible element with that test id (0-based); a bare "<testId>" must be the only visible one.
 After a ui step its optional "expect" and "capture" read the page as JSON: {"<testId>": [the visible text of each visible element with that test id, in page order]}
 (whitespace collapsed; an input gives its value). E.g. "json": {"<testId>": ["<text>"]} (positional prefix), "length": {"<testId>": 2} (0 = none visible),
-"capture": {"name": "<testId>.0"}. The checks are retried for up to ${UI_LIMITS.settleMs / 1000} s, as the page may update after the action. A scenario may mix
+"capture": {"name": "<testId>.0"}. The checks are retried for up to ${UI_LIMITS.settleMs / 1000} s, as the page may update after the action. A step without an "expect" does not wait, so
+before the next action write an "expect" for what the previous action should change. A scenario may mix
 ui and HTTP steps. Use ONLY the test ids in the INTERFACE; you do not know any label or text the builder chooses, so check only texts the scenario itself entered
 or that the request fixes. The summary rule covers ui steps too.`
 
