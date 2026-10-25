@@ -47,10 +47,12 @@ const USAGE = `usage: factory <command>
                                                    K independent builds from the approved spec in empty repos;
                                                    scenarios + probes only, no LLM judge, nothing ships
   tally <id>                                       tables of the replicates' probe answers and scenario passes
-  user-judge <id> --request <file> [--sessions 0-5 (default 1)] [--max-cost N (default 10, this arm only)]
+  user-judge <id> --request <file> [--sessions 0-5 (default 1)] [--max-cost N (default 10, this arm only)] [--mutants <file under vault/>]
                                                    REAL model calls: a separate judge arm (#30). A user agent uses each
                                                    recorded build of <id> (run attempts or replicates) and gives a verdict;
-                                                   writes runs/<id>/user/ and compare.md. It never changes pass/fail
+                                                   session k leans on one focus (main, input, state, failure, cycling).
+                                                   --mutants: also builds with one seeded defect each (#50), scored by the
+                                                   scenarios first. Writes runs/<id>/user/ and compare.md; never changes pass/fail
   watch --ship-target <repo> [--port N] [--interval SEC | --once]
                                                    poll the prod signals (all ports, or N); a new 5xx / stderr error sign becomes a
                                                    draft (--base = the ship target) that STOPS for approval; never approves or ships
@@ -188,7 +190,7 @@ export async function main(argv: string[], model: Model = realModel): Promise<nu
       args: argv, allowPositionals: true,
       options: { help: { type: 'boolean', short: 'h' }, request: { type: 'string' }, base: { type: 'string' }, signals: { type: 'string' }, by: { type: 'string' }, version: { type: 'string' }, note: { type: 'string' }, 'ship-target': { type: 'string' },
         'max-cost': { type: 'string' }, 'max-attempts': { type: 'string' }, port: { type: 'string' }, 'traffic-base': { type: 'string' },
-        model: { type: 'string', multiple: true }, 'spec-from': { type: 'string' }, spec: { type: 'string' }, k: { type: 'string' }, score: { type: 'string' }, probes: { type: 'string' }, rescore: { type: 'boolean' }, minority: { type: 'boolean' }, 'minority-brief': { type: 'string' }, service: { type: 'boolean' }, ui: { type: 'boolean' }, 'iface-from': { type: 'string' }, interval: { type: 'string' }, once: { type: 'boolean' }, retries: { type: 'string' }, feedback: { type: 'string' }, approve: { type: 'string' }, sessions: { type: 'string' } },
+        model: { type: 'string', multiple: true }, 'spec-from': { type: 'string' }, spec: { type: 'string' }, k: { type: 'string' }, score: { type: 'string' }, probes: { type: 'string' }, rescore: { type: 'boolean' }, minority: { type: 'boolean' }, 'minority-brief': { type: 'string' }, service: { type: 'boolean' }, ui: { type: 'boolean' }, 'iface-from': { type: 'string' }, interval: { type: 'string' }, once: { type: 'boolean' }, retries: { type: 'string' }, feedback: { type: 'string' }, approve: { type: 'string' }, sessions: { type: 'string' }, mutants: { type: 'string' } },
     })
   } catch (e) { console.error(`factory: ${(e as Error).message}\n${USAGE}`); return 2 }
   const { positionals, values: v } = parsed
@@ -319,7 +321,7 @@ export async function main(argv: string[], model: Model = realModel): Promise<nu
     case 'user-judge': {
       if (!id || !v.request) break
       console.log(await userJudge({ changeId: id, model, stateDir: sd, request: readFileSync(v.request, 'utf8'), sessions: v.sessions === undefined ? undefined : Number(v.sessions),
-        maxCostUsd: v['max-cost'] ? Number(v['max-cost']) : undefined, stopFile, requestedModels }))
+        maxCostUsd: v['max-cost'] ? Number(v['max-cost']) : undefined, stopFile, requestedModels, mutantsFile: v.mutants }))
       return 0
     }
     case 'serve': await serve(sd, port); return -1 // keeps running

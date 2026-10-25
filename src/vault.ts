@@ -2,8 +2,8 @@
 // Hidden by LOCATION (under $HOME, which every sandbox replaces with an empty tmpfs) and
 // registered with the sandbox so no mount can ever expose it.
 import { createHash } from 'node:crypto'
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { protect } from './sandbox.ts'
 import type { Classification } from './classify.ts'
@@ -34,6 +34,13 @@ export function stateDir(): string {
 }
 
 export const vaultDir = (sd: string, id: string) => join(sd, 'vault', checkId(id))
+
+// An experimenter's file (probes, mutants) that answers or names hidden checks: read only from under vault/.
+export function hiddenFile(sd: string, file: string, flag: string): Buffer {
+  const f = realpathSync(file) // a symlink under vault/ must not point outside it
+  if (relative(realpathSync(join(sd, 'vault')), f).startsWith('..')) throw new Error(`${flag} must be under ${join(sd, 'vault')} (hidden from every sandbox)`)
+  return readFileSync(f)
+}
 
 export const hash = (dir: string) => {
   const h = createHash('sha256')
