@@ -288,7 +288,7 @@ fetch(S + '/config').then((x) => x.status === 200 ? x.json() : { mode: 'none' },
   await draftOk(['lap-cross', '--spec-from', 'lap-own'])
   assert.equal(await main(['replicate', 'lap-own', '--k', '2', '--score', 'lap-cross'], model), 0)
   const dir = join(sd, 'runs', 'lap-own', 'replicates')
-  const read = () => readdirSync(dir).sort().map((f) => JSON.parse(readFileSync(join(dir, f), 'utf8')) as Replicate)
+  const read = () => readdirSync(dir).filter((f) => f.endsWith('.json')).sort().map((f) => JSON.parse(readFileSync(join(dir, f), 'utf8')) as Replicate)
   const rs = read()
   const pass = (r: Replicate) => Object.fromEntries(Object.entries(r.results).map(([cid, x]) => [cid, x.map((s) => [s.id, s.pass])]))
   assert.deepEqual(rs.map(pass), [
