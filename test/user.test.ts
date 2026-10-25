@@ -96,6 +96,7 @@ test('a mutant changes exactly one place of one file inside the build; the table
   writeFileSync(join(reps, 'm1-1.json'), JSON.stringify({ sha: 'c'.repeat(40), results: { 'cmp-m': res([]) } }))
   mkdirSync(join(userDir(sd, 'cmp-m'), 'mutants'), { recursive: true })
   writeFileSync(join(userDir(sd, 'cmp-m'), 'mutants', 'create-200.json'), JSON.stringify({ mutant: M201, sha: 'c'.repeat(40), results: res(['create-get', 'update-title']) }))
+  assert.match(compareTable(sd, 'cmp-m'), /\| create-200 \| m1-1 \| create answers 200 \\\| not 201 \| 2\/4 \(failed: create-get, update-title\) \|\n\nNo user sessions yet/) // the free check (--sessions 0) shows its scores
   const rec = (name: string, r: Partial<UserRecord>) => writeFileSync(join(userDir(sd, 'cmp-m'), `${name}.json`), JSON.stringify({ build: 'm1-1', model: 'm1', status: 'done', costUsd: 0.5, ...r }))
   const v = (satisfied: boolean) => ({ satisfied, reason: satisfied ? 'fine' : 'create says 200', problems: satisfied ? [] : ['POST /notes answered 200'] })
   rec('base-1', { session: 1, focus: 'main', verdict: v(true) })

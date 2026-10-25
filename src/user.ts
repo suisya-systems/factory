@@ -255,6 +255,10 @@ export function compareTable(sd: string, id: string): string {
   const lines = [`# User-agent judging of ${id} (a separate arm: it decides nothing)`, '',
     'current = the verdict that counted: for a run attempt its pass (all scenarios AND the LLM judge), for a replicate build all scenarios of this change pass (no LLM judge).',
     'user = each session\'s verdict (and focus): yes (satisfied), no, - (no verdict), interrupted / stopped. agree = every verdict given equals current.', '']
+  const scored = (sc: MutantScore) => { const failed = failedIds(sc.results); return `${sc.results.length - failed.length}/${sc.results.length}${failed.length ? ` (failed: ${failed.join(', ')})` : ''}` }
+  // Shown with or without sessions, so `--sessions 0` (the free check) reports whether the scenarios see each defect.
+  if (scores.length) lines.push('## Seeded defects, scored by this change\'s scenarios (no model)', '', '| mutant | build | defect (never shown to the user agent) | scenarios on the mutant |', '|---|---|---|---|',
+    ...scores.map((sc) => `| ${sc.mutant.id} | ${sc.mutant.build} | ${cell(sc.mutant.defect)} | ${scored(sc)} |`), '')
   if (!recs.length) return [...lines, 'No user sessions yet.', ''].join('\n')
   for (const sec of [...new Set(recs.map(section))].sort()) {
     const n = { 'both pass': 0, 'both fail': 0, 'user only fails': 0, 'current only fails': 0, 'no verdict': 0 }
@@ -283,10 +287,10 @@ export function compareTable(sd: string, id: string): string {
     for (const sc of scores) {
       const rs = recs.filter((r) => section(r) === sec && r.mutant === sc.mutant.id).sort((x, y) => x.session - y.session)
       if (!rs.length) continue
-      const v = rs.filter((r) => r.verdict), saidNo = v.filter((r) => !r.verdict!.satisfied).length, failed = failedIds(sc.results)
+      const v = rs.filter((r) => r.verdict), saidNo = v.filter((r) => !r.verdict!.satisfied).length
       for (const r of v) { const c = (byFocus[r.focus ?? '-'] ??= [0, 0]); c[1]++; if (!r.verdict!.satisfied) c[0]++ }
       given += v.length; no += saidNo; if (saidNo) caughtAny++
-      mrows.push(`| ${sc.mutant.id} | ${sc.mutant.build} | ${cell(sc.mutant.defect)} | ${sc.results.length - failed.length}/${sc.results.length}${failed.length ? ` (failed: ${failed.join(', ')})` : ''} | ${rs.map(word).join(', ')} | ${saidNo}/${v.length} | ${rs.reduce((a, r) => a + r.costUsd, 0).toFixed(4)} |`)
+      mrows.push(`| ${sc.mutant.id} | ${sc.mutant.build} | ${cell(sc.mutant.defect)} | ${scored(sc)} | ${rs.map(word).join(', ')} | ${saidNo}/${v.length} | ${rs.reduce((a, r) => a + r.costUsd, 0).toFixed(4)} |`)
       for (const r of v) mwhy.push(`- ${sc.mutant.id} s${r.session} (user ${word(r)}): ${r.verdict!.reason}${r.verdict!.problems.map((p) => `\n  - ${p}`).join('')}`)
     }
     if (mrows.length) lines.push('### Seeded defects (did the user agent say no?)', '', '| mutant | build | defect (never shown to the user agent) | scenarios on the mutant | user | caught | user cost (USD) |', '|---|---|---|---|---|---|---|', ...mrows, '',
