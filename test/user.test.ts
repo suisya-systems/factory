@@ -8,7 +8,8 @@ import type { Model, Task } from '../src/adapter.ts'
 import { replicate } from '../src/replicate.ts'
 import { checkAction, compareTable, userDir, userInstruction, userJudge, USER_LIMITS, type UserRecord } from '../src/user.ts'
 import { approve, hash, writeDraft } from '../src/vault.ts'
-import { CLASSIFICATION, MEMO_SERVER, SCENARIOS, freshState, writeApp } from './helpers.ts'
+import { withSession } from '../src/scenario.ts'
+import { CLASSIFICATION, MEMO_SERVER, SCENARIOS, freshState, tmp, writeApp } from './helpers.ts'
 
 const sd = freshState()
 process.env.FACTORY_STOP_FILE = join(sd, 'NOSTOP')
@@ -124,4 +125,25 @@ test('user-judge drives each replicate build in one sandboxed session, records i
   assert.deepEqual([s3('m1-1').status, s3('m1-1').verdict, s3('m1-1').error, s3('m1-1').turns.length], ['done', null, `no verdict within ${USER_LIMITS.turns} turns`, USER_LIMITS.turns - 1])
   assert.deepEqual([s3('m1-2').status, s3('m1-2').turns.length], ['stopped', 0])
   assert.match(s3('m1-2').error, /cost cap/)
+  assert.match(readFileSync(join(userDir(sd, 'uj-a'), 'compare.md'), 'utf8'), /\| m1-2 \|[^\n]*\| yes, yes, stopped \|/) // rewritten after the stop too
+})
+
+test('a session starts the app at its first app action, so service answers set before it reach an app that reads them at startup', async () => {
+  const boot = tmp('user-boot')
+  writeApp(boot, `
+const http = require('node:http')
+fetch(process.env.SERVICE_URL + '/config').then((x) => x.status === 200 ? x.json() : { mode: 'none' }).then((cfg) =>
+  http.createServer((q, r) => { r.writeHead(200, { 'content-type': 'application/json' }); r.end(JSON.stringify(cfg)) }).listen(Number(process.env.PORT), '127.0.0.1'))`)
+  const never = new AbortController().signal
+  const seen = await withSession(boot, never, { service: true }, async (act) => [
+    await act({ service: true, method: 'POST', path: '/responses', body: { method: 'GET', path: '/config', status: 200, json: { mode: 'blue' } } }),
+    await act({ method: 'GET', path: '/' }),
+    await act({ service: true, method: 'GET', path: '/requests' }),
+  ], () => [])
+  assert.deepEqual(seen.map((x) => x.status), [204, 200, 200])
+  assert.equal(JSON.parse(seen[1].body!).mode, 'blue')
+  assert.match(seen[2].body!, /"path":"\/config"/)
+  // an app that never comes up: the session ends with why, not with an action error
+  writeApp(boot, 'process.exit(3)')
+  assert.match(await withSession(boot, never, {}, async (act) => { await act({ method: 'GET', path: '/' }); return 'went on' }, (why) => why), /^app did not start/)
 })

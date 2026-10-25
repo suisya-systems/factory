@@ -289,12 +289,20 @@ export async function runScenario(appDir: string, s: Scenario, signal: AbortSign
 // ---- user sessions (#30) ----
 // One app (with its fake and browser, as for a scenario) kept running while `go` sends it actions one by one, as a user would:
 // its data stays between actions. An action is a step without checks; what comes back is what a user sees of it (bounded by user.ts).
+// The app starts at the first action that is not a service action, so service answers set before it are there when it starts.
 export type Action = Omit<Step, 'expect' | 'capture'>
 export type Seen = { status?: number; headers?: Record<string, string>; body?: string; page?: Record<string, string[]>; error?: string }
 export async function withSession<T>(appDir: string, signal: AbortSignal, o: JudgeOpts, go: (act: (a: Action) => Promise<Seen>) => Promise<T>, failed: (why: string) => T): Promise<T> {
   const fake = o.service ? startFake() : undefined
   const ui: { browser?: Browser } = {}
-  let port = 0
+  class Down extends Error {}
+  let app: { port: Promise<number>; done: () => void; run: Promise<unknown> } | undefined
+  const start = () => {
+    let done!: () => void, up!: (p: number) => void, down!: (e: unknown) => void
+    const end = new Promise<void>((r) => (done = r)), port = new Promise<number>((ok, ko) => { up = ok; down = ko })
+    const run = withApp(appDir, signal, (p) => { up(p); return end }, (why) => down(new Down(why)), fake).catch(down)
+    return { port, done, run }
+  }
   const act = async (a: Action): Promise<Seen> => {
     try {
       if (a.service) {
@@ -302,6 +310,7 @@ export async function withSession<T>(appDir: string, signal: AbortSignal, o: Jud
         const r = fake.control(a.method, a.path, a.body)
         return { status: r.status, ...(r.json === undefined ? {} : { body: JSON.stringify(r.json) }) }
       }
+      const port = await (app ??= start()).port
       if (a.ui) {
         if (!o.ui) return { error: 'this app declares no browser pages' }
         ui.browser ??= await openBrowser(port, signal)
@@ -313,13 +322,21 @@ export async function withSession<T>(appDir: string, signal: AbortSignal, o: Jud
       const { res, raw } = await send(port, a, {}, signal)
       return { status: res.status, headers: Object.fromEntries(res.headers), body: raw }
     } catch (err) {
-      if (signal.aborted) throw err
+      if (signal.aborted || err instanceof Down) throw err
       return { error: (err as Error).message }
     }
   }
   try {
-    return await withApp(appDir, signal, (p) => { port = p; return go(act).finally(() => ui.browser?.close()) }, failed, fake)
-  } finally { fake?.close() }
+    return await go(act)
+  } catch (e) {
+    if (e instanceof Down) return failed(e.message)
+    throw e
+  } finally {
+    await ui.browser?.close()
+    app?.done()
+    await app?.run
+    fake?.close()
+  }
 }
 
 // ---- probes (lap 5) ----

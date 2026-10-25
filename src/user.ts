@@ -162,10 +162,10 @@ export async function userJudge(o: UserJudgeOpts): Promise<string> {
   } finally {
     guard.dispose()
     saveCost()
+    // Also after a stop: the table shows every record saved so far (a failure here never hides the stop).
+    try { writeFileSync(join(dir, 'compare.md'), compareTable(sd, id)) } catch { /* the records are kept; the next user-judge rewrites it */ }
   }
-  const table = compareTable(sd, id)
-  writeFileSync(join(dir, 'compare.md'), table)
-  return table
+  return readFileSync(join(dir, 'compare.md'), 'utf8')
 }
 
 // ---- comparison ----
