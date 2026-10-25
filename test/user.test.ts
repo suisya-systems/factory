@@ -70,16 +70,16 @@ test('the comparison sets each session beside the verdict that counted, per mode
 })
 
 // #50: seeded defects. Checked and applied by hand-written rules; the table counts the sessions that said no.
-const M201: Mutant = { id: 'create-200', build: 'm1-1', file: 'server.js', find: 'return send(res, 201, note)', replace: 'return send(res, 200, note)', defect: 'create answers 200 | not 201' }
+const M201: Mutant = { id: 'create-200', build: 'm1-1', file: 'server.cjs', find: 'return send(res, 201, note)', replace: 'return send(res, 200, note)', defect: 'create answers 200 | not 201' }
 test('a mutant changes exactly one place of one file inside the build; the table counts who said no to it', () => {
   assert.deepEqual(validateMutants([M201]), [M201])
   for (const bad of [{}, [{ ...M201, id: 'bad id' }], [M201, M201], [{ ...M201, find: '' }], [{ ...M201, replace: M201.find }], [{ ...M201, defect: ' ' }],
     [{ ...M201, file: '../x.js' }], [{ ...M201, file: '/etc/passwd' }], [{ ...M201, file: 'a//b' }], [{ ...M201, replace: 1 }]])
     assert.throws(() => validateMutants(bad), /mutants/, JSON.stringify(bad))
   const app = tmp('mutant')
-  writeFileSync(join(app, 'server.js'), 'a\nreturn send(res, 201, note)\nb $&\n')
+  writeFileSync(join(app, 'server.cjs'), 'a\nreturn send(res, 201, note)\nb $&\n')
   mutate(app, { ...M201, replace: 'x $& y' })
-  assert.equal(readFileSync(join(app, 'server.js'), 'utf8'), 'a\nx $& y\nb $&\n') // replaced literally
+  assert.equal(readFileSync(join(app, 'server.cjs'), 'utf8'), 'a\nx $& y\nb $&\n') // replaced literally
   assert.throws(() => mutate(app, M201), /occurs 0 times/)
   writeFileSync(join(app, 'twice.js'), 'q q')
   assert.throws(() => mutate(app, { ...M201, file: 'twice.js', find: 'q' }), /occurs 2 times/)
