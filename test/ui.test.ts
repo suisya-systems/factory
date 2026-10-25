@@ -230,6 +230,7 @@ test('draft --ui: the spec drafter names test ids, the scenario writer learns ui
   assert.match(prompts['spec-drafter'][0], /"testIds"/)
   assert.match(prompts['scenario-drafter'][0], /"ui": "fill", "target"/)
   assert.match(prompts['scenario-drafter'][0], /"testIds":\["titleInput","addButton","memoItem"\]/)
+  assert.match(prompts['scenario-drafter'][0], /before the next action write an "expect" for what the previous action should change/)
   assert.match(prompts.classifier[0], /browser action on the app's pages/)
   const plain = await draft(drafting(prompts, { endpoints: ['GET /memos'] }), 'a memo API', {})
   assert.ok(!usesUi(plain.spec))
