@@ -315,6 +315,7 @@ test('#52: an Undecided item the request already answers is shown before approva
   // the same point in another spelling, and a body field the request does not write into the PUT body
   assert.equal(undecidedInRequest(spec(['- Whether `PUT /users/:id` accepts a body with `muted` missing.']), request).length, 1)
   assert.deepEqual(undecidedInRequest(spec(['- Whether `PUT /users/{id}` requires `email`.']), request), [])
+  assert.deepEqual(undecidedInRequest(spec(['- Whether POST /users requires `pending` in the body.']), request), []) // a response field (Codex review)
   const s = approvalSummary('x', { spec: spec([put, ...others]), scenarios: [], assumptions: [] }, 'v', request)
   assert.match(s, /## Undecided in the spec, but the request may decide it \(1\)\n.*do not approve.*\n- Whether PUT \/users\/\{id\} requires both[^\n]*\n  - request: `PUT \/users\/\{id\}` with[^\n]*\n  - request: Errors: /)
   assert.doesNotMatch(approvalSummary('x', { spec: spec([put]), scenarios: [], assumptions: [] }, 'v'), /request may decide/) // no request given
