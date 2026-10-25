@@ -2,13 +2,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Model, Task } from '../src/adapter.ts'
 import { replicate } from '../src/replicate.ts'
 import { checkAction, compareTable, userDir, userInstruction, userJudge, USER_LIMITS, type UserRecord } from '../src/user.ts'
 import { approve, hash, writeDraft } from '../src/vault.ts'
-import { withSession } from '../src/scenario.ts'
+import { buildRequest, withSession } from '../src/scenario.ts'
 import { CLASSIFICATION, MEMO_SERVER, SCENARIOS, freshState, tmp, writeApp } from './helpers.ts'
 
 const sd = freshState()
@@ -61,6 +61,7 @@ test('the comparison sets each session beside the verdict that counted, per mode
   assert.match(t, /## m1[\s\S]*Sessions: both pass 0, both fail 1, user only fails 1, current only fails 1, no verdict 1\. Builds whose sessions disagree with each other: 1\./)
   assert.match(t, /- attempt-1 s1 \(user yes, current fail\): reason attempt-1 1\n {2}- failed scenarios: missing-404/)
   assert.match(t, /- attempt-2 s1 \(user no, current pass\): reason attempt-2 1\n {2}- lists nothing/)
+  assert.deepEqual(buildRequest({ method: 'POST', path: '/a/{{x}}', body: { t: 'Hi {{name}}' } }, null), buildRequest({ method: 'POST', path: '/a/{{x}}', body: { t: 'Hi {{name}}' } }, { x: '{{x}}', name: '{{name}}' })) // a user action is sent literally
   assert.match(t, /## m2[\s\S]*\| attempt-2 \| bbbbbbb \| 4\/4 \| pass \| pass \| yes \| yes \|[\s\S]*both pass 1,/)
 })
 
@@ -106,6 +107,11 @@ test('user-judge drives each replicate build in one sandboxed session, records i
   assert.match(table, /\| m1-2 \| \w{7} \| 2\/4 \| - \| fail \| yes \| no \|[\s\S]*- m1-2 s1 \(user yes, current fail\)/)
   assert.equal(readFileSync(join(userDir(sd, 'uj-a'), 'compare.md'), 'utf8'), table)
   assert.equal(JSON.parse(readFileSync(join(sd, 'runs', 'uj-a', 'user-judge-cost.json'), 'utf8')).byRole['user-agent'].toFixed(4), '0.4000')
+
+  // One user-judge per change at a time.
+  writeFileSync(join(userDir(sd, 'uj-a'), '.lock'), '1\n')
+  await assert.rejects(userJudge({ changeId: 'uj-a', model: user([]), stateDir: sd, request: REQUEST }), /another user-judge holds/)
+  unlinkSync(join(userDir(sd, 'uj-a'), '.lock'))
 
   // Again: every claimed session is skipped (no call); --sessions 2 adds one per build; the replicates are untouched.
   const again: Task[] = []

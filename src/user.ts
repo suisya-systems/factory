@@ -6,7 +6,7 @@
 // It has no tools: it writes actions as JSON, the factory sends them to the sandboxed app (and its fake / browser, as for a
 // scenario) and puts what came back in the next turn's instruction.
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { MODEL_BY_ROLE, type Model } from './adapter.ts'
@@ -129,9 +129,13 @@ export async function userJudge(o: UserJudgeOpts): Promise<string> {
   const model = o.requestedModels?.['user-agent'] ?? MODEL_BY_ROLE['user-agent']
   const dir = userDir(sd, id)
   mkdirSync(dir, { recursive: true })
+  // One user-judge per change at a time: the cost file below is read once and rewritten, so two would lose each other's spend.
+  const lock = join(dir, '.lock')
+  try { writeFileSync(lock, `${process.pid}\n`, { flag: 'wx' }) } catch { throw new Error(`${id}: another user-judge holds ${lock} (if none runs, it was interrupted: delete the file by hand)`) }
   // Its own cap, apart from the change's draft + build spend: the arm never eats into what the current judge may spend.
   const costFile = join(sd, 'runs', id, 'user-judge-cost.json')
-  const before: Ledger | null = existsSync(costFile) ? readJson(costFile) : null
+  let before: Ledger | null
+  try { before = existsSync(costFile) ? readJson(costFile) : null } catch (e) { unlinkSync(lock); throw e }
   const guard = startGuard(capUsd, o.stopFile ?? process.env.FACTORY_STOP_FILE ?? join(sd, 'STOP'), { spentUsd: before?.totalUsd ?? 0, lapFile: join(sd, 'lap-ledger.jsonl'), models: o.requestedModels })
   const saveCost = () => writeFileSync(costFile, JSON.stringify(mergeLedger(before, guard.ledger), null, 2))
   const guarded = guard.model(o.model)
@@ -162,6 +166,7 @@ export async function userJudge(o: UserJudgeOpts): Promise<string> {
   } finally {
     guard.dispose()
     saveCost()
+    unlinkSync(lock)
     // Also after a stop: the table shows every record saved so far (a failure here never hides the stop).
     try { writeFileSync(join(dir, 'compare.md'), compareTable(sd, id)) } catch { /* the records are kept; the next user-judge rewrites it */ }
   }

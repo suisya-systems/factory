@@ -151,13 +151,14 @@ export function checkStep(st: Step, status: number, json: unknown, vars: Record<
 }
 
 // The request exactly as it is sent (the approval summary shows the same object): path and body after
-// placeholder substitution, headers with the default content-type applied.
-export function buildRequest(st: Omit<Step, 'expect'>, vars: Record<string, unknown>) {
-  const path = fill(st.path, vars) as string
-  const body = st.body === undefined ? undefined : JSON.stringify(fill(st.body, vars))
+// placeholder substitution, headers with the default content-type applied. vars null (#30, a user action): sent literally.
+export function buildRequest(st: Omit<Step, 'expect'>, vars: Record<string, unknown> | null) {
+  const f = (x: unknown) => (vars ? fill(x, vars) : x)
+  const path = f(st.path) as string
+  const body = st.body === undefined ? undefined : JSON.stringify(f(st.body))
   // Header names are case-insensitive: a scenario's own "Content-Type" replaces the default, never joins it
   // (a plain-object merge sent "application/json, application/json").
-  const headers = new Headers(fill(st.headers ?? {}, vars) as Record<string, string>)
+  const headers = new Headers(f(st.headers ?? {}) as Record<string, string>)
   if (body && !headers.has('content-type')) headers.set('content-type', 'application/json')
   return { method: st.method, path, body, headers }
 }
@@ -173,7 +174,7 @@ function fakeLog(fake: Fake): string {
   return `; the fake received ${log.length} request(s)${log.map((r, i) => `\n  ${i + 1}. ${r.method} ${r.path} body: ${r.body === undefined ? 'none' : clip(typeof r.body === 'string' ? r.body : JSON.stringify(r.body))}`).join('')}`
 }
 
-async function send(port: number, st: Omit<Step, 'expect'>, vars: Record<string, unknown>, signal: AbortSignal) {
+async function send(port: number, st: Omit<Step, 'expect'>, vars: Record<string, unknown> | null, signal: AbortSignal) {
   const { path, body, headers } = buildRequest(st, vars)
   const res = await fetch(`http://127.0.0.1:${port}${path}`, {
     method: st.method, body, headers,
@@ -319,7 +320,7 @@ export async function withSession<T>(appDir: string, signal: AbortSignal, o: Jud
         await new Promise((r) => setTimeout(r, 500))
         return { ...(a.ui === 'goto' ? { status } : {}), page: await ui.browser.snapshot() }
       }
-      const { res, raw } = await send(port, a, {}, signal)
+      const { res, raw } = await send(port, a, null, signal)
       return { status: res.status, headers: Object.fromEntries(res.headers), body: raw }
     } catch (err) {
       if (signal.aborted || err instanceof Down) throw err
