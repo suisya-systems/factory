@@ -26,6 +26,30 @@ export const withoutUndecided = (spec: string) => {
   const next = after.search(/^## /m)
   return before + (next < 0 ? '' : after.slice(next))
 }
+export const undecidedItems = (spec: string) => spec.split(UNDECIDED)[1]?.split(/^## /m)[0].trim().split('\n') ?? []
+
+// #52: in lap 11 the spec drafter moved a point the request decides into Undecided ("Whether PUT /users/{id} requires
+// both `mode` and `muted`, or accepts a partial body." while the request gives that body as {"mode", "muted"}, no "?"),
+// so every builder chose freely and failed the scenario that followed the request. No model call, one kind of point: an
+// item that asks whether body fields must be present, naming an endpoint and the `fields`, when the request's line for that
+// endpoint writes each of them into its body ("f" required, "f"? optional; only the `{...}` after "with", not the response). The request's missing-field rule is shown too.
+// Over the 80 specs of laps 1-11 (1315 items) this flags the PUT item above and fx-invoice's "missing or invalid `today`"
+// on POST /clock (the request: a missing field is 400), nothing else.
+// ponytail: word matching, not reading; other kinds of answered points (status codes, limits) are not looked for.
+const ENDPOINT = /\b(GET|POST|PUT|PATCH|DELETE)\s+`?(\/[^\s`,;)"]*)/g
+const endpoint = (m: RegExpMatchArray) => `${m[1]} ${m[2].replace(/[.?]+$/, '').replace(/\{[^}]*\}|:\w+/g, '{}')}`
+const bodyOf = (line: string, eps: Set<string>) => [...line.matchAll(ENDPOINT)].filter((m) => eps.has(endpoint(m)))
+  .map((m) => line.slice(m.index! + m[0].length).match(/^`?\s+with\s+`(\{[^`]*\})`/)?.[1]).find(Boolean)
+export function undecidedInRequest(spec: string, request: string): { item: string; lines: string[] }[] {
+  const lines = request.split('\n').map((l) => l.trim())
+  const missing = lines.find((l) => /\bmissing\b[^.;]*\bfield/i.test(l))
+  return undecidedItems(spec).flatMap((item) => {
+    const eps = new Set([...item.matchAll(ENDPOINT)].map(endpoint)), fields = [...item.matchAll(/`([A-Za-z_]\w*)`/g)].map((m) => m[1])
+    if (!eps.size || !fields.length || !/\b(require[sd]?|missing|partial|optional|omit(s|ted)?)\b/i.test(item)) return []
+    const line = lines.find((l) => { const b = bodyOf(l, eps); return b !== undefined && fields.every((f) => b.includes(`"${f}"`)) })
+    return line ? [{ item, lines: [line, ...(missing ? [missing] : [])] }] : []
+  })
+}
 
 export const CLASSIFIER_BUDGET = { maxCostUsd: 0.5, timeoutMs: 3 * 60_000 }
 
