@@ -100,7 +100,7 @@ test('every role the factory calls a model with has its own entry in MODEL_BY_RO
   for (const f of readdirSync(join(REPO, 'src')).filter((f) => f.endsWith('.ts'))) {
     for (const m of readFileSync(join(REPO, 'src', f), 'utf8').matchAll(/role: '([\w-]+)'|ask\(model, '([\w-]+)'/g)) roles.add(m[1] ?? m[2])
   }
-  assert.deepEqual([...roles].sort(), ['builder', 'classifier', 'judge', 'scenario-drafter', 'spec-drafter', 'splitter'])
+  assert.deepEqual([...roles].sort(), ['builder', 'classifier', 'judge', 'scenario-drafter', 'spec-drafter', 'splitter', 'user-agent'])
   assert.deepEqual(Object.keys(MODEL_BY_ROLE).sort(), [...roles].sort())
 })
 

@@ -151,13 +151,14 @@ export function checkStep(st: Step, status: number, json: unknown, vars: Record<
 }
 
 // The request exactly as it is sent (the approval summary shows the same object): path and body after
-// placeholder substitution, headers with the default content-type applied.
-export function buildRequest(st: Omit<Step, 'expect'>, vars: Record<string, unknown>) {
-  const path = fill(st.path, vars) as string
-  const body = st.body === undefined ? undefined : JSON.stringify(fill(st.body, vars))
+// placeholder substitution, headers with the default content-type applied. vars null (#30, a user action): sent literally.
+export function buildRequest(st: Omit<Step, 'expect'>, vars: Record<string, unknown> | null) {
+  const f = (x: unknown) => (vars ? fill(x, vars) : x)
+  const path = f(st.path) as string
+  const body = st.body === undefined ? undefined : JSON.stringify(f(st.body))
   // Header names are case-insensitive: a scenario's own "Content-Type" replaces the default, never joins it
   // (a plain-object merge sent "application/json, application/json").
-  const headers = new Headers(fill(st.headers ?? {}, vars) as Record<string, string>)
+  const headers = new Headers(f(st.headers ?? {}) as Record<string, string>)
   if (body && !headers.has('content-type')) headers.set('content-type', 'application/json')
   return { method: st.method, path, body, headers }
 }
@@ -173,7 +174,7 @@ function fakeLog(fake: Fake): string {
   return `; the fake received ${log.length} request(s)${log.map((r, i) => `\n  ${i + 1}. ${r.method} ${r.path} body: ${r.body === undefined ? 'none' : clip(typeof r.body === 'string' ? r.body : JSON.stringify(r.body))}`).join('')}`
 }
 
-async function send(port: number, st: Omit<Step, 'expect'>, vars: Record<string, unknown>, signal: AbortSignal) {
+async function send(port: number, st: Omit<Step, 'expect'>, vars: Record<string, unknown> | null, signal: AbortSignal) {
   const { path, body, headers } = buildRequest(st, vars)
   const res = await fetch(`http://127.0.0.1:${port}${path}`, {
     method: st.method, body, headers,
@@ -183,7 +184,7 @@ async function send(port: number, st: Omit<Step, 'expect'>, vars: Record<string,
   const raw = await text(res)
   let json: unknown
   try { json = raw ? JSON.parse(raw) : undefined } catch { json = undefined }
-  return { res, json }
+  return { res, json, raw }
 }
 
 // steps[i] is step from + i + 1 of the scenario. port 0: the app is not started yet (only service steps run).
@@ -284,6 +285,64 @@ export async function runScenario(appDir: string, s: Scenario, signal: AbortSign
       return { ...base, pass: r.failedStep === undefined, ...r }
     }, (detail) => ({ ...base, pass: false, failedStep: 0, detail }), fake)
   } finally { fake?.close() }
+}
+
+// ---- user sessions (#30) ----
+// One app (with its fake and browser, as for a scenario) kept running while `go` sends it actions one by one, as a user would:
+// its data stays between actions. An action is a step without checks; what comes back is what a user sees of it (bounded by user.ts).
+// The app starts at the first action that is not a service action, so service answers set before it are there when it starts.
+export type Action = Omit<Step, 'expect' | 'capture'>
+export type Seen = { status?: number; headers?: Record<string, string>; body?: string; page?: Record<string, string[]>; error?: string }
+export async function withSession<T>(appDir: string, signal: AbortSignal, o: JudgeOpts, go: (act: (a: Action) => Promise<Seen>) => Promise<T>, failed: (why: string) => T): Promise<T> {
+  const fake = o.service ? startFake() : undefined
+  const ui: { browser?: Browser } = {}
+  class Down extends Error {}
+  let app: { port: Promise<number>; done: () => void; run: Promise<unknown> } | undefined
+  const start = () => {
+    let done!: () => void, up!: (p: number) => void, down!: (e: unknown) => void
+    const end = new Promise<void>((r) => (done = r)), port = new Promise<number>((ok, ko) => { up = ok; down = ko })
+    const run = withApp(appDir, signal, (p) => { up(p); return end }, (why) => down(new Down(why)), fake).catch(down)
+    return { port, done, run }
+  }
+  // Past the fake's limits it cuts the app's traffic: every later result says so, as a scenario fails then.
+  const act = async (a: Action): Promise<Seen> => {
+    const seen = await act1(a)
+    return fake?.overflow() ? { ...seen, error: `${seen.error ? `${seen.error}; ` : ''}the app sent the external service more than the fake keeps (later traffic was cut)` } : seen
+  }
+  const act1 = async (a: Action): Promise<Seen> => {
+    try {
+      if (a.service) {
+        if (!fake) return { error: 'this app declares no external service' }
+        const r = fake.control(a.method, a.path, a.body)
+        return { status: r.status, ...(r.json === undefined ? {} : { body: JSON.stringify(r.json) }) }
+      }
+      const port = await (app ??= start()).port
+      if (a.ui) {
+        if (!o.ui) return { error: 'this app declares no browser pages' }
+        ui.browser ??= await openBrowser(port, signal)
+        const status = await ui.browser.act({ ui: a.ui, target: a.target, path: a.path, text: a.text }, port)
+        // ponytail: a fixed pause before reading the page (scenarios re-read until their checks pass; a user has no checks).
+        await new Promise((r) => setTimeout(r, 500))
+        return { ...(a.ui === 'goto' ? { status } : {}), page: await ui.browser.snapshot() }
+      }
+      const { res, raw } = await send(port, a, null, signal)
+      return { status: res.status, headers: Object.fromEntries(res.headers), body: raw }
+    } catch (err) {
+      if (signal.aborted || err instanceof Down) throw err
+      return { error: (err as Error).message }
+    }
+  }
+  try {
+    return await go(act)
+  } catch (e) {
+    if (e instanceof Down) return failed(e.message)
+    throw e
+  } finally {
+    await ui.browser?.close()
+    app?.done()
+    await app?.run
+    fake?.close()
+  }
 }
 
 // ---- probes (lap 5) ----

@@ -22,7 +22,7 @@ export type Step = {
 export type LapDef = { name: string; home?: string; steps: Step[] }
 
 // Commands a step may run. approve / stop / serve are not steps: approval happens at a gate, by a human.
-const FACTORY_STEPS = ['draft', 'run', 'replicate', 'tally', 'probe-isolation', 'observe']
+const FACTORY_STEPS = ['draft', 'run', 'replicate', 'tally', 'probe-isolation', 'observe', 'user-judge']
 const FREE = ['tally', 'observe'] // no model call: may be `always`
 const KEYS: Record<string, string[]> = { factory: ['newShipTarget', 'always', 'redraft'], exec: ['always'], copy: ['from', 'to'], gate: ['approve', 'fix', 'read'], parallel: ['max'] }
 // A group runs side by side only what shares nothing but the lap ledger: each change its own run dir, work dir,

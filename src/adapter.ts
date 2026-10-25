@@ -48,6 +48,7 @@ export function cliSandbox(t: Task): SandboxOpts {
 // two drafters and the classifier silently got the fallback). A role missing here is an error, never a default.
 export const MODEL_BY_ROLE: Record<string, string> = {
   splitter: 'claude-opus-5-5', 'spec-drafter': 'claude-opus-5-5', 'scenario-drafter': 'claude-opus-5-5', classifier: 'claude-opus-5-5', builder: 'claude-opus-5-5', judge: 'claude-opus-5-5',
+  'user-agent': 'claude-opus-5-5', // #30: uses the built app (user.ts); it reads builder output, so first family only
 }
 // Lap 8 (owner decision 2026-10-18): a second model family, for the two drafter roles only. The builder, and every
 // role that reads builder-written code, stays on the first family, so the second family's login is never mounted
