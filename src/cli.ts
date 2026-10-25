@@ -11,6 +11,7 @@ import { lap } from './lap.ts'
 import { approvePlan, assertIdsFree, derivedIds, isPlan, planDir, runPlan, splitRequest, writePlan, type Plan } from './plan.ts'
 import { replicate, tally } from './replicate.ts'
 import { runChange } from './run.ts'
+import { userJudge } from './user.ts'
 import { UNDECIDED, type Classification } from './classify.ts'
 import { buildRequest, clip, fill, isObj, type Scenario } from './scenario.ts'
 import { CONTROL } from './fake.ts'
@@ -46,6 +47,10 @@ const USAGE = `usage: factory <command>
                                                    K independent builds from the approved spec in empty repos;
                                                    scenarios + probes only, no LLM judge, nothing ships
   tally <id>                                       tables of the replicates' probe answers and scenario passes
+  user-judge <id> --request <file> [--sessions 0-5 (default 1)] [--max-cost N (default 10, this arm only)]
+                                                   REAL model calls: a separate judge arm (#30). A user agent uses each
+                                                   recorded build of <id> (run attempts or replicates) and gives a verdict;
+                                                   writes runs/<id>/user/ and compare.md. It never changes pass/fail
   watch --ship-target <repo> [--port N] [--interval SEC | --once]
                                                    poll the prod signals (all ports, or N); a new 5xx / stderr error sign becomes a
                                                    draft (--base = the ship target) that STOPS for approval; never approves or ships
@@ -59,10 +64,10 @@ const USAGE = `usage: factory <command>
                                                    gate (exit 3) and prints the summary to read and the resume
                                                    command; the same command resumes, skipping finished steps
   serve --port N                                   (internal) production supervisor
---model <role>=<model> (repeatable; draft, replicate, probe-isolation, split, watch): the model for that role in this command.
+--model <role>=<model> (repeatable; draft, replicate, probe-isolation, split, watch, user-judge): the model for that role in this command.
 After \`stop\`, every command refuses to start until the STOP file is deleted by hand.`
-const COMMANDS = ['draft', 'approve', 'run', 'serve', 'observe', 'stop', 'probe-isolation', 'replicate', 'tally', 'lap', 'split', 'plan', 'watch']
-const MODEL_COMMANDS = ['draft', 'replicate', 'probe-isolation', 'split', 'watch']
+const COMMANDS = ['draft', 'approve', 'run', 'serve', 'observe', 'stop', 'probe-isolation', 'replicate', 'tally', 'lap', 'split', 'plan', 'watch', 'user-judge']
+const MODEL_COMMANDS = ['draft', 'replicate', 'probe-isolation', 'split', 'watch', 'user-judge']
 
 // The canary is a random string the probe plants in the vault; seeing it outside means the vault leaked.
 // The probe passes only if the canary is in neither the reply nor any regular file the model left
@@ -183,7 +188,7 @@ export async function main(argv: string[], model: Model = realModel): Promise<nu
       args: argv, allowPositionals: true,
       options: { help: { type: 'boolean', short: 'h' }, request: { type: 'string' }, base: { type: 'string' }, signals: { type: 'string' }, by: { type: 'string' }, version: { type: 'string' }, note: { type: 'string' }, 'ship-target': { type: 'string' },
         'max-cost': { type: 'string' }, 'max-attempts': { type: 'string' }, port: { type: 'string' }, 'traffic-base': { type: 'string' },
-        model: { type: 'string', multiple: true }, 'spec-from': { type: 'string' }, spec: { type: 'string' }, k: { type: 'string' }, score: { type: 'string' }, probes: { type: 'string' }, rescore: { type: 'boolean' }, minority: { type: 'boolean' }, 'minority-brief': { type: 'string' }, service: { type: 'boolean' }, ui: { type: 'boolean' }, 'iface-from': { type: 'string' }, interval: { type: 'string' }, once: { type: 'boolean' }, retries: { type: 'string' }, feedback: { type: 'string' }, approve: { type: 'string' } },
+        model: { type: 'string', multiple: true }, 'spec-from': { type: 'string' }, spec: { type: 'string' }, k: { type: 'string' }, score: { type: 'string' }, probes: { type: 'string' }, rescore: { type: 'boolean' }, minority: { type: 'boolean' }, 'minority-brief': { type: 'string' }, service: { type: 'boolean' }, ui: { type: 'boolean' }, 'iface-from': { type: 'string' }, interval: { type: 'string' }, once: { type: 'boolean' }, retries: { type: 'string' }, feedback: { type: 'string' }, approve: { type: 'string' }, sessions: { type: 'string' } },
     })
   } catch (e) { console.error(`factory: ${(e as Error).message}\n${USAGE}`); return 2 }
   const { positionals, values: v } = parsed
@@ -311,6 +316,12 @@ export async function main(argv: string[], model: Model = realModel): Promise<nu
       return 0
     }
     case 'tally': if (!id) break; console.log(tally(sd, id)); return 0
+    case 'user-judge': {
+      if (!id || !v.request) break
+      console.log(await userJudge({ changeId: id, model, stateDir: sd, request: readFileSync(v.request, 'utf8'), sessions: v.sessions === undefined ? undefined : Number(v.sessions),
+        maxCostUsd: v['max-cost'] ? Number(v['max-cost']) : undefined, stopFile, requestedModels }))
+      return 0
+    }
     case 'serve': await serve(sd, port); return -1 // keeps running
     case 'observe': console.log(JSON.stringify(observe(sd, port), null, 2)); return 0
     case 'stop': {

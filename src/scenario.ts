@@ -183,7 +183,7 @@ async function send(port: number, st: Omit<Step, 'expect'>, vars: Record<string,
   const raw = await text(res)
   let json: unknown
   try { json = raw ? JSON.parse(raw) : undefined } catch { json = undefined }
-  return { res, json }
+  return { res, json, raw }
 }
 
 // steps[i] is step from + i + 1 of the scenario. port 0: the app is not started yet (only service steps run).
@@ -283,6 +283,42 @@ export async function runScenario(appDir: string, s: Scenario, signal: AbortSign
       if (r.failedStep === undefined && fake?.overflow()) return { ...base, pass: false, failedStep: s.steps.length, detail: 'the app sent the external service more than the fake keeps' }
       return { ...base, pass: r.failedStep === undefined, ...r }
     }, (detail) => ({ ...base, pass: false, failedStep: 0, detail }), fake)
+  } finally { fake?.close() }
+}
+
+// ---- user sessions (#30) ----
+// One app (with its fake and browser, as for a scenario) kept running while `go` sends it actions one by one, as a user would:
+// its data stays between actions. An action is a step without checks; what comes back is what a user sees of it (bounded by user.ts).
+export type Action = Omit<Step, 'expect' | 'capture'>
+export type Seen = { status?: number; headers?: Record<string, string>; body?: string; page?: Record<string, string[]>; error?: string }
+export async function withSession<T>(appDir: string, signal: AbortSignal, o: JudgeOpts, go: (act: (a: Action) => Promise<Seen>) => Promise<T>, failed: (why: string) => T): Promise<T> {
+  const fake = o.service ? startFake() : undefined
+  const ui: { browser?: Browser } = {}
+  let port = 0
+  const act = async (a: Action): Promise<Seen> => {
+    try {
+      if (a.service) {
+        if (!fake) return { error: 'this app declares no external service' }
+        const r = fake.control(a.method, a.path, a.body)
+        return { status: r.status, ...(r.json === undefined ? {} : { body: JSON.stringify(r.json) }) }
+      }
+      if (a.ui) {
+        if (!o.ui) return { error: 'this app declares no browser pages' }
+        ui.browser ??= await openBrowser(port, signal)
+        const status = await ui.browser.act({ ui: a.ui, target: a.target, path: a.path, text: a.text }, port)
+        // ponytail: a fixed pause before reading the page (scenarios re-read until their checks pass; a user has no checks).
+        await new Promise((r) => setTimeout(r, 500))
+        return { ...(a.ui === 'goto' ? { status } : {}), page: await ui.browser.snapshot() }
+      }
+      const { res, raw } = await send(port, a, {}, signal)
+      return { status: res.status, headers: Object.fromEntries(res.headers), body: raw }
+    } catch (err) {
+      if (signal.aborted) throw err
+      return { error: (err as Error).message }
+    }
+  }
+  try {
+    return await withApp(appDir, signal, (p) => { port = p; return go(act).finally(() => ui.browser?.close()) }, failed, fake)
   } finally { fake?.close() }
 }
 
