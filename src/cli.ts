@@ -12,7 +12,7 @@ import { approvePlan, assertIdsFree, derivedIds, isPlan, planDir, runPlan, split
 import { replicate, tally } from './replicate.ts'
 import { runChange } from './run.ts'
 import { userJudge } from './user.ts'
-import { UNDECIDED, type Classification } from './classify.ts'
+import { UNDECIDED, undecidedInRequest, undecidedItems, type Classification } from './classify.ts'
 import { buildRequest, clip, fill, isObj, type Scenario } from './scenario.ts'
 import { CONTROL } from './fake.ts'
 import { exportTree, removeTree, sandboxGit } from './sandbox.ts'
@@ -138,7 +138,8 @@ export function requestLines(s: Scenario): string[] {
   })
 }
 
-export function approvalSummary(id: string, d: Draft, version: string): string {
+// request: the request text the change was drafted from (#52); without it the request check is left out.
+export function approvalSummary(id: string, d: Draft, version: string, request?: string): string {
   const counts: Record<string, { inSpec: number; notInSpec: number }> = {}
   for (const s of d.scenarios) {
     const c = (counts[s.kind] ??= { inSpec: 0, notInSpec: 0 })
@@ -153,12 +154,16 @@ export function approvalSummary(id: string, d: Draft, version: string): string {
   const contra = disagree('contradicts'), silent = disagree('unstated')
   const keyPoints = d.spec.split('\n').filter((l) => /^\s*(#|[-*]|\d+\.)/.test(l)).slice(0, 25)
   // The points the spec leaves to the builder (lap 3), shown whole: the key points above are capped.
-  const undecided = UNDECIDED.test(d.spec) ? d.spec.split(UNDECIDED)[1].split(/^## /m)[0].trim().split('\n') : []
+  const undecided = undecidedItems(d.spec)
+  const answered = request === undefined ? null : undecidedInRequest(d.spec, request)
   const minority = d.assumptions.filter((a) => a.includes('[minority]')) // lap 6: stored with a "(scenario writer) " prefix
   return [
     `# Approval request: ${id}`, '',
     `Version: ${version}`, '',
     `Approve with: \`npm run factory -- approve ${id} --by <name> --version ${version}\`  (approval fixes this exact set; to change anything, draft a new change)`, '',
+    ...(answered ? [`## Undecided in the spec, but the request may decide it (${answered.length})`,
+      'The builder sees only the spec and chooses freely on Undecided points; the hidden scenarios follow the request. If the request decides the point, do not approve: draft a new change.',
+      ...(answered.length ? answered.flatMap((a) => [a.item, ...a.lines.map((l) => `  - request: ${l.replace(/^[-*]\s*/, '')}`)]) : ['- none']), ''] : []),
     '## Spec key points', ...keyPoints, '',
     ...(undecided.length ? ['## Undecided in the spec (left to the builder)', ...undecided, ''] : []),
     ...(minority.length ? ['## Minority choices (the scenario writer chose these on purpose; most builders are expected to miss them at first)', ...minority.map((a) => `- ${a}`), ''] : []),
@@ -239,7 +244,7 @@ export async function main(argv: string[], model: Model = realModel): Promise<nu
         const d: Draft = { ...drafted, base: { baseSha: app?.sha ?? null, requestSha256 } }
         const dir = writeDraft(sd, id, d)
         const version = hash(dir)
-        writeFileSync(join(dir, 'approval-summary.md'), approvalSummary(id, d, version))
+        writeFileSync(join(dir, 'approval-summary.md'), approvalSummary(id, d, version, request))
         console.log(`drafted ${id} (version ${version}). Factory stopped; waiting for human approval. Summary: ${join(dir, 'approval-summary.md')}`)
         return 0
       } catch (e) {

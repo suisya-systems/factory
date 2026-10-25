@@ -5,7 +5,7 @@ import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from
 import { join } from 'node:path'
 import type { Model, Task } from '../src/adapter.ts'
 import { main, approvalSummary } from '../src/cli.ts'
-import { classify, classifyReply, compareStep, predictInstruction, withoutUndecided } from '../src/classify.ts'
+import { classify, classifyReply, compareStep, predictInstruction, undecidedInRequest, withoutUndecided } from '../src/classify.ts'
 import { startGuard, Stop } from '../src/limits.ts'
 import { draft, extractJson } from '../src/roles.ts'
 import { runScenario, type Scenario } from '../src/scenario.ts'
@@ -298,6 +298,35 @@ test('lap 3: the spec drafter must leave open points under "## Undecided"; the b
   assert.match(seen[0].instruction, /Do NOT decide behaviour/)
   const s = approvalSummary('x', { ...d, assumptions: [] }, 'v')
   assert.match(s, /## Undecided in the spec[^\n]*\n- the status code for an unknown id\n\n/) // stops before the appended interface
+})
+
+test('#52: an Undecided item the request already answers is shown before approval (lap 11 notify-queue, no model)', () => {
+  const request = readFileSync(new URL('../requests/notify-queue.md', import.meta.url), 'utf8')
+  // Items from the lap-11 notify-queue spec (.factory-lap11/vault/notify-queue-cc-p/spec.md, its Undecided section).
+  const put = '- Whether PUT /users/{id} requires both `mode` and `muted`, or accepts a partial body.'
+  const others = ['- Whether an unknown `userId` in the POST /events body is 404 or 400.', '- Whether two users may share the same email.',
+    '- The rules for the items of `muted`: length, type, and whether they follow the 1 to 40 character topic rule.', '- Whether a Content-Type header is required or checked.']
+  const spec = (items: string[]) => `# Notify\n- PUT /users/{id} changes settings.\n\n## Undecided\n\n${items.join('\n')}\n\n## External service (factory)\nx\n`
+  const hits = undecidedInRequest(spec([put, ...others]), request)
+  assert.deepEqual(hits.map((h) => h.item), [put])
+  assert.match(hits[0].lines[0], /^- `PUT \/users\/\{id\}` with `\{"mode", "muted"\}`/)
+  assert.match(hits[0].lines[1], /^- Errors: .*a missing or wrong-typed field/)
+  assert.deepEqual(undecidedInRequest(spec(others), request), []) // the request does not answer these
+  // the same point in another spelling, and a body field the request does not write into the PUT body
+  assert.equal(undecidedInRequest(spec(['- Whether `PUT /users/:id` accepts a body with `muted` missing.']), request).length, 1)
+  assert.deepEqual(undecidedInRequest(spec(['- Whether `PUT /users/{id}` requires `email`.']), request), [])
+  const s = approvalSummary('x', { spec: spec([put, ...others]), scenarios: [], assumptions: [] }, 'v', request)
+  assert.match(s, /## Undecided in the spec, but the request may decide it \(1\)\n.*do not approve.*\n- Whether PUT \/users\/\{id\} requires both[^\n]*\n  - request: `PUT \/users\/\{id\}` with[^\n]*\n  - request: Errors: /)
+  assert.doesNotMatch(approvalSummary('x', { spec: spec([put]), scenarios: [], assumptions: [] }, 'v'), /request may decide/) // no request given
+})
+
+test('#52: the draft command passes the request to the check', async () => {
+  const { model } = fake()
+  const m: Model = (t) => t.role === 'spec-drafter'
+    ? Promise.resolve({ ok: true, costUsd: 0, text: JSON.stringify({ spec: '# Notify\n\n## Undecided\n- Whether PUT /users/{id} requires both `mode` and `muted`.\n', interface: IFACE, assumptions: [] }) })
+    : model(t)
+  assert.equal(await main(['draft', 'nq-52', '--request', new URL('../requests/notify-queue.md', import.meta.url).pathname], m), 0)
+  assert.match(readFileSync(join(vaultDir(sd, 'nq-52'), 'approval-summary.md'), 'utf8'), /## Undecided in the spec, but the request may decide it \(1\)/)
 })
 
 test('classifyReply: a re-captured name keeps its earlier value for "{{name}}"; each capture gets its own marker', () => {
