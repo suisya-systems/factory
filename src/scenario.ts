@@ -132,6 +132,9 @@ export const at = (json: unknown, path: string) => (path ? get(json, path) : jso
 // A capture path "header:<name>" reads a response header instead of the JSON body.
 export const HEADER = 'header:'
 
+// The page is read with whitespace collapsed and trimmed (browser.ts SNAPSHOT): a ui step's expected strings are read the same way.
+const squash = (x: unknown): unknown => typeof x === 'string' ? x.replace(/\s+/g, ' ').trim() : Array.isArray(x) ? x.map(squash) : isObj(x) ? Object.fromEntries(Object.entries(x).map(([k, v]) => [k, squash(v)])) : x
+
 export function checkStep(st: Step, status: number, json: unknown, vars: Record<string, unknown>, headers?: Headers): string | null {
   const e = st.expect ?? {}
   const statuses = e.status === undefined ? null : ([] as number[]).concat(e.status)
@@ -142,7 +145,7 @@ export function checkStep(st: Step, status: number, json: unknown, vars: Record<
     if (!Array.isArray(v) || v.length !== n) return `expected length ${n}${p ? ` at ${p}` : ''}, got ${Array.isArray(v) ? v.length : 'non-array'}`
   }
   for (const p of e.jsonHas ?? []) if (get(json, p) === undefined) return `response missing ${p}`
-  if (e.json !== undefined && !subset(fill(e.json, vars), json)) return 'response body did not match expected subset'
+  if (e.json !== undefined && !subset(st.ui ? squash(fill(e.json, vars)) : fill(e.json, vars), json)) return 'response body did not match expected subset'
   for (const [name, p] of Object.entries(st.capture ?? {})) {
     const v = p.startsWith(HEADER) ? (headers?.get(p.slice(HEADER.length)) ?? undefined) : get(json, p)
     if ((vars[name] = v) === undefined) return `capture ${name} missing from response`
