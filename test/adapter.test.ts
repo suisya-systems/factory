@@ -114,7 +114,9 @@ test('a role missing from the table is an error, not a default; a per-role model
 })
 
 test('--model values: only table roles and the listed models', () => {
-  assert.deepEqual(MODELS, ['claude-opus-5-5', 'claude-sonnet-5-5', 'gpt-6-astra'])
+  assert.deepEqual(MODELS, ['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'gpt-6-astra'])
+  assert.deepEqual(parseModels(['builder=claude-haiku-5-5']), { builder: 'claude-haiku-5-5' })
+  for (const role of Object.keys(MODEL_BY_ROLE).filter((r) => r !== 'builder')) assert.throws(() => parseModels([`${role}=claude-haiku-5-5`]), /for builder only/)
   assert.deepEqual(parseModels(['builder=claude-sonnet-5-5', 'scenario-drafter=claude-opus-5-5']), { builder: 'claude-sonnet-5-5', 'scenario-drafter': 'claude-opus-5-5' })
   assert.deepEqual(parseModels(['spec-drafter=gpt-6-astra', 'scenario-drafter=gpt-6-astra']), { 'spec-drafter': 'gpt-6-astra', 'scenario-drafter': 'gpt-6-astra' })
   for (const bad of ['drafter=claude-opus-5-5', 'builder=claude-sonnet-5', 'builder', 'builder=claude-opus-5-5=x', 'builder=gpt-6-astra', 'judge=gpt-6-astra', 'classifier=gpt-6-astra']) assert.throws(() => parseModels([bad]), /--model/)
