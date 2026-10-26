@@ -55,12 +55,17 @@ export const MODEL_BY_ROLE: Record<string, string> = {
 // where builder code runs. Its spend is not reported in USD (a subscription): the guard counts its calls instead.
 export const CROSS_MODELS = ['gpt-6-astra']
 export const CROSS_ROLES = ['spec-drafter', 'scenario-drafter']
+// calibrate-80 K2: the Haiku generation, for the builder only (it is priced by the CLI's own per-model costUSD, so no rate
+// table lives here; Anthropic's published per-token prices are the source behind that figure).
+export const HAIKU_MODELS = ['claude-haiku-5-5']
+export const HAIKU_ROLES = ['builder']
 // The models a `--model` override may name (lap 5 compares the first two).
-export const MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5', ...CROSS_MODELS]
+export const MODELS = ['claude-opus-5-5', 'claude-sonnet-5-5', ...HAIKU_MODELS, ...CROSS_MODELS]
 export function modelFor(t: Pick<Task, 'role' | 'model'>): string {
   if (!Object.hasOwn(MODEL_BY_ROLE, t.role)) throw new Error(`no model is set for role "${t.role}"`)
   const m = t.model ?? MODEL_BY_ROLE[t.role]
   if (CROSS_MODELS.includes(m) && !CROSS_ROLES.includes(t.role)) throw new Error(`model ${m} is for ${CROSS_ROLES.join(' / ')} only, not for role "${t.role}"`)
+  if (HAIKU_MODELS.includes(m) && !HAIKU_ROLES.includes(t.role)) throw new Error(`model ${m} is for ${HAIKU_ROLES.join(' / ')} only, not for role "${t.role}"`)
   return m
 }
 // The model a call will be made with, or null for a role the factory does not know (tests' own roles).
