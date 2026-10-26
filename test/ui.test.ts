@@ -13,7 +13,7 @@ import type { Replicate } from '../src/replicate.ts'
 import { checkWithin, draft, RUN_CONTRACT, runContract } from '../src/roles.ts'
 import { runChange } from '../src/run.ts'
 import { freePort } from '../src/sandbox.ts'
-import { runScenario, validateScenarios, type Scenario, type Step } from '../src/scenario.ts'
+import { checkStep, runScenario, validateScenarios, type Scenario, type Step } from '../src/scenario.ts'
 import { stopServer } from '../src/ship.ts'
 import { approve, hash, vaultDir, writeDraft } from '../src/vault.ts'
 import { CLASSIFICATION, freshState, gitTarget, tmp, writeApp } from './helpers.ts'
@@ -170,6 +170,20 @@ browserTest('tagged SVG, open shadow roots, display:contents and odd ids are rea
     ui({ ui: 'click', target: 'b', expect: { json: { b: ['1'] } } }),
   ]), never, { ui: true })
   assert.equal(r.pass, true, r.detail)
+})
+
+// #62: the page side is collapsed and trimmed, so the expected side is too (ui steps only; API bodies stay exact).
+browserTest('a ui expect with extra whitespace passes against a correct page', async () => {
+  const r = await runScenario(app, sc('ws', [ui({ ui: 'goto', path: '/', expect: { json: { addButton: ['  Add\n '] } } })]), never, { ui: true })
+  assert.equal(r.pass, true, r.detail)
+})
+
+test('a ui expect is compared collapsed and trimmed, an API expect as written', () => {
+  const page = { msg: ['Saved 2 items'] }
+  assert.equal(checkStep(ui({ ui: 'click', target: 'b', expect: { json: { msg: [' Saved  2\titems '] } } }), 0, page, {}), null)
+  assert.equal(checkStep(ui({ ui: 'click', target: 'b', expect: { json: { msg: ['Saved {{n}} items'] } } }), 0, page, { n: ' 2 ' }), null)
+  assert.match(checkStep(ui({ ui: 'click', target: 'b', expect: { json: { msg: ['Saved 3 items'] } } }), 0, page, {}) ?? '', /did not match/)
+  assert.match(checkStep({ method: 'GET', path: '/x', expect: { json: { msg: [' Saved 2 items'] } } } as Step, 200, page, {}) ?? '', /did not match/)
 })
 
 browserTest('a page past the snapshot cap fails the step, even where a cut snapshot would have passed', async () => {
