@@ -13,6 +13,7 @@ import { MODEL_BY_ROLE, type Model } from './adapter.ts'
 import { TARGET, UI_ACTIONS } from './browser.ts'
 import { CONTROL } from './fake.ts'
 import { CAPS, mergeLedger, startGuard, Stop, type Ledger } from './limits.ts'
+import { usesRun } from './program.ts'
 import { replicatesDir, type Replicate } from './replicate.ts'
 import { extractJson, specIface } from './roles.ts'
 import { exportTree, removeTree } from './sandbox.ts'
@@ -162,6 +163,7 @@ export type UserJudgeOpts = { changeId: string; model: Model; stateDir: string; 
 export async function userJudge(o: UserJudgeOpts): Promise<string> {
   const id = checkId(o.changeId), sd = o.stateDir
   const approved = loadApproved(sd, id)
+  if (usesRun(approved.spec)) throw new Error(`${id} is a command-line program; the user agent drives HTTP and pages only, so user-judge does not take it`)
   const requestSha256 = createHash('sha256').update(o.request).digest('hex')
   if (approved.base.requestSha256 !== requestSha256) throw new Error(`--request is not the request ${id} was drafted from (sha256 differs)`)
   const sessions = o.sessions ?? 1, capUsd = o.maxCostUsd ?? CAPS.maxCostUsd

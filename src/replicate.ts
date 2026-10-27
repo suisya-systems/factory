@@ -10,6 +10,7 @@ import type { Model, Result } from './adapter.ts'
 import { CAPS, mergeLedger, startGuard, type Ledger } from './limits.ts'
 import { build } from './roles.ts'
 import { exportTree, removeTree } from './sandbox.ts'
+import { usesRun } from './program.ts'
 import { BLOCKED, judgeOpts, OTHER, runProbe, runScenarios, validateProbes, type Probe, type ProbeResult, type ScenarioResult } from './scenario.ts'
 import { checkId, hiddenFile, loadApproved, type Approved } from './vault.ts'
 
@@ -19,10 +20,12 @@ export type ReplicateOpts = {
   requestedModels?: Record<string, string>
   score?: string[]; probesFile?: string; maxCostUsd?: number; stopFile?: string
   rescore?: boolean // re-run scenarios + probes on the kept workspaces; no model call
+  base?: string // the repo a change drafted with --base extends; each build starts as a clone of it (HEAD = the approved base)
 }
 export type Replicate = {
   changeId: string; n: number; builderModel: string; requestedModels: Record<string, string>; approvedVersion: string
   sha: string; builderOk: boolean; builderError: string | null; costUsd: number
+  baseSha?: string // the commit the build started from (a change that extends an app); absent = an empty repository
   answeredBy: string | null; costByModel: Record<string, number> | null // as the builder call reported them
   results: Record<string, ScenarioResult[]>; passed: Record<string, number> // per scored change id
   probes: ProbeResult[]; probesSha256: string | null; at: string; rescoredAt?: string
@@ -52,7 +55,6 @@ async function evaluate(ws: string, sha: string, scored: [string, Approved][], p
 export async function replicate(o: ReplicateOpts): Promise<Replicate[]> {
   const id = checkId(o.changeId)
   const approved = loadApproved(o.stateDir, id)
-  if (approved.base.baseSha) throw new Error(`${id} extends an app; replicate starts from an empty repository and only takes new-app changes`)
   const runDir = join(o.stateDir, 'runs', id)
   if (existsSync(join(runDir, 'run.json'))) throw new Error(`${id} already ran; replicate and run keep separate cost records, so one change takes only one of them`)
   // Builds are of THIS spec; another change's scenarios may judge them only if it was approved with the same spec.
@@ -92,6 +94,12 @@ export async function replicate(o: ReplicateOpts): Promise<Replicate[]> {
     return out
   }
 
+  // A change that extends an app starts each build as a clone of that app at the commit the drafters read; a new app starts empty.
+  const want = approved.base.baseSha
+  if (want && !o.base) throw new Error(`${id} extends an app (${want}); give --base <repo> at that commit`)
+  if (!want && o.base) throw new Error(`${id} is a new app; --base applies to a change drafted with --base`)
+  if (want && execFileSync('git', ['-C', o.base!, 'rev-parse', 'HEAD']).toString().trim() !== want) throw new Error(`--base ${o.base} is not at the approved base ${want}`)
+  if (probes.length && usesRun(approved.spec)) throw new Error('probes are HTTP only; a command-line program has none')
   if (!(Number.isInteger(o.k) && o.k >= 1)) throw new Error(`--k must be an integer >= 1, got ${o.k}`)
   const capUsd = o.maxCostUsd ?? CAPS.maxCostUsd
   if (!(Number.isFinite(capUsd) && capUsd > 0)) throw new Error(`max cost must be a positive number, got ${capUsd}`)
@@ -118,7 +126,10 @@ export async function replicate(o: ReplicateOpts): Promise<Replicate[]> {
       guard.check()
       const ws = join(wsRoot, `${prefix}${n}`)
       mkdirSync(ws)
-      execFileSync('git', ['init', '-q', '-b', 'main', ws], { stdio: 'pipe' }) // empty: no earlier answer to read
+      // empty (no earlier answer to read), or the app being extended, as `run` clones its ship target
+      // (checked out at the approved commit, whatever the repo's HEAD has become while earlier builds ran)
+      if (want) { execFileSync('git', ['clone', '-q', '--no-hardlinks', o.base!, ws], { stdio: 'pipe' }); execFileSync('git', ['-C', ws, 'checkout', '-q', '--detach', want], { stdio: 'pipe' }) }
+      else execFileSync('git', ['init', '-q', '-b', 'main', ws], { stdio: 'pipe' })
       const spent = guard.ledger.totalUsd
       last = null
       let b
@@ -126,7 +137,7 @@ export async function replicate(o: ReplicateOpts): Promise<Replicate[]> {
       guard.check()
       const r: Replicate = {
         changeId: id, n, builderModel: o.builderModel, requestedModels: o.requestedModels ?? {}, approvedVersion: approved.version,
-        sha: b.sha, builderOk: b.ok, builderError: b.error ?? null, costUsd: guard.ledger.totalUsd - spent,
+        sha: b.sha, builderOk: b.ok, builderError: b.error ?? null, costUsd: guard.ledger.totalUsd - spent, ...(want ? { baseSha: want } : {}),
         answeredBy: (last as Result | null)?.model ?? null, costByModel: (last as Result | null)?.costByModel ?? null,
         ...(await evaluate(ws, b.sha, scored, probes, guard.signal)), probesSha256, at: new Date().toISOString(),
       }

@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import type { Model } from './adapter.ts'
 import { CAPS, startGuard, Stop, type Ledger } from './limits.ts'
 import { build, feedbackFor, judge, type FeedbackMode, type Verdict } from './roles.ts'
+import { usesRun } from './program.ts'
 import { observe } from './serve.ts'
 import { ship, type PassMark } from './ship.ts'
 import { loadApproved, checkId } from './vault.ts'
@@ -97,13 +98,17 @@ export async function runChange(o: RunOpts) {
     guard.check()
     const mark: PassMark = { changeId: id, sha, approvedVersion: approved.version }
     writeFileSync(join(runDir, 'pass.json'), JSON.stringify(mark, null, 2))
-    const { release } = await ship(mark, work, o.shipTarget, o.stateDir, o.port, guard.signal)
+    // A command-line program has no server: its ship is the fast-forward of the ship target, and there is nothing to observe.
+    const served = !usesRun(approved.spec)
+    const { release } = await ship(mark, work, o.shipTarget, o.stateDir, o.port, guard.signal, served)
     record.shipped = { sha, release }
     guard.check() // a stop during the (uncancellable) last phase of ship: live, but the change is NOT reported as clean
-    await syntheticTraffic(o.port, o.trafficBase ?? '/memos')
-    await new Promise((r) => setTimeout(r, 200))
-    guard.check()
-    record.signals = observe(o.stateDir, o.port)
+    if (served) {
+      await syntheticTraffic(o.port, o.trafficBase ?? '/memos')
+      await new Promise((r) => setTimeout(r, 200))
+      guard.check()
+      record.signals = observe(o.stateDir, o.port)
+    }
     record.status = 'shipped'
   } catch (e) {
     let err = e as Error

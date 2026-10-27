@@ -55,7 +55,7 @@ export const CLASSIFIER_BUDGET = { maxCostUsd: 0.5, timeoutMs: 3 * 60_000 }
 
 // What the predictor sees of a scenario: the requests only. Anything else (id, title, summary, kind,
 // expect) would tell it the intended outcome.
-export const requestsOnly = (s: Scenario) => s.steps.map(({ method, path, body, headers, capture, service, ui, target, text }) => ({ method, path, body, headers, capture, service, ui, target, text }))
+export const requestsOnly = (s: Scenario) => s.steps.map(({ method, path, body, headers, capture, service, ui, target, text, run, stdin, files, read, env }) => ({ method, path, body, headers, capture, service, ui, target, text, run, stdin, files, read, env }))
 // #17: a step setting the fake's canned answer is the scenario's own setup, not app behaviour: its checks never count.
 const isSetup = (st: Step) => st.service === true && `${st.method} ${st.path.split('?')[0]}` === CONTROL.set
 const SERVICE_NOTE = `
@@ -71,6 +71,13 @@ Its response "body" is the page after the action: {"<testId>": [the visible text
 "status" is the HTTP status of the page for "goto" only (null otherwise).
 `
 
+// a run step starts the command-line program the spec declares; its "response" is the envelope the runner builds.
+const RUN_NOTE = `
+A request with "run" is not an HTTP request: it starts the command-line program the spec declares, with these arguments ("run"), standard input ("stdin") and environment ("env"), in a working directory
+that is empty at the start of the sequence and kept for the later requests ("files" are written there first). "status" is the program's exit code. The response "body" is
+{"stdout": <the standard output parsed as JSON when it is JSON, else the text>, "stderr": "<text>", "files": {"<path>": <the file parsed as JSON when it is JSON, else its text>}} with the files named in "read" (a file that was not written is absent).
+`
+
 export function predictInstruction(spec: string, app: string, s: Scenario): string {
   return `You are checking how much a spec determines. Below are a SPEC, the EXISTING APP code it extends (may be empty), and a sequence of HTTP requests sent to a FRESH, EMPTY instance of an app built from that spec. Predict each response from the spec and the code only.
 
@@ -82,7 +89,7 @@ ${app || '(none)'}
 
 REQUESTS (in order; "{{name}}" is a value captured from an earlier response, per that step's "capture": {"name": "dot.path in the JSON body" or "header:<name>"}):
 ${JSON.stringify(requestsOnly(s), null, 1)}
-${s.steps.some((st) => st.service) ? SERVICE_NOTE : ''}${s.steps.some((st) => st.ui) ? UI_NOTE : ''}
+${s.steps.some((st) => st.service) ? SERVICE_NOTE : ''}${s.steps.some((st) => st.ui) ? UI_NOTE : ''}${s.steps.some((st) => st.run) ? RUN_NOTE : ''}
 Reply with ONE JSON object: {"steps": [one entry per request, in order]}. Each entry:
 {"status": [<every status code the spec/code allows here>] or null if they do not determine it,
  "body": <the JSON response body as far as it is determined, or null>,

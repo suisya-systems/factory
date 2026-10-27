@@ -14,7 +14,8 @@ const REPO = dirname(dirname(fileURLToPath(import.meta.url)))
 // shown in the summary. base.json: the app version the drafters saw and the request text's hash.
 const FILES = ['spec.md', 'scenarios.json', 'assumptions.json', 'classification.json', 'base.json'] as const
 
-export type Base = { baseSha: string | null; requestSha256: string | null }
+// paths: the repo-relative paths the drafters were shown (`draft --base-path`); absent = the whole app.
+export type Base = { baseSha: string | null; requestSha256: string | null; paths?: string[] }
 export type Draft = { spec: string; scenarios: Scenario[]; assumptions: string[]; classification?: Classification[]; base?: Base }
 export type Approved = Required<Draft> & { version: string }
 

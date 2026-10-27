@@ -7,7 +7,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Model } from './adapter.ts'
 import { approve, checkId, hash, loadApproved, vaultDir } from './vault.ts'
-import { ask, checkWithin, specIface } from './roles.ts'
+import { ask, appBlock, checkWithin, specIface } from './roles.ts'
+import { contractOf, usesRun } from './program.ts'
 import { exportTree, removeTree, sandboxGit } from './sandbox.ts'
 import { isObj, judgeOpts, runScenarios } from './scenario.ts'
 
@@ -41,15 +42,16 @@ export function validateParts(x: unknown, plan: string): Part[] {
   })
 }
 
-const SPLIT_FORMAT = `Reply with ONE JSON object and nothing else:
+// extending (`split --base`): the request extends an app that already exists, so part 1 extends it too.
+const splitFormat = (extending: boolean) => `Reply with ONE JSON object and nothing else:
 {"parts": [{"id": "<lower-case-words-joined-by-dashes, at most 20 characters>", "title": "<short>", "request": "<the part's own request, in plain words>"}, ...]}
-Rules: ${MIN_PARTS} to ${MAX_PARTS} parts, in BUILD ORDER: part 1 builds a new app, every later part extends the app the earlier parts built.
+Rules: ${MIN_PARTS} to ${MAX_PARTS} parts, in BUILD ORDER: ${extending ? 'every part extends the EXISTING APP below, and each later part also the changes the earlier parts made' : 'part 1 builds a new app, every later part extends the app the earlier parts built'}.
 Each part is one small change a builder can finish alone. Each "request" must be self-contained (it is read without the others), say what
 this part adds, and use the names of the whole request. Together the parts must cover the whole request and add nothing to it.
 Do not decide behaviour the request leaves open. You cannot ask questions.`
 
-export async function splitRequest(model: Model, request: string, plan: string): Promise<Part[]> {
-  return ask(model, 'splitter', `You are the splitter of a software factory. The request below is too big for one change (an HTTP JSON API). Split it into ordered parts.\n\nREQUEST:\n${request}\n\n${SPLIT_FORMAT}`,
+export async function splitRequest(model: Model, request: string, plan: string, o: { app?: string; program?: boolean } = {}): Promise<Part[]> {
+  return ask(model, 'splitter', `You are the splitter of a software factory. The request below is too big for one change (${o.program ? 'a command-line program' : 'an HTTP JSON API'}). Split it into ordered parts.\n\nREQUEST:\n${request}\n${appBlock(o.app ?? '')}\n${splitFormat(o.app !== undefined)}`,
     (j) => validateParts(j?.parts, plan))
 }
 
@@ -157,6 +159,13 @@ export async function runPlan(sd: string, plan: string, o: PlanOpts, factory: (a
   const chainFile = join(dir, 'chain.json')
   const chain = readJson<{ shipTarget: string; port: number; initialHead: string }>(chainFile) ?? { shipTarget: target, port: o.port, initialHead: await head() }
   if (chain.shipTarget !== target || chain.port !== o.port) throw new Error(`plan ${plan} started with ship target ${chain.shipTarget} on port ${chain.port}; resume with the same`)
+  // a whole drafted with `split --base` extends an app that already exists: every part, part 1 too, is drafted against it
+  // (same paths shown, same contract), and the ship target must start at the commit the whole was drafted against.
+  // Checked before chain.json is written: a refused start leaves nothing that fixes the wrong commit as the plan's start.
+  const wholeSet = loadApproved(sd, p.wholeId)
+  const extending = wholeSet.base.baseSha !== null, basePaths = wholeSet.base.paths ?? []
+  if (extending && !existsSync(chainFile) && chain.initialHead !== wholeSet.base.baseSha) throw new Error(`plan ${plan}: the whole request was drafted against ${wholeSet.base.baseSha}, but the ship target is at ${chain.initialHead}`)
+  const program = usesRun(wholeSet.spec) ? contractOf(wholeSet.spec) : undefined
   if (!existsSync(chainFile)) writeFileSync(chainFile, JSON.stringify(chain, null, 2))
 
   const reps: PartRep[] = p.parts.map((x) => ({ part: x.id, changeIds: [], status: 'pending' }))
@@ -181,7 +190,10 @@ export async function runPlan(sd: string, plan: string, o: PlanOpts, factory: (a
       const vet = (id: string): string | null => {
         const a = loadApproved(sd, id)
         if (a.base.requestSha256 !== sha256(part.request)) return `${id} was not drafted from the plan's request for part ${part.id}`
-        if (a.base.baseSha !== (i === 0 ? null : prev)) return `${id} was drafted against ${a.base.baseSha ?? 'no app'}, not ${i === 0 ? 'a new app' : prev}`
+        const from = i === 0 && !extending ? null : prev
+        if (a.base.baseSha !== from) return `${id} was drafted against ${a.base.baseSha ?? 'no app'}, not ${from ?? 'a new app'}`
+        if (JSON.stringify(a.base.paths ?? []) !== JSON.stringify(basePaths)) return `${id} was shown other paths of the app than the plan's whole request`
+        if (usesRun(a.spec) !== !!program || (program && JSON.stringify(contractOf(a.spec)) !== JSON.stringify(program))) return `${id} does not declare the command-line contract of the plan's whole request`
         try { checkWithin(JSON.parse(specIface(a.spec)), JSON.parse(specIface(loadApproved(sd, p.wholeId).spec))) } catch (e) { return `${id}: ${(e as Error).message}` }
         return null
       }
@@ -199,7 +211,9 @@ export async function runPlan(sd: string, plan: string, o: PlanOpts, factory: (a
         const reqFile = join(dir, 'parts', `${part.id}.md`)
         writeFileSync(reqFile, part.request)
         // The plan's interface binds the part: the whole scenarios and the parts must speak one vocabulary.
-        const code = await factory(['draft', id0, '--request', reqFile, '--iface-from', p.wholeId, ...(i > 0 ? ['--base', target] : [])])
+        const contractFile = join(dir, 'parts', 'contract.json')
+        if (program) writeFileSync(contractFile, JSON.stringify(program))
+        const code = await factory(['draft', id0, '--request', reqFile, '--iface-from', p.wholeId, ...(i > 0 || extending ? ['--base', target, ...basePaths.flatMap((x) => ['--base-path', x])] : []), ...(program ? ['--contract', contractFile] : [])])
         if (code !== 0) return report('failed', `draft ${id0}: exit ${code}`)
         rep.status = 'drafted'
         rep.changeIds = [id0]

@@ -7,6 +7,7 @@ import { parseArgs } from 'node:util'
 import { crossLoginProbe, crossLoginSecrets, MODEL_BY_ROLE, parseModels, realModel, type Model } from './adapter.ts'
 import { CAPS, chargeLap, lapSpent, mergeLedger, startGuard, type Ledger } from './limits.ts'
 import { draft, specBody, specIface, type FeedbackMode } from './roles.ts'
+import { buildDeps, checkContract, contractOf, loadDeps, usesRun } from './program.ts'
 import { lap } from './lap.ts'
 import { approvePlan, assertIdsFree, derivedIds, isPlan, planDir, runPlan, splitRequest, writePlan, type Plan } from './plan.ts'
 import { replicate, tally } from './replicate.ts'
@@ -34,8 +35,15 @@ const USAGE = `usage: factory <command>
         [--ui]                                     the app has browser pages: the interface names their test ids and the
                                                    hidden scenarios drive them in a sandboxed headless browser while judging
         [--iface-from <approved id>]               the spec's interface must stay within that change's interface (plan parts)
-  split <plan> --request <file>                    REAL model call: split a request too big for one change into ordered parts,
+        [--base-path <path>[:START-END]]           (with --base, repeatable) show the drafters only the tracked files at or under
+                                                   that path, or only those lines of one file (the rest are listed by name, lines
+                                                   outside are not shown at all); the choice is part of the approved version
+        [--contract <file>]                        the app is a command-line program: the file is its execution contract (JSON:
+                                                   command, pythonPath, deps); the hidden scenarios start it with "run" steps while judging
+  split <plan> --request <file> [--base <repo> [--base-path <path>]] [--contract <file>]
+                                                   REAL model call: split a request too big for one change into ordered parts,
                                                    draft the whole request as <plan>-whole, then STOP for approval
+                                                   (--base: the parts, part 1 too, extend that repo; --base-path, --contract as for draft)
   approve <id> --by <name> --version <hash> [--note <text>]   human entrance approval of the version you read
                                                    (<id> may be a plan: approves the plan and its whole draft together)
   plan <plan> --ship-target <repo> [--retries 0-3 (default 1)] [--port N] [--max-cost N] [--max-attempts N] (per run)
@@ -43,8 +51,9 @@ const USAGE = `usage: factory <command>
                                                    approval, runs the whole-request scenarios after the last part ships
   run <id> --ship-target <repo> [--max-cost N (per change, drafter included)] [--max-attempts N] [--port N] [--traffic-base /memos]
       [--feedback summaries|bare]               bare: a rejected builder gets one "failed: a hidden scenario" line per failed scenario
-  replicate <id> --k N [--score <id,id>] [--probes <file under vault/>] [--max-cost N] [--rescore]
-                                                   K independent builds from the approved spec in empty repos;
+  replicate <id> --k N [--score <id,id>] [--probes <file under vault/>] [--max-cost N] [--rescore] [--base <repo>]
+                                                   K independent builds from the approved spec in empty repos (--base: clones of that
+                                                   repo, for a change drafted with --base; its HEAD must be the approved base);
                                                    scenarios + probes only, no LLM judge, nothing ships
                                                    (--rescore keeps each replaced record in replicates/history/)
   tally <id>                                       tables of the replicates' probe answers and scenario passes,
@@ -67,10 +76,13 @@ const USAGE = `usage: factory <command>
                                                    run a whole lap from its definition; stops only at a human
                                                    gate (exit 3) and prints the summary to read and the resume
                                                    command; the same command resumes, skipping finished steps
+  deps build --lock <file> --wheelhouse <dir> [--python <bin>]   (operator, no model) build a Python dependency set from a hash-pinned lock file
+                                                   and the wheels it names, under $FACTORY_DEPS (default /opt/factory-deps); the
+                                                   contract of a command-line program names the set by the lock file's sha256
   serve --port N                                   (internal) production supervisor
 --model <role>=<model> (repeatable; draft, replicate, probe-isolation, split, watch, user-judge): the model for that role in this command.
 After \`stop\`, every command refuses to start until the STOP file is deleted by hand.`
-const COMMANDS = ['draft', 'approve', 'run', 'serve', 'observe', 'stop', 'probe-isolation', 'replicate', 'tally', 'lap', 'split', 'plan', 'watch', 'user-judge']
+const COMMANDS = ['draft', 'approve', 'run', 'serve', 'observe', 'stop', 'probe-isolation', 'replicate', 'tally', 'lap', 'split', 'plan', 'watch', 'user-judge', 'deps']
 const MODEL_COMMANDS = ['draft', 'replicate', 'probe-isolation', 'split', 'watch', 'user-judge']
 
 // The canary is a random string the probe plants in the vault; seeing it outside means the vault leaked.
@@ -84,23 +96,75 @@ function foundIn(dir: string, needles: string[]): boolean {
 
 // The app being extended, as the drafters and the classifier see it: the tracked text files at HEAD,
 // exported the same way the judge and the shipper export a commit.
+// paths (`--base-path`): only the files at or under these repo-relative paths are pasted; the rest are listed by name, so a repository
+// larger than the cap can still be a base. `path:START-END` (a file, 1-based inclusive lines) pastes just those lines of it, for a file
+// that alone is too big: the lines outside are never given to the drafters or the classifier. The builder works in a clone of the whole
+// repository either way.
 // ponytail: pasted whole into the prompts (capped); give the drafters read access instead if apps grow.
 const APP_MAX_CHARS = 200_000
-export async function appSnapshot(repo: string): Promise<{ sha: string; text: string }> {
+const NOT_SHOWN_MAX = 300
+const RANGE = /^(.+):(\d+)-(\d+)$/
+export function checkBasePaths(paths: string[]): string[] {
+  return paths.map((p) => {
+    const m = p.match(RANGE)
+    if (m && (+m[2] < 1 || +m[3] < +m[2])) throw new Error(`--base-path ${p}: a line range is START-END with 1 <= START <= END`)
+    const n = (m ? m[1] : p).replace(/^(\.\/)+/, '').replace(/\/+$/, '')
+    if (!n || n.startsWith('/') || n.includes('\\') || n.includes('\0') || n.split('/').some((s) => s === '..' || s === '.' || s === '')) throw new Error(`--base-path ${p}: needs a plain path relative to the repository root`)
+    return m ? `${n}:${+m[2]}-${+m[3]}` : n
+  })
+}
+export async function appSnapshot(repo: string, basePaths: string[] = []): Promise<{ sha: string; text: string; paths: string[] }> {
   const head = await sandboxGit(repo, ['rev-parse', 'HEAD'], false)
   const sha = head.out.trim()
   if (head.code !== 0 || !/^[0-9a-f]{40}$/.test(sha)) throw new Error(`--base ${repo}: no readable HEAD`)
+  const paths = [...new Set(checkBasePaths(basePaths))].sort()
   const dir = mkdtempSync(join(tmpdir(), 'factory-base-'))
   try {
     await exportTree(repo, sha, dir)
-    let text = ''
+    const files: [string, string][] = []
     for (const e of readdirSync(dir, { recursive: true, withFileTypes: true }).filter((e) => e.isFile()).sort((a, b) => join(a.parentPath, a.name).localeCompare(join(b.parentPath, b.name)))) {
       const body = readFileSync(join(e.parentPath, e.name), 'utf8')
       if (body.includes('\0')) continue // binary
-      text += `=== ${relative(dir, join(e.parentPath, e.name))}\n${body}\n`
+      files.push([relative(dir, join(e.parentPath, e.name)), body])
     }
-    if (text.length > APP_MAX_CHARS) throw new Error(`--base ${repo}: app is larger than ${APP_MAX_CHARS} characters`)
-    return { sha, text }
+    const at = (rel: string, p: string) => rel === p || rel.startsWith(`${p}/`)
+    const whole = paths.filter((p) => !RANGE.test(p))
+    const ranges = paths.flatMap((p) => { const m = p.match(RANGE); return m ? [{ file: m[1], from: +m[2], to: +m[3] }] : [] })
+    for (const p of whole) if (!files.some(([rel]) => at(rel, p))) throw new Error(`--base-path ${p}: no tracked text file at or under it`)
+    for (const r of ranges) if (!files.some(([rel]) => rel === r.file)) throw new Error(`--base-path ${r.file}:${r.from}-${r.to}: a line range needs a tracked text file`)
+    const wholeAt = (rel: string) => !paths.length || whole.some((p) => at(rel, p))
+    const rangesOf = (rel: string) => { // sorted, overlapping or touching ranges joined
+      const out: { from: number; to: number }[] = []
+      for (const r of ranges.filter((x) => x.file === rel).sort((a, b) => a.from - b.from)) { const l = out.at(-1); if (l && r.from <= l.to + 1) l.to = Math.max(l.to, r.to); else out.push({ from: r.from, to: r.to }) }
+      return out
+    }
+    const shown = files.filter(([rel]) => wholeAt(rel) || rangesOf(rel).length)
+    let text = ''
+    const sizes = new Map<string, number>()
+    for (const [rel, body] of shown) {
+      let part = ''
+      if (wholeAt(rel)) part = `=== ${rel}\n${body}\n`
+      else {
+        const lines = body.split('\n')
+        if (lines.at(-1) === '') lines.pop()
+        for (const r of rangesOf(rel)) {
+          if (r.from > lines.length) throw new Error(`--base-path ${rel}:${r.from}-${r.to}: the file has ${lines.length} lines`)
+          part += `=== ${rel} (lines ${r.from}-${Math.min(r.to, lines.length)} of ${lines.length})\n${lines.slice(r.from - 1, r.to).join('\n')}\n`
+        }
+      }
+      text += part
+      const k = rel.split('/').slice(0, 3).slice(0, rel.split('/').length - 1).join('/') || rel
+      sizes.set(k, (sizes.get(k) ?? 0) + part.length)
+    }
+    if (text.length > APP_MAX_CHARS) {
+      const top = [...sizes].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, n]) => `${k} ${n}`).join('; ')
+      throw new Error(`--base ${repo}: ${paths.length ? 'the chosen paths hold' : 'the app holds'} ${text.length} characters, more than the ${APP_MAX_CHARS} the drafters are shown. Largest: ${top}. Choose what they need with --base-path <path> (repeatable; <file>:START-END for lines of a big file)`)
+    }
+    if (paths.length) {
+      const hidden = files.filter(([rel]) => !shown.some(([r]) => r === rel)).map(([rel]) => rel)
+      text = `=== NOT SHOWN (${hidden.length} more text files of the app; names only, the builder sees them all): ${hidden.slice(0, NOT_SHOWN_MAX).join(', ')}${hidden.length > NOT_SHOWN_MAX ? `, ... (${hidden.length - NOT_SHOWN_MAX} more)` : ''}\n${text}`
+    }
+    return { sha, text, paths }
   } finally { removeTree(dir) }
 }
 
@@ -122,6 +186,13 @@ export function requestLines(s: Scenario): string[] {
   return s.steps.flatMap((st, i) => {
     let out: string[]
     if (st.ui) out = [`ui ${st.ui} ${st.target ?? st.path ?? ''}${st.text !== undefined ? ` text=${JSON.stringify(st.text)}` : ''}`]
+    else if (st.run) {
+      try {
+        out = [`run ${JSON.stringify(fill(st.run, vars))}`, ...(st.stdin === undefined ? [] : [`  stdin: ${clip(String(fill(st.stdin, vars)))}`]),
+          ...Object.entries(fill(st.files ?? {}, vars) as Record<string, unknown>).map(([f, c]) => `  file ${f}: ${clip(typeof c === 'string' ? c : JSON.stringify(c))}`),
+          ...(st.read?.length ? [`  read: ${(fill(st.read, vars) as string[]).join(', ')}`] : []), ...Object.entries(fill(st.env ?? {}, vars) as Record<string, unknown>).map(([k, e]) => `  env ${k}=${e}`)]
+      } catch (e) { out = [`run ${JSON.stringify(st.run)}`, `  (cannot build: ${(e as Error).message})`] }
+    }
     else if (st.service && `${st.method} ${st.path.split('?')[0]}` === CONTROL.list) out = ['service requests', `  expect: ${clip(JSON.stringify(st.expect))}`]
     else {
       try {
@@ -151,7 +222,7 @@ export function approvalSummary(id: string, d: Draft, version: string, request?:
   const cross: Record<string, { stated: number; unstated: number }> = {}
   for (const s of d.scenarios) (cross[labelOf(cls.get(s.id))] ??= { stated: 0, unstated: 0 })[SELF(s.inSpec)]++
   const notM = (c: Classification, r: 'X' | 'U') => c.checks.filter((k) => (r === 'X' ? k.result === 'X' && k.basis !== 'convention' : k.result === 'U' || (k.result === 'X' && k.basis === 'convention')))
-    .map((k) => `step ${k.step} ${d.scenarios.find((s) => s.id === c.id)!.steps[k.step - 1].method} ${k.check}`).join('; ')
+    .map((k) => { const st = d.scenarios.find((s) => s.id === c.id)!.steps[k.step - 1]; return `step ${k.step} ${st.method ?? (st.run ? 'run' : st.ui)} ${k.check}` }).join('; ')
   const disagree = (r: Classification['label']) => d.scenarios.filter((s) => cls.get(s.id)?.label === r).map((s) => `- ${s.id}: ${s.summary} -- ${notM(cls.get(s.id)!, r === 'contradicts' ? 'X' : 'U')}`)
   const contra = disagree('contradicts'), silent = disagree('unstated')
   const keyPoints = d.spec.split('\n').filter((l) => /^\s*(#|[-*]|\d+\.)/.test(l)).slice(0, 25)
@@ -169,7 +240,8 @@ export function approvalSummary(id: string, d: Draft, version: string, request?:
     '## Spec key points', ...keyPoints, '',
     ...(undecided.length ? ['## Undecided in the spec (left to the builder)', ...undecided, ''] : []),
     ...(minority.length ? ['## Minority choices (the scenario writer chose these on purpose; most builders are expected to miss them at first)', ...minority.map((a) => `- ${a}`), ''] : []),
-    ...(d.base?.baseSha ? [`Extends: ${d.base.baseSha} (the ship target must still be at this commit when the change runs)`, ''] : []),
+    ...(d.base?.baseSha ? [`Extends: ${d.base.baseSha} (the ship target must still be at this commit when the change runs)${d.base.paths?.length ? `; the drafters were shown only: ${d.base.paths.join(', ')}` : ''}`, ''] : []),
+    ...(usesRun(d.spec) ? [`Command-line program: runs as \`${contractOf(d.spec).command.join(' ')}\`${contractOf(d.spec).deps ? `, dependency set ${contractOf(d.spec).deps}` : ''} (the contract is in the spec; the scenarios are all run steps)`, ''] : []),
     `## Scenarios: ${d.scenarios.length} total`,
     'Self-report = the scenario writer\'s own claim that the request states the behaviour (it never saw the spec or the spec writer\'s assumptions).', '',
     '| kind | self-report: stated | self-report: unstated |', '|---|---|---|',
@@ -197,7 +269,8 @@ export async function main(argv: string[], model: Model = realModel): Promise<nu
       args: argv, allowPositionals: true,
       options: { help: { type: 'boolean', short: 'h' }, request: { type: 'string' }, base: { type: 'string' }, signals: { type: 'string' }, by: { type: 'string' }, version: { type: 'string' }, note: { type: 'string' }, 'ship-target': { type: 'string' },
         'max-cost': { type: 'string' }, 'max-attempts': { type: 'string' }, port: { type: 'string' }, 'traffic-base': { type: 'string' },
-        model: { type: 'string', multiple: true }, 'spec-from': { type: 'string' }, spec: { type: 'string' }, k: { type: 'string' }, score: { type: 'string' }, probes: { type: 'string' }, rescore: { type: 'boolean' }, minority: { type: 'boolean' }, 'minority-brief': { type: 'string' }, service: { type: 'boolean' }, ui: { type: 'boolean' }, 'iface-from': { type: 'string' }, interval: { type: 'string' }, once: { type: 'boolean' }, retries: { type: 'string' }, feedback: { type: 'string' }, approve: { type: 'string' }, sessions: { type: 'string' }, mutants: { type: 'string' } },
+        model: { type: 'string', multiple: true }, 'spec-from': { type: 'string' }, spec: { type: 'string' }, k: { type: 'string' }, score: { type: 'string' }, probes: { type: 'string' }, rescore: { type: 'boolean' }, minority: { type: 'boolean' }, 'minority-brief': { type: 'string' }, service: { type: 'boolean' }, ui: { type: 'boolean' }, 'iface-from': { type: 'string' }, interval: { type: 'string' }, once: { type: 'boolean' }, retries: { type: 'string' }, feedback: { type: 'string' }, approve: { type: 'string' }, sessions: { type: 'string' }, mutants: { type: 'string' },
+        'base-path': { type: 'string', multiple: true }, contract: { type: 'string' }, lock: { type: 'string' }, wheelhouse: { type: 'string' }, python: { type: 'string' } },
     })
   } catch (e) { console.error(`factory: ${(e as Error).message}\n${USAGE}`); return 2 }
   const { positionals, values: v } = parsed
@@ -208,6 +281,12 @@ export async function main(argv: string[], model: Model = realModel): Promise<nu
   if (cmd === 'lap') {
     if (!id || (v.approve && (!v.by || !v.version))) { console.error(USAGE); return 2 }
     return lap(id, { approve: v.approve, by: v.by, version: v.version }, (argv) => main(argv, model))
+  }
+  if (cmd === 'deps') { // operator-side, no state dir and no model
+    if (id !== 'build' || !v.lock || !v.wheelhouse) { console.error(USAGE); return 2 }
+    const r = await buildDeps(v.lock, v.wheelhouse, v.python)
+    console.log(`built dependency set ${r.id} in ${r.dir}; name it in a contract as "deps": "${r.id}"`)
+    return 0
   }
   let requestedModels: Record<string, string>
   try { requestedModels = parseModels(v.model) } catch (e) { console.error(`factory: ${(e as Error).message}`); return 2 }
@@ -241,9 +320,13 @@ export async function main(argv: string[], model: Model = realModel): Promise<nu
         if (v['iface-from'] && reuse) throw new Error('--iface-from does not go with --spec-from')
         const iface = v['iface-from'] ? specIface(loadApproved(sd, v['iface-from']).spec) : undefined
         if (v['minority-brief'] !== undefined && (!v.minority || !v['minority-brief'].trim())) throw new Error('--minority-brief needs --minority and a text')
-        const app = v.base ? await appSnapshot(resolve(v.base)) : null
-        const drafted = await draft(guard.model(model), request, { signals: v.signals ? readFileSync(v.signals, 'utf8') : undefined, app: app?.text, reuse, minority: v.minority, minorityBrief: v['minority-brief'], service: v.service, ui: v.ui, iface })
-        const d: Draft = { ...drafted, base: { baseSha: app?.sha ?? null, requestSha256 } }
+        if (v['base-path'] && !v.base) throw new Error('--base-path needs --base')
+        if (v.contract && (v.service || v.ui)) throw new Error('--contract (a command-line program) does not go with --service or --ui')
+        const run = v.contract ? checkContract(JSON.parse(readFileSync(v.contract, 'utf8'))) : undefined
+        if (run?.deps) loadDeps(run.deps) // a missing dependency set fails here, before any spend
+        const app = v.base ? await appSnapshot(resolve(v.base), v['base-path']) : null
+        const drafted = await draft(guard.model(model), request, { signals: v.signals ? readFileSync(v.signals, 'utf8') : undefined, app: app?.text, reuse, minority: v.minority, minorityBrief: v['minority-brief'], service: v.service, ui: v.ui, iface, run })
+        const d: Draft = { ...drafted, base: { baseSha: app?.sha ?? null, requestSha256, ...(app?.paths.length ? { paths: app.paths } : {}) } }
         const dir = writeDraft(sd, id, d)
         const version = hash(dir)
         writeFileSync(join(dir, 'approval-summary.md'), approvalSummary(id, d, version, request))
@@ -284,7 +367,11 @@ export async function main(argv: string[], model: Model = realModel): Promise<nu
       const costFile = join(dir, 'split-cost.json')
       try {
         const request = readFileSync(v.request, 'utf8')
-        const parts = await splitRequest(guard.model(model), request, id)
+        if (v['base-path'] && !v.base) throw new Error('--base-path needs --base')
+        const run = v.contract ? checkContract(JSON.parse(readFileSync(v.contract, 'utf8'))) : undefined
+        if (run?.deps) loadDeps(run.deps) // before the splitter is paid for, as draft does
+        const app = v.base ? await appSnapshot(resolve(v.base), v['base-path']) : null
+        const parts = await splitRequest(guard.model(model), request, id, { app: app?.text, program: !!run })
         const wholeId = `${id}-whole`
         const changeIds = derivedIds(id, parts)
         assertIdsFree(sd, id, changeIds)
@@ -292,7 +379,7 @@ export async function main(argv: string[], model: Model = realModel): Promise<nu
         const reqFile = join(dir, 'request.md')
         writeFileSync(reqFile, request)
         // The whole request is drafted like any change (new app); its scenarios judge the final app, its spec is never built.
-        const code = await main(['draft', wholeId, '--request', reqFile, ...(v.model ?? []).flatMap((m) => ['--model', m])], model)
+        const code = await main(['draft', wholeId, '--request', reqFile, ...(v.base ? ['--base', v.base, ...(v['base-path'] ?? []).flatMap((p) => ['--base-path', p])] : []), ...(v.contract ? ['--contract', v.contract] : []), ...(v.model ?? []).flatMap((m) => ['--model', m])], model)
         if (code !== 0) return code
         const plan: Plan = { plan: id, requestSha256: createHash('sha256').update(request).digest('hex'), wholeId, parts, changeIds }
         const version = writePlan(sd, plan, request)
@@ -320,7 +407,7 @@ export async function main(argv: string[], model: Model = realModel): Promise<nu
     case 'replicate': {
       if (!id || (!v.k && !v.rescore)) break
       const rs = await replicate({ changeId: id, model, stateDir: sd, k: Number(v.k), builderModel: requestedModels.builder ?? MODEL_BY_ROLE.builder, requestedModels,
-        score: v.score ? v.score.split(',') : undefined, probesFile: v.probes, maxCostUsd: v['max-cost'] ? Number(v['max-cost']) : undefined, rescore: v.rescore })
+        score: v.score ? v.score.split(',') : undefined, probesFile: v.probes, base: v.base ? resolve(v.base) : undefined, maxCostUsd: v['max-cost'] ? Number(v['max-cost']) : undefined, rescore: v.rescore })
       for (const r of rs) console.log(`${r.builderModel}-${r.n}: ${r.sha.slice(0, 7)} builderOk=${r.builderOk} passed=${JSON.stringify(r.passed)} probes=${r.probes.map((p) => `${p.id}:${p.answer}`).join(',')} cost=$${r.costUsd.toFixed(4)}`)
       return 0
     }
