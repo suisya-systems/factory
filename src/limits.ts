@@ -8,9 +8,9 @@ import { countedInCalls, requestedModel, type Model, type Result } from './adapt
 // The ONE place for caps. Changing them is an owner decision, not something a role can do.
 // maxAttempts: 5 since lap 3 (owner decision 2026-10-17; it was 3). builderCallUsd / judgeCallUsd: per-call
 // ceilings (lap 3; lap 2 spent $0.47 / $0.23 per call). userCallUsd: one turn of the user agent (#30, no tools).
-// maxCostUsd: $40 since lap 14 (it was $10; the classifier ($1) and drafter ($2) per-call ceilings rose with it). lapCostUsd: $260 since lap 9, screen included (owner decision 2026-10-18); $150 in lap 8, $30 in laps 1-7. lapCountedCalls: calls of models whose
+// maxCostUsd: $40 since lap 14 (it was $10; the classifier ($1) and drafter ($2) per-call ceilings rose with it; the scenario drafter went to $5 on 2026-10-27, owner decision, factory-notes#47). lapCostUsd: $260 since lap 9, screen included (owner decision 2026-10-18); $150 in lap 8, $30 in laps 1-7. lapCountedCalls: calls of models whose
 // spend is not reported in USD (lap 8: 200 by the owner, 1 of them spent outside the factory on the adapter smoke).
-export const CAPS = { maxCostUsd: 40, lapCostUsd: 260, lapCountedCalls: 199, maxAttempts: 5, builderCallUsd: 5, judgeCallUsd: 2, userCallUsd: 0.5, modelTimeoutMs: 20 * 60_000, pollMs: 500 }
+export const CAPS = { maxCostUsd: 40, lapCostUsd: 260, lapCountedCalls: 199, maxAttempts: 5, builderCallUsd: 5, judgeCallUsd: 2, scenarioDrafterUsd: 5, userCallUsd: 0.5, modelTimeoutMs: 20 * 60_000, pollMs: 500 }
 
 export class Stop extends Error {}
 

@@ -6,6 +6,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'n
 import { join } from 'node:path'
 import { runCli, type Model, type Task } from '../src/adapter.ts'
 import { CAPS, chargeLap, holdLap, lapSpent, lapTotals, mergeLedger, startGuard, Stop, UNATTRIBUTED } from '../src/limits.ts'
+import { ask } from '../src/roles.ts'
 import { runChange } from '../src/run.ts'
 import { freePort } from '../src/sandbox.ts'
 import { approvedChange, freshState, gitTarget, MEMO_SERVER, REPO, tmp, writeApp } from './helpers.ts'
@@ -380,4 +381,13 @@ test('guard: a model the role may not use is refused before anything is spent or
   g.dispose()
   assert.equal(calls, 0)
   assert.equal(existsSync(lapFile), false)
+})
+
+test('ask: the scenario drafter gets $5 per call, the spec drafter $2', async () => {
+  const seen: [string, number][] = []
+  const m: Model = async (t) => { seen.push([t.role, t.maxCostUsd]); return { ok: true, text: '{}', costUsd: 0 } }
+  await ask(m, 'spec-drafter', 'x', (j) => j)
+  await ask(m, 'scenario-drafter', 'x', (j) => j)
+  assert.deepEqual(seen, [['spec-drafter', 2], ['scenario-drafter', CAPS.scenarioDrafterUsd]])
+  assert.equal(CAPS.scenarioDrafterUsd, 5)
 })
