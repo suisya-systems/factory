@@ -94,7 +94,7 @@ or that the request fixes. The summary rule covers ui steps too.`
 
 // only for a spec that declares a command-line program (program.ts). The interface names its commands, flags and files; every scenario step is a run.
 const RUN_IFACE = `COMMAND-LINE PROGRAM: the app is a command-line program, not an HTTP server. Describe it in the interface with these keys (instead of endpoints):
-"commands": ["<command words>", ...] (e.g. "build plan": the sub-command words, one string per command), "flags": {"<command words>": ["--flag", ...]},
+"commands": ["<command words>", ...] (e.g. "build plan": the sub-command words, one string per command), "flags": {"<command words>": ["--flag", ...]} (the key "" holds the flags of the program itself, before any sub-command),
 "files": ["<name of a file the program reads or writes>", ...], and "fields" for the names inside the JSON it reads or prints ({"<what it is>": ["name", "nested.name", ...]}).
 Names only, as for the other keys: no values, no exit codes, no rules.`
 const RUN_SCENARIO_FORMAT = `Reply with ONE JSON object and nothing else:
@@ -178,7 +178,7 @@ function checkInterface(raw: unknown): Record<string, unknown> {
   if (x.files !== undefined) list(x.files, FILE_NAME, 'files must be plain file names')
   if (x.flags !== undefined) {
     if (!isObj(x.flags)) throw bad('flags must be an object')
-    for (const [key, names] of Object.entries(x.flags)) { if (!COMMAND.test(key)) throw bad(`flags key "${key}" is not command words`); list(names, FLAG, `flags["${key}"] must be a list of flag names`) }
+    for (const [key, names] of Object.entries(x.flags)) { if (key !== '' && !COMMAND.test(key)) throw bad(`flags key "${key}" is not command words`); list(names, FLAG, `flags["${key}"] must be a list of flag names`) }
   }
   if (x.listShape !== undefined && x.listShape !== 'bare array') list(x.listShape, NAME, 'listShape must be "bare array" or a list of key names')
   const t = x.conflictToken

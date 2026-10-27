@@ -182,6 +182,15 @@ test('a FIFO the program left where a file is to be written is refused, not open
   assert.match(r.detail, /in\.json is not a plain file/)
 })
 
+test('a program that ignores the stop keeps nothing more once its output passed the cap', async () => {
+  const was = { ...RUN_LIMITS }
+  try {
+    RUN_LIMITS.outChars = 1000
+    const r = await run([{ run: ['loud'], expect: { status: 0 } }])
+    assert.match(r.detail, /more than 1000 characters of output/)
+  } finally { Object.assign(RUN_LIMITS, was) }
+})
+
 test('a program that never ends, or prints without end, is stopped and the step says so', async () => {
   const was = { ...RUN_LIMITS }
   try {
@@ -297,6 +306,7 @@ test('the interface of a program: command words, flags per command, file names; 
   const bad = (iface: unknown) => draft(async (t) => ({ ok: true, costUsd: 0, text: JSON.stringify(t.role === 'spec-drafter' ? { spec: '# P\n\n## Undecided\n- x', interface: iface, assumptions: [] } : GOOD) }), 'r', { run: CONTRACT })
   await assert.rejects(bad({ commands: ['Plan It'] }), /commands must be lists of bare command words/)
   await assert.rejects(bad({ flags: { 'a b': ['dry-run'] } }), /flags\["a b"\] must be a list of flag names/)
+  await assert.doesNotReject(bad({ commands: ['dispatcher plan'], flags: { '': ['--input'], 'dispatcher plan': ['--dry-run'] } })) // a flag of the program itself has the key ""
   await assert.rejects(bad({ flags: ['--x'] }), /flags must be an object/)
   await assert.rejects(bad({ files: ['/etc/passwd'] }), /files must be plain file names/)
   await assert.rejects(bad({ commands: ['plan'], fields: { x: ['exit 404'] } }), /interface/)

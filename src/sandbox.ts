@@ -268,6 +268,7 @@ export function sandboxRun(cmd: string, args: string[], o: SandboxOpts, env: Nod
   let stdout = '', stderr = '', why: string | undefined
   const kill = (w: string) => { why ??= w; killTree(c, 500) }
   const add = (which: 'stdout' | 'stderr') => (d: string) => {
+    if (why) return // being stopped: keep nothing more, and stop it once
     if (which === 'stdout') stdout += d; else stderr += d
     if (stdout.length > lim.outChars || stderr.length > lim.outChars) kill(`more than ${lim.outChars} characters of output`) // builder-written: never buffer without a bound
   }
