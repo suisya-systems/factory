@@ -59,11 +59,12 @@ const SCENARIO_FORMAT = `Reply with ONE JSON object and nothing else:
  "scenarios": [{"id": "kebab-id", "title": "...", "summary": "<one line, plain words; this is all the builder sees if it fails. It must NOT contain any path, any status code, or any string value (3+ chars) or number (3+ digits) used in that scenario's steps>",
    "inSpec": <true if the REQUEST states this behaviour, false if it is an unstated but reasonable expectation>, "kind": "<a short kebab-case category>",
    "steps": [{"method": "GET|POST|PUT|PATCH|DELETE", "path": "/...", "body": <json, optional, not on GET>, "headers": {<optional>},
-     "expect": {"status": <int or [ints]>, "json": <partial deep subset, optional>, "jsonHas": ["dot.path", ...], "isArray": <bool>, "length": <int, or {"dot.path": int} for arrays inside the body>},
+     "expect": {"status": <int or [ints]>, "json": <partial deep subset, optional>, "jsonHas": ["dot.path", ...], "jsonAbsent": ["dot.path", ...], "isArray": <bool>, "length": <int, or {"dot.path": int} for arrays inside the body>},
      "capture": {"name": "dot.path", "name2": "header:<response header name>"}}]}]}
 "{{name}}" in a later path/body/headers/json is replaced by a captured value (a value that is exactly "{{name}}" keeps the captured type).
 Every expect needs at least one check. Arrays in "json" match by position (a prefix), so only list items whose order is fixed;
 use "length" to check that a list holds exactly the expected items.
+Use "jsonAbsent" to check that a value is NOT there (a record that must have been removed, a field that must not be returned): it fails when the path exists.
 Use ONLY the endpoint, parameter and field names in the INTERFACE. Where the request does not fix a status code, accept every reasonable one (e.g. [400, 422]).
 Each scenario starts from an EMPTY app.
 Write 8-15 scenarios, a mix of inSpec true and false. You cannot ask questions: record every guess in assumptions.`
@@ -102,11 +103,12 @@ const RUN_SCENARIO_FORMAT = `Reply with ONE JSON object and nothing else:
  "scenarios": [{"id": "kebab-id", "title": "...", "summary": "<one line, plain words; this is all the builder sees if it fails. It must NOT contain any argument value, file path or name (3+ chars), string value (3+ chars) or number (3+ digits) used in that scenario's steps>",
    "inSpec": <true if the REQUEST states this behaviour, false if it is an unstated but reasonable expectation>, "kind": "<a short kebab-case category>",
    "steps": [{"run": ["<argument>", ...], "stdin": "<optional text>", "files": {"<relative path>": <string, or JSON that is written as text>}, "read": ["<relative path of a file the program writes>"], "env": {"NAME": "value"},
-     "expect": {"status": <int or [ints]>, "json": <partial deep subset, optional>, "jsonHas": ["dot.path", ...], "isArray": <bool>, "length": <int, or {"dot.path": int} for arrays inside the body>},
+     "expect": {"status": <int or [ints]>, "json": <partial deep subset, optional>, "jsonHas": ["dot.path", ...], "jsonAbsent": ["dot.path", ...], "isArray": <bool>, "length": <int, or {"dot.path": int} for arrays inside the body>},
      "capture": {"name": "dot.path"}}]}]}
 "{{name}}" in a later argument, stdin, file path or content, env value or json is replaced by a captured value (a value that is exactly "{{name}}" keeps the captured type).
 Every expect needs at least one check. Arrays in "json" match by position (a prefix), so only list items whose order is fixed;
 use "length" to check that a list holds exactly the expected items.
+Use "jsonAbsent" to check that a value is NOT there (a record that must have been removed, a field that must not be returned): it fails when the path exists.
 Use ONLY the command, flag and file names in the INTERFACE. Where the request does not fix an exit code, accept every reasonable one (e.g. [1, 2]).
 Each scenario starts from an EMPTY working directory.
 Write 8-15 scenarios, a mix of inSpec true and false. You cannot ask questions: record every guess in assumptions.`
@@ -148,8 +150,8 @@ function checkMinority(more: string[], scenarios: Scenario[]) {
 }
 
 export const appBlock = (app: string) => (app ? `\nEXISTING APP (the current code; the request extends it):\n${app}\n` : '')
-// Each drafter gets at most $1 so the classifier calls (CLASSIFIER_BUDGET each, about 15) still fit in the draft cap.
-const draftTask = (role: string, instruction: string) => ({ ...base, maxCostUsd: 1, role, instruction, workdir: mkdtempSync(join(tmpdir(), 'factory-draft-')), access: 'none' as const })
+// Each drafter gets at most $2 so the classifier calls (CLASSIFIER_BUDGET each, about 15) still fit in the draft cap.
+const draftTask = (role: string, instruction: string) => ({ ...base, maxCostUsd: 2, role, instruction, workdir: mkdtempSync(join(tmpdir(), 'factory-draft-')), access: 'none' as const })
 
 // Every entry must be a bare name, so a value cannot be written in the lap-3 form ("action: create|update").
 // ponytail: syntax only; values spelled as names (a field "listing" its values) still pass, so the
@@ -297,12 +299,17 @@ function programContract(spec: string): string {
 - Work only inside the current directory. The factory commits your work when you finish.`
 }
 
+// FACTORY_TRANSCRIPTS=1 keeps each builder session under <state dir>/transcripts/<change>/<name>.jsonl. Builder only: its input is the
+// spec, never scenario text (a drafter's, classifier's or judge's session is not kept).
+export const transcriptPath = (stateDir: string, changeId: string, name: string): string | undefined =>
+  (process.env.FACTORY_TRANSCRIPTS === '1' ? join(stateDir, 'transcripts', changeId, `${name}.jsonl`) : undefined)
+
 // The builder gets the spec only. assumptions.json carries scenario-writer text: never pass it here.
-export async function build(model: Model, workspace: string, spec: string, feedback: string, signal?: AbortSignal): Promise<{ sha: string; ok: boolean; error?: string }> {
+export async function build(model: Model, workspace: string, spec: string, feedback: string, signal?: AbortSignal, transcript?: string): Promise<{ sha: string; ok: boolean; error?: string }> {
   const instruction = `You are the builder of a software factory. Implement the spec below in the current directory. ` +
     `Points the spec lists under "Undecided" are left to you: choose sensible behaviour.\n\nSPEC:\n${spec}\n\n${runContract(spec)}\n` +
     (feedback ? `\nYOUR PREVIOUS ATTEMPT WAS REJECTED. Feedback:\n${feedback}\n` : '')
-  const r = await model({ ...base, maxCostUsd: CAPS.builderCallUsd, role: 'builder', instruction, workdir: workspace, access: 'write' })
+  const r = await model({ ...base, maxCostUsd: CAPS.builderCallUsd, role: 'builder', instruction, workdir: workspace, access: 'write', ...(transcript ? { transcript } : {}) })
   // The workspace (incl. .git/config) is builder-written: a silently failed commit would leave HEAD
   // at the previous attempt's sha while the working tree holds new code.
   for (const args of [['add', '-A'], ['commit', '-q', '--allow-empty', '--no-verify', '-m', 'factory: builder attempt']]) {

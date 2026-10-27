@@ -2,7 +2,7 @@
 // the default sent "application/json, application/json", and an app that checks the media type answered 415.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { fill, runScenario, type Scenario } from '../src/scenario.ts'
+import { checkStep, fill, runScenario, validateScenarios, type Scenario } from '../src/scenario.ts'
 import { tmp, writeApp } from './helpers.ts'
 
 const STRICT_APP = `
@@ -52,4 +52,29 @@ test('captured values fill object keys as well as values', async () => {
   ] }
   const r = await runScenario(app, sc, new AbortController().signal)
   assert.equal(r.pass, true, r.detail)
+})
+
+test('expect.jsonAbsent: fails when the path exists (any value, null included), passes when it does not', () => {
+  const step = (jsonAbsent: string[]) => ({ method: 'GET' as const, path: '/x', expect: { jsonAbsent } })
+  assert.equal(checkStep(step(['a']), 200, { b: 1 }, {}), null)
+  assert.equal(checkStep(step(['a.b']), 200, { a: {} }, {}), null)
+  assert.match(checkStep(step(['a']), 200, { a: null }, {})!, /response has a, expected it absent/)
+  assert.match(checkStep(step(['x', 'a.b']), 200, { a: { b: 0 } }, {})!, /response has a\.b/)
+  // the envelope of a run step: a file not written is not there, one written is (a dotted name too)
+  assert.equal(checkStep(step(['files.out/plan.json']), 0, { files: {} }, {}), null)
+  assert.match(checkStep(step(['files.out/plan.json']), 0, { files: { 'out/plan.json': { n: 1 } } }, {})!, /expected it absent/)
+  assert.match(checkStep(step(['files.missing.json']), 0, { files: { 'missing.json': '' } }, {})!, /expected it absent/)
+})
+
+test('expect.jsonAbsent is validated: a non-empty list of strings; in a run step a files.* path must be in "read"', () => {
+  const sc = (st: object) => [{ id: 's', title: 't', summary: 'one line', inSpec: true, kind: 'k', steps: [st] }]
+  const get = { method: 'GET', path: '/x' }
+  assert.doesNotThrow(() => validateScenarios(sc({ ...get, expect: { jsonAbsent: ['a'] } })))
+  for (const bad of [[], 'a', [1], [null]]) assert.throws(() => validateScenarios(sc({ ...get, expect: { jsonAbsent: bad } })), /bad expect\.jsonAbsent/)
+  const run = (read: string[] | undefined, p: string) => sc({ run: ['go'], ...(read ? { read } : {}), expect: { status: 0, jsonAbsent: [p] } })
+  assert.doesNotThrow(() => validateScenarios(run(['out/plan.json'], 'files.out/plan.json')))
+  assert.doesNotThrow(() => validateScenarios(run(['out/plan.json'], 'files.out/plan.json.n')))
+  assert.doesNotThrow(() => validateScenarios(run(undefined, 'stdout.warning')))
+  assert.throws(() => validateScenarios(run(['other.json'], 'files.out/plan.json')), /not in "read"/)
+  assert.throws(() => validateScenarios(run(undefined, 'files.out/plan.json')), /not in "read"/)
 })

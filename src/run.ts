@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Model } from './adapter.ts'
 import { CAPS, startGuard, Stop, type Ledger } from './limits.ts'
-import { build, feedbackFor, judge, type FeedbackMode, type Verdict } from './roles.ts'
+import { build, transcriptPath, feedbackFor, judge, type FeedbackMode, type Verdict } from './roles.ts'
 import { usesRun } from './program.ts'
 import { observe } from './serve.ts'
 import { ship, type PassMark } from './ship.ts'
@@ -81,7 +81,7 @@ export async function runChange(o: RunOpts) {
     let sha = ''
     for (let n = 1; n <= maxAttempts; n++) {
       guard.check()
-      const b = await build(model, work, approved.spec, feedback, guard.signal)
+      const b = await build(model, work, approved.spec, feedback, guard.signal, transcriptPath(o.stateDir, id, `attempt-${n}`))
       sha = b.sha
       const v = await judge(model, work, sha, approved.spec, approved.scenarios, approved.version, guard.signal)
       record.attempts.push({ n, sha, builderOk: b.ok, testsAllPass: v.testsAllPass, llmPass: v.llmPass, llmReason: v.reason, pass: v.pass, approvedVersion: v.approvedVersion,

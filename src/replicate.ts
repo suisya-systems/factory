@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Model, Result } from './adapter.ts'
 import { CAPS, mergeLedger, startGuard, type Ledger } from './limits.ts'
-import { build } from './roles.ts'
+import { build, transcriptPath } from './roles.ts'
 import { exportTree, removeTree } from './sandbox.ts'
 import { usesRun } from './program.ts'
 import { BLOCKED, judgeOpts, OTHER, runProbe, runScenarios, validateProbes, type Probe, type ProbeResult, type ScenarioResult } from './scenario.ts'
@@ -133,7 +133,7 @@ export async function replicate(o: ReplicateOpts): Promise<Replicate[]> {
       const spent = guard.ledger.totalUsd
       last = null
       let b
-      try { b = await build(model, ws, approved.spec, '', guard.signal) } finally { saveCost() }
+      try { b = await build(model, ws, approved.spec, '', guard.signal, transcriptPath(o.stateDir, id, `${prefix}${n}`)) } finally { saveCost() }
       guard.check()
       const r: Replicate = {
         changeId: id, n, builderModel: o.builderModel, requestedModels: o.requestedModels ?? {}, approvedVersion: approved.version,

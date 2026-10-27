@@ -169,6 +169,12 @@ test('the working directory lasts the scenario: a later run sees what an earlier
   const lacks = await run([{ run: ['write', 'in.txt'], files: { 'in.txt': 's' }, read: ['missing.json'], expect: { status: 3, jsonHas: ['files.missing.json'] } }])
   assert.equal(lacks.pass, false) // a file that was not written is absent
   assert.match(lacks.detail, /response missing files\.missing\.json/)
+  // jsonAbsent is the other way round: a file not written passes, a file that is there fails
+  const gone = await run([{ run: ['write', 'in.txt'], files: { 'in.txt': 's' }, read: ['missing.json'], expect: { status: 3, jsonAbsent: ['files.missing.json'] } }])
+  assert.equal(gone.pass, true, gone.detail)
+  const there = await run([{ run: ['write', 'in.txt'], files: { 'in.txt': 's' }, read: ['out/plan.json'], expect: { status: 3, jsonAbsent: ['files.out/plan.json'] } }])
+  assert.equal(there.pass, false)
+  assert.match(there.detail, /response has files\.out\/plan\.json, expected it absent/)
 })
 
 test('standard output that is not JSON is the text; a wrong exit code fails the step with the codes, not the output', async () => {

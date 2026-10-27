@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { chmodSync, mkdirSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { cliEnv, codexBin, codexEnv, crossLoginSecrets, CROSS_ROLES, MODEL_BY_ROLE, MODELS, modelFor, parseModels, realModel, runCli, runCodex, type Access, type Task } from '../src/adapter.ts'
+import { cliEnv, codexBin, codexEnv, crossLoginSecrets, CROSS_ROLES, finalResult, MODEL_BY_ROLE, MODELS, modelFor, parseModels, realModel, runCli, runCodex, type Access, type Task } from '../src/adapter.ts'
 import { startGuard } from '../src/limits.ts'
 import { CLI_MARKERS, REPO, tmp } from './helpers.ts'
 
@@ -22,7 +22,7 @@ function fakeCli(body: string) {
   chmodSync(join(w, 'cli'), 0o755)
   return w
 }
-const call = (w: string, access: Access = 'write', more: { role?: string; model?: string } = {}) => runCli({ role: 'builder', instruction: 'hello', workdir: w, access, maxCostUsd: 2.5, timeoutMs: 10_000, ...more }, join(w, 'cli'))
+const call = (w: string, access: Access = 'write', more: { role?: string; model?: string; transcript?: string } = {}) => runCli({ role: 'builder', instruction: 'hello', workdir: w, access, maxCostUsd: 2.5, timeoutMs: 10_000, ...more }, join(w, 'cli'))
 
 test('parses result text and cost from the CLI JSON', async () => {
   const r = await call(fakeCli(`printf '{"type":"result","result":"%s","total_cost_usd":0.125,"is_error":false}' "$IN"`))
@@ -223,4 +223,40 @@ test('codex: the secret check covers the login from before a token refresh durin
   assert.equal(r.ok, false)
   assert.match(r.error!, /login secret/)
   assert.match(readFileSync(auth, 'utf8'), /new-/) // the refresh reached the host file (bound, not copied)
+})
+
+// ---- builder transcript (FACTORY_TRANSCRIPTS) ----
+const RESULT = { type: 'result', subtype: 'success', is_error: false, result: 'done', total_cost_usd: 0.25, modelUsage: { 'claude-opus-5-5': { costUSD: 0.25 } } }
+const STREAM = [{ type: 'system', subtype: 'init' }, { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash' }] } }, RESULT].map((x) => JSON.stringify(x)).join('\n') + '\n'
+
+test('finalResult: a single JSON as before; a stream gives the last result line, none when it died before one', () => {
+  assert.deepEqual(finalResult(JSON.stringify(RESULT), false), RESULT)
+  assert.equal(finalResult('garbage', false), null)
+  assert.deepEqual(finalResult(STREAM, true), RESULT)
+  assert.deepEqual(finalResult(`${STREAM}noise\n${JSON.stringify({ ...RESULT, result: 'later' })}\n`, true), { ...RESULT, result: 'later' })
+  assert.equal(finalResult(STREAM.split('\n').slice(0, 2).join('\n'), true), null)
+  assert.equal(finalResult('', true), null)
+})
+
+test('transcript: stream-json is asked for only then; every line is kept; the Result is the one the plain JSON gives', async () => {
+  const plain = await call(fakeCli(`echo '${JSON.stringify(RESULT)}'`))
+  const w = fakeCli(`echo "$*" | grep -q stream-json || exit 7\ncat <<'EOF'\n${STREAM}EOF`)
+  const file = join(tmp('tr'), 'transcripts', 'c', 'attempt-1.jsonl')
+  const r = await call(w, 'write', { transcript: file })
+  assert.deepEqual(r, plain)
+  assert.equal(readFileSync(file, 'utf8'), STREAM)
+  await call(w, 'write', { transcript: file }) // appended, never replaced
+  assert.equal(readFileSync(file, 'utf8'), STREAM + STREAM)
+  const args = fakeCli(`echo '{"result":"'"$*"'"}'`)
+  assert.match((await call(args)).text, /--output-format json /)
+  assert.doesNotMatch((await call(args)).text, /stream-json|--verbose/)
+})
+
+test('transcript: a failed or garbage stream is still kept, and the failure is reported as without one', async () => {
+  const file = join(tmp('tr'), 'x.jsonl')
+  const r = await call(fakeCli(`echo '{"type":"system"}'; exit 1`), 'write', { transcript: file })
+  assert.equal(r.ok, false)
+  assert.equal(readFileSync(file, 'utf8'), '{"type":"system"}\n')
+  const e = await call(fakeCli(`echo '${JSON.stringify({ ...RESULT, is_error: true, subtype: 'error_max_budget_usd' })}'; exit 1`), 'write', { transcript: file })
+  assert.deepEqual([e.ok, e.error, e.costUsd], [false, 'model reported an error (budget exceeded)', 0.25])
 })

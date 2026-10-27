@@ -106,6 +106,16 @@ test('tally lists the (scenario x build) verdicts that differ across kept judgem
   assert.doesNotMatch(t, /m1-2 \|.*(pass|fail)/) // judged once: nothing to compare
 })
 
+test('FACTORY_TRANSCRIPTS=1: each replicate build gets <model>-<n>.jsonl under transcripts/<change>', async () => {
+  approvedChange(sd, 'rep-tr')
+  const seen: { files: string[]; task: Task }[] = []
+  const go = () => replicate({ changeId: 'rep-tr', model: builder(seen), stateDir: sd, k: 1, builderModel: 'm1', requestedModels: { builder: 'm1' } })
+  await go()
+  process.env.FACTORY_TRANSCRIPTS = '1'
+  try { await go() } finally { delete process.env.FACTORY_TRANSCRIPTS }
+  assert.deepEqual(seen.map((s) => s.task.transcript), [undefined, join(sd, 'transcripts', 'rep-tr', 'm1-2.jsonl')])
+})
+
 test('refused before any model call: other spec, probes outside the vault, a change that ran; run refuses after replicate', async () => {
   approvedChange(sd, 'rep-c')
   const dir = writeDraft(sd, 'rep-other', { spec: '# Other\n', scenarios: SCENARIOS, assumptions: [] })

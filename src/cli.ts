@@ -58,7 +58,7 @@ const USAGE = `usage: factory <command>
                                                    (--rescore keeps each replaced record in replicates/history/)
   tally <id>                                       tables of the replicates' probe answers and scenario passes,
                                                    and the scenario verdicts that changed between rescores
-  user-judge <id> --request <file> [--sessions 0-5 (default 1)] [--max-cost N (default 10, this arm only)] [--mutants <file under vault/>]
+  user-judge <id> --request <file> [--sessions 0-5 (default 1)] [--max-cost N (default 25, this arm only)] [--mutants <file under vault/>]
                                                    REAL model calls: a separate judge arm (#30). A user agent uses each
                                                    recorded build of <id> (run attempts or replicates) and gives a verdict;
                                                    session k leans on one focus (main, input, state, failure, cycling).
@@ -81,6 +81,7 @@ const USAGE = `usage: factory <command>
                                                    contract of a command-line program names the set by the lock file's sha256
   serve --port N                                   (internal) production supervisor
 --model <role>=<model> (repeatable; draft, replicate, probe-isolation, split, watch, user-judge): the model for that role in this command.
+FACTORY_TRANSCRIPTS=1 (run, replicate, lap, plan): keep each builder session as $FACTORY_HOME/transcripts/<id>/<build or attempt>.jsonl.
 After \`stop\`, every command refuses to start until the STOP file is deleted by hand.`
 const COMMANDS = ['draft', 'approve', 'run', 'serve', 'observe', 'stop', 'probe-isolation', 'replicate', 'tally', 'lap', 'split', 'plan', 'watch', 'user-judge', 'deps']
 const MODEL_COMMANDS = ['draft', 'replicate', 'probe-isolation', 'split', 'watch', 'user-judge']

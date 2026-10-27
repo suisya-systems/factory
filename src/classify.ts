@@ -51,7 +51,7 @@ export function undecidedInRequest(spec: string, request: string): { item: strin
   })
 }
 
-export const CLASSIFIER_BUDGET = { maxCostUsd: 0.5, timeoutMs: 3 * 60_000 }
+export const CLASSIFIER_BUDGET = { maxCostUsd: 1, timeoutMs: 3 * 60_000 }
 
 // What the predictor sees of a scenario: the requests only. Anything else (id, title, summary, kind,
 // expect) would tell it the intended outcome.
@@ -161,6 +161,8 @@ export function compareStep(st: Step, p: Prediction, vars: Record<string, unknow
     out.push({ check: `length ${path || '(top)'} ${n}`, result: open(v) ? 'U' : Array.isArray(v) && v.length === n ? 'M' : 'X' })
   }
   for (const path of e.jsonHas ?? []) out.push({ check: `has ${path}`, result: get(body, path) === undefined ? 'U' : 'M' })
+  // A reply that does not show the value does not establish its absence (U); one that shows it contradicts (X).
+  for (const path of e.jsonAbsent ?? []) out.push({ check: `absent ${path}`, result: get(body, path) === undefined ? 'U' : 'X' })
   if (expected !== undefined) out.push({ check: 'json', result: tri(expected, body) })
   return out
 }

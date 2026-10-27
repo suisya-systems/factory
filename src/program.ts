@@ -170,7 +170,7 @@ export async function runProgram(p: { appDir: string; work: string; contract: Co
   let total = 0
   for (const rel of r.read ?? []) {
     const f = inside(p.work, rel), st = lstatOrNull(f)
-    if (!st) continue // not written: absent from the envelope, so `jsonHas` / `length` can tell
+    if (!st) continue // not written: absent from the envelope, so `jsonHas` / `jsonAbsent` / `length` can tell
     if (!st.isFile()) throw new Error(`${rel} is not a plain file`)
     if ((total += st.size) > RUN_LIMITS.readChars) throw new Error(`the files to read are larger than ${RUN_LIMITS.readChars} characters in all`)
     out[rel] = asJson(readFileSync(f, 'utf8'))

@@ -1,13 +1,15 @@
 // The ONE place that knows the model CLI: its binary, flags, files and output shape.
 // Everything outside speaks only Task / Result (job, workplace, access, limits, result, cost).
-import { existsSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { sandboxSpawn, killTree, HOME, SANDBOX_PATH, type SandboxOpts } from './sandbox.ts'
 
 export type Access = 'none' | 'read' | 'write'
 // model: a per-command override of MODEL_BY_ROLE (lap 5, `--model <role>=<model>`); checked by parseModels.
-export type Task = { role: string; instruction: string; workdir: string; access: Access; maxCostUsd: number; timeoutMs: number; signal?: AbortSignal; model?: string }
+export type Task = { role: string; instruction: string; workdir: string; access: Access; maxCostUsd: number; timeoutMs: number; signal?: AbortSignal; model?: string
+  // Host path (outside the workdir): the whole raw session is appended there. Builder only (a drafter's or judge's carries scenario text).
+  transcript?: string }
 // costByModel: the cost the CLI reports per model inside the call (its own internal calls included), when it reports one.
 export type Result = { ok: boolean; text: string; costUsd: number | null; error?: string; model?: string; costByModel?: Record<string, number> }
 export type Model = (task: Task) => Promise<Result>
@@ -84,7 +86,7 @@ export function parseModels(specs: string[] = []): Record<string, string> {
 }
 
 function cliArgs(t: Task): string[] {
-  const a = ['-p', '--model', modelFor(t), '--output-format', 'json', '--max-budget-usd', t.maxCostUsd.toFixed(4), '--no-session-persistence', '--strict-mcp-config',
+  const a = ['-p', '--model', modelFor(t), '--output-format', ...(t.transcript ? ['stream-json', '--verbose'] : ['json']), '--max-budget-usd', t.maxCostUsd.toFixed(4), '--no-session-persistence', '--strict-mcp-config',
     // Inside the sandbox the user config dir is empty, so 'user' loads nothing. 'project' is NOT
     // loaded on purpose: the workdir is builder-written and could plant hooks that see the judge prompt.
     '--setting-sources', 'user']
@@ -131,13 +133,22 @@ async function spawnModel(t: Task, bin: string, args: string[], box: SandboxOpts
   return { out, code, why }
 }
 
+// The final result object of the CLI's output: the whole output is one JSON, or (a session kept as a transcript) one
+// JSON per line and the result is the last line of type "result". Null when there is none.
+export function finalResult(out: string, streamed: boolean): any {
+  if (!streamed) { try { return JSON.parse(out) } catch { return null } }
+  let j: any = null
+  for (const l of out.split('\n')) { try { const x = JSON.parse(l); if (x && x.type === 'result') j = x } catch { /* not an event line */ } }
+  return j
+}
+
 // Exported for tests only (bin = a fake CLI); production code uses realModel.
 export async function runCli(t: Task, bin: string): Promise<Result> {
   modelFor(t) // an unknown role throws before anything starts
   if (t.signal?.aborted) return { ok: false, text: '', costUsd: null, error: 'stopped before start' }
   const { out, code, why } = await spawnModel(t, bin, cliArgs(t), cliSandbox(t), cliEnv())
-  let j: any = null
-  try { j = JSON.parse(out) } catch { /* died without JSON */ }
+  if (t.transcript) { mkdirSync(dirname(t.transcript), { recursive: true }); appendFileSync(t.transcript, out) } // also after a stop or a failure
+  const j = finalResult(out, !!t.transcript)
   const cost = j && typeof j.total_cost_usd === 'number' && Number.isFinite(j.total_cost_usd) ? j.total_cost_usd : null
   const text = j && typeof j.result === 'string' ? j.result : ''
   // The models that actually answered (per-model usage), else the one requested.

@@ -106,3 +106,16 @@ test('a ship target still at the approved base is built on', async () => {
   assert.doesNotMatch(r.stopReason, /approved base/)
   assert.ok(calls > 0)
 })
+
+test('FACTORY_TRANSCRIPTS=1: the builder gets a transcript path per attempt, the judge and the others never do', async () => {
+  const seen: [string, string | undefined][] = []
+  const model: Model = async (t) => { seen.push([t.role, t.transcript]); return { ok: false, text: '', costUsd: 0.1, error: 'x' } }
+  const go = async (id: string) => { approvedChange(sd, id); await runChange({ changeId: id, shipTarget: gitTarget(), model, stateDir: sd, port: await freePort(), stopFile: join(sd, 'NOSTOP'), maxAttempts: 1 }) }
+  await go('tr-off')
+  assert.ok(seen.length > 0 && seen.every(([, p]) => p === undefined), 'no transcript unless asked')
+  seen.length = 0
+  process.env.FACTORY_TRANSCRIPTS = '1'
+  try { await go('tr-on') } finally { delete process.env.FACTORY_TRANSCRIPTS }
+  assert.deepEqual(seen.filter(([r]) => r === 'builder'), [['builder', join(sd, 'transcripts', 'tr-on', 'attempt-1.jsonl')]])
+  assert.ok(seen.filter(([r]) => r !== 'builder').every(([, p]) => p === undefined))
+})
