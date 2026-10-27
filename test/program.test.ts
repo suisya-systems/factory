@@ -339,6 +339,59 @@ test('the interface of a program: command words, flags per command, file names; 
   await assert.rejects(bad({ commands: ['plan'], fields: { x: ['exit 404'] } }), /interface/)
 })
 
+test('interface files: one {name} slot is accepted; alternatives, descriptions, two slots and bad slot names are refused with the value named', async () => {
+  const ok = (files: unknown) => draft(async (t) => ({ ok: true, costUsd: 0, text: JSON.stringify(t.role === 'spec-drafter' ? { spec: '# P\n\n## Undecided\n- x', interface: { commands: ['dispatcher plan'], files }, assumptions: [] } : GOOD) }), 'r', { run: CONTRACT })
+  const d = await ok(['task.json', 'dispatcher/spawn-prompt/{target}.json', '{worker}.json'])
+  assert.match(d.assumptions[0], /dispatcher\/spawn-prompt\/\{target\}\.json/)
+  for (const f of ['out/{a}/{b}.json', 'out/{a b}.json', 'out/{1x}.json', 'out/{}.json', 'out/{a.json', 'out/a}.json', 'out/a|b.json', 'spawn prompt/x.json', 'out/{a|b}.json', 'out/{{a}}.json'])
+    await assert.rejects(ok(['task.json', f]), (e: Error) => /files must be plain file names/.test(e.message) && e.message.includes(JSON.stringify(f)), f)
+})
+
+test('interface errors name the key or value that broke the rule, all of them', async () => {
+  const bad = (iface: unknown) => draft(async (t) => ({ ok: true, costUsd: 0, text: JSON.stringify(t.role === 'spec-drafter' ? { spec: '# P\n\n## Undecided\n- x', interface: iface, assumptions: [] } : GOOD) }), 'r', { run: CONTRACT })
+  await assert.rejects(bad({ commands: ['plan'], fields: { 'panes json': ['id'], 'spawn-prompt-step input': ['id'], ok: ['x y'] } }), (e: Error) => e.message.includes('"panes json"') && e.message.includes('"spawn-prompt-step input"'))
+  await assert.rejects(bad({ commands: ['plan'], fields: { ok: ['x y', 'z'] } }), (e: Error) => e.message.includes('"x y"') && !e.message.includes('"z"'))
+})
+
+test('a bad queryParams key is told to be a "METHOD /path" endpoint, not a bare name', async () => {
+  await assert.rejects(draft(async (t) => ({ ok: true, costUsd: 0, text: JSON.stringify({ spec: '# P\n\n## Undecided\n- x', interface: { queryParams: { 'items list': ['q'] } }, assumptions: [] }) }), 'r'), /"items list" not a "METHOD \/path" endpoint/)
+})
+
+test('the drafters are told how to write the interface and how long a summary may be', async () => {
+  const seen: Task[] = []
+  await draft(fakeDrafters(() => GOOD, seen), 'r', { run: CONTRACT })
+  const spec = seen.find((t) => t.role === 'spec-drafter')!.instruction, scen = seen.find((t) => t.role === 'scenario-drafter')!.instruction
+  assert.match(spec, /no spaces/)
+  assert.match(spec, /"\{name\}"/)
+  assert.match(spec, /"panes_json", not "panes json"/)
+  assert.match(scen, /AT MOST 200 characters/)
+  assert.match(scen, /never the "\{name\}" form/)
+  const web: Task[] = []
+  await draft(fakeDrafters(() => HTTP, web), 'r') // the HTTP scenario format carries the same limit
+  assert.match(web.find((t) => t.role === 'scenario-drafter')!.instruction, /AT MOST 200 characters/)
+})
+
+test('draft: a rejected interface and a 209-char summary are each sent back with the reason, and the repair passes', async () => {
+  const seen: Task[] = []
+  let sn = 0, cn = 0
+  const long = { scenarios: [{ ...GOOD.scenarios[0], summary: 'x'.repeat(209) }], assumptions: [] }
+  const model: Model = async (t) => {
+    seen.push(t)
+    if (t.role === 'spec-drafter') {
+      const files = sn++ === 0 ? ['dispatcher/spawn-prompt/<target>.json'] : ['dispatcher/spawn-prompt/{target}.json']
+      return { ok: true, costUsd: 0, text: JSON.stringify({ spec: '# P\n\n## Undecided\n- x', interface: { commands: ['dispatcher plan'], files }, assumptions: [] }) }
+    }
+    if (t.role === 'scenario-drafter') return { ok: true, costUsd: 0, text: JSON.stringify(cn++ === 0 ? long : GOOD) }
+    return { ok: true, costUsd: 0, text: JSON.stringify({ steps: [{ status: [0], body: { stdout: { ok: true } }, basis: 'convention', quote: '' }] }) }
+  }
+  const d = await draft(model, 'r', { run: CONTRACT })
+  assert.equal(sn, 2); assert.equal(cn, 2)
+  const specRepair = seen.filter((t) => t.role === 'spec-drafter')[1].instruction, scenRepair = seen.filter((t) => t.role === 'scenario-drafter')[1].instruction
+  assert.match(specRepair, /REJECTED: spec drafter: interface files must be plain file names.*"dispatcher\/spawn-prompt\/<target>\.json"/)
+  assert.match(scenRepair, /REJECTED: 1 scenario summary rejected:[\s\S]*209 chars; shorten it/)
+  assert.match(d.assumptions[0], /\{target\}/)
+})
+
 // ---- a program that calls the fake external service (lap 14) ----
 const SVC = { run: CONTRACT, service: true }
 const set = (status: number) => ({ service: true, method: 'POST', path: '/responses', body: { method: 'POST', path: '/topic', status, json: { ok: true } }, expect: { status: 204 } })

@@ -68,7 +68,7 @@ export function validateScenarios(x: unknown, o: { commandWords?: Set<string> } 
     if (typeof s.id !== 'string' || !/^[\w.-]{1,64}$/.test(s.id) || ids.has(s.id)) throw new Error(`${w}: bad or duplicate id`)
     ids.add(s.id)
     for (const f of ['title', 'summary', 'kind']) if (typeof s[f] !== 'string' || !s[f].trim()) throw new Error(`${w}: ${f} must be a non-empty string`)
-    if (/[\r\n]/.test(s.summary) || s.summary.length > 200) bad.push(`scenario "${s.id}": summary must be one line (<=200 chars); it has ${s.summary.split(/\r?\n/).length} line(s) and ${s.summary.length} chars`)
+    if (/[\r\n]/.test(s.summary) || s.summary.length > 200) bad.push(`scenario "${s.id}": summary must be one line (<=200 chars); it has ${s.summary.split(/\r?\n/).length} line(s) and ${s.summary.length} chars; shorten it to one line of at most 200 chars`)
     if (typeof s.inSpec !== 'boolean') throw new Error(`${w}: inSpec must be boolean`)
     if (!Array.isArray(s.steps) || s.steps.length === 0) throw new Error(`${w}: steps must be a non-empty array`)
     for (const [j, st] of s.steps.entries()) {
