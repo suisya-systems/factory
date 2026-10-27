@@ -193,7 +193,7 @@ function checkInterface(raw: unknown): Record<string, unknown> {
     if (m === undefined) continue
     if (!isObj(m)) throw bad(`${k} must be an object`)
     const badKeys = Object.keys(m).filter((key) => !re.test(key))
-    if (badKeys.length) throw bad(`${k} key${badKeys.length === 1 ? '' : 's'} ${badKeys.map((key) => JSON.stringify(key)).join(', ')} not a bare name (letters, digits, _ only; no spaces, no description)`)
+    if (badKeys.length) throw bad(`${k} key${badKeys.length === 1 ? '' : 's'} ${badKeys.map((key) => JSON.stringify(key)).join(', ')} not ${k === 'queryParams' ? 'a "METHOD /path" endpoint' : 'a bare name (letters, digits, _ only; no spaces, no description)'}`)
     for (const [key, names] of Object.entries(m)) list(names, NAME, `${k}["${key}"] must be a list of bare names`)
   }
   if (x.testIds !== undefined) list(x.testIds, TEST_ID, 'testIds must be a list of bare names without "."')

@@ -353,6 +353,10 @@ test('interface errors name the key or value that broke the rule, all of them', 
   await assert.rejects(bad({ commands: ['plan'], fields: { ok: ['x y', 'z'] } }), (e: Error) => e.message.includes('"x y"') && !e.message.includes('"z"'))
 })
 
+test('a bad queryParams key is told to be a "METHOD /path" endpoint, not a bare name', async () => {
+  await assert.rejects(draft(async (t) => ({ ok: true, costUsd: 0, text: JSON.stringify({ spec: '# P\n\n## Undecided\n- x', interface: { queryParams: { 'items list': ['q'] } }, assumptions: [] }) }), 'r'), /"items list" not a "METHOD \/path" endpoint/)
+})
+
 test('the drafters are told how to write the interface and how long a summary may be', async () => {
   const seen: Task[] = []
   await draft(fakeDrafters(() => GOOD, seen), 'r', { run: CONTRACT })
