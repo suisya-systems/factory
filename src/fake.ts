@@ -9,8 +9,11 @@ import { duplexPair, type Duplex } from 'node:stream'
 // (it is part of the approved spec, so the approved version covers it). It carries no scenario data.
 const SERVICE_HEAD = '## External service (factory)'
 export const usesService = (spec: string) => spec.includes(`\n${SERVICE_HEAD}\n`)
-export const withService = (spec: string) => (usesService(spec) ? spec : `${spec.trimEnd()}\n\n${SERVICE_HEAD}\n\n` +
-  'The external service the request names is reachable at process.env.SERVICE_URL, a base URL of the form http://127.0.0.1:<port>. ' +
+// program: the app is a command-line program (it reads the variable from its environment, in any language, and a check can write it into a file).
+export const withService = (spec: string, program = false) => (usesService(spec) ? spec : `${spec.trimEnd()}\n\n${SERVICE_HEAD}\n\n` +
+  (program ? 'The external service the request names is reachable at the base URL in the environment variable SERVICE_URL of the program, of the form http://127.0.0.1:<port>; ' +
+    'a check that has to give the program that address in a file or an argument writes {{SERVICE_URL}} there. '
+    : 'The external service the request names is reachable at process.env.SERVICE_URL, a base URL of the form http://127.0.0.1:<port>. ') +
   'It is the only address on the network the app can reach.\n')
 
 // Bounds on what the app can make the factory hold, counted as bytes and requests arrive (an unfinished

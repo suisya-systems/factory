@@ -1,13 +1,14 @@
 // Deterministic HTTP scenario runner. Each scenario gets a FRESH sandboxed app instance.
 import { mkdtempSync } from 'node:fs'
+import type { Duplex } from 'node:stream'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { openBrowser, TARGET, UI_ACTIONS, UI_LIMITS, usesUi, type Browser } from './browser.ts'
 import { CONTROL, startFake, usesService, type Fake } from './fake.ts'
-import { contractOf, ENV_NAME, okPath, RESERVED_ENV, RUN_LIMITS, runProgram, usesRun, type Contract } from './program.ts'
+import { contractOf, ENV_NAME, okPath, RESERVED_ENV, RUN_LIMITS, runProgram, serviceUrl, usesRun, type Contract } from './program.ts'
 import { freePort, killTree, removeTree, spawnApp, waitPort } from './sandbox.ts'
 
-export type Expect = { status?: number | number[]; json?: unknown; jsonHas?: string[]; isArray?: boolean; length?: number | Record<string, number> }
+export type Expect = { status?: number | number[]; json?: unknown; jsonHas?: string[]; jsonAbsent?: string[]; isArray?: boolean; length?: number | Record<string, number> }
 // service: the step goes to the fake external service's control endpoint (fake.ts), not to the app.
 // ui (#4): a browser step instead of an HTTP request (no method, body, headers): "goto" a path, "click" / "fill" (with text)
 // a target "<testId>" or "<testId>.<n>". Its response is the page: json {"<testId>": [visible texts]}, status (goto only).
@@ -106,10 +107,14 @@ export function validateScenarios(x: unknown, o: { commandWords?: Set<string> } 
       if (st.capture !== undefined && (!isObj(st.capture) || !Object.values(st.capture).every((v) => typeof v === 'string'))) throw new Error(`${ws}: bad capture`)
       const e = st.expect ?? {} // only a ui action may have nothing to check
       if (!isObj(e)) throw new Error(`${ws}: expect must be an object`)
-      keys(e, ['status', 'json', 'jsonHas', 'isArray', 'length'], `${ws}.expect`)
+      keys(e, ['status', 'json', 'jsonHas', 'jsonAbsent', 'isArray', 'length'], `${ws}.expect`)
       if (st.expect !== undefined && Object.keys(e).length === 0) throw new Error(`${ws}: expect must contain at least one check`)
       if (e.status !== undefined && !(Number.isInteger(e.status) || (Array.isArray(e.status) && e.status.length > 0 && e.status.every(Number.isInteger)))) throw new Error(`${ws}: bad expect.status`)
       if (e.jsonHas !== undefined && !(Array.isArray(e.jsonHas) && e.jsonHas.length > 0 && e.jsonHas.every((p: unknown) => typeof p === 'string'))) throw new Error(`${ws}: bad expect.jsonHas`)
+      if (e.jsonAbsent !== undefined && !(Array.isArray(e.jsonAbsent) && e.jsonAbsent.length > 0 && e.jsonAbsent.every((p: unknown) => typeof p === 'string'))) throw new Error(`${ws}: bad expect.jsonAbsent`)
+      // A file the step does not read is never in the envelope: naming it would pass whatever the program did.
+      const unread = st.run ? (e.jsonAbsent ?? []).find((p: string) => p.startsWith('files.') && !(st.read ?? []).some((r: string) => p === `files.${r}` || p.startsWith(`files.${r}.`))) : undefined
+      if (unread !== undefined) throw new Error(`${ws}: expect.jsonAbsent ${unread} names a file that is not in "read"`)
       if (e.isArray !== undefined && typeof e.isArray !== 'boolean') throw new Error(`${ws}: bad expect.isArray`)
       if (e.length !== undefined && !(Number.isInteger(e.length) || (isObj(e.length) && Object.keys(e.length).length > 0 && Object.values(e.length).every(Number.isInteger)))) throw new Error(`${ws}: bad expect.length`)
       // The summary is the only thing the builder may see on failure: it must not carry concrete values.
@@ -188,6 +193,7 @@ export function checkStep(st: Step, status: number, json: unknown, vars: Record<
     if (!Array.isArray(v) || v.length !== n) return `expected length ${n}${p ? ` at ${p}` : ''}, got ${Array.isArray(v) ? v.length : 'non-array'}`
   }
   for (const p of e.jsonHas ?? []) if (get(json, p) === undefined) return `response missing ${p}`
+  for (const q of e.jsonAbsent ?? []) { const p = fill(q, vars) as string; if (get(json, p) !== undefined) return `response has ${p}, expected it absent` } // a path may name a captured file
   if (e.json !== undefined && !subset(st.ui ? squash(fill(e.json, vars)) : fill(e.json, vars), json)) return 'response body did not match expected subset'
   for (const [name, p] of Object.entries(st.capture ?? {})) {
     const v = p.startsWith(HEADER) ? (headers?.get(p.slice(HEADER.length)) ?? undefined) : get(json, p)
@@ -257,7 +263,7 @@ async function uiStep(ui: { browser?: Browser }, st: Step, port: number, vars: R
 }
 
 // prog (the spec declares a command-line program): where its run steps start it.
-type Prog = { appDir: string; work: string; contract: Contract }
+type Prog = { appDir: string; work: string; contract: Contract; service?: { port: number; connect: () => Duplex } }
 async function runSteps(port: number, steps: Step[], from: number, vars: Record<string, unknown>, fake: Fake | undefined, signal: AbortSignal, ui?: { browser?: Browser }, prog?: Prog): Promise<{ failedStep?: number; detail: string }> {
   for (const [i, st] of steps.entries()) {
     const n = from + i + 1
@@ -271,8 +277,8 @@ async function runSteps(port: number, steps: Step[], from: number, vars: Record<
           read: st.read === undefined ? undefined : (fill(st.read, vars) as unknown[]).map(String), env: st.env === undefined ? undefined : Object.fromEntries(Object.entries(fill(st.env, vars) as Record<string, unknown>).map(([k, e]) => [k, String(e)])),
         }, signal)
         failed = checkStep(st, r.status, r.json, vars)
-      } else if (prog) {
-        return { failedStep: n, detail: `step ${n}: a command-line program is checked with run steps only` }
+      } else if (prog && !st.service) {
+        return { failedStep: n, detail: `step ${n}: a command-line program is checked with run steps and service steps only` }
       } else if (st.service) {
         if (!fake) return { failedStep: n, detail: `step ${n}: the spec declares no external service` }
         const r = fake.control(st.method, fill(st.path, vars) as string, st.body === undefined ? undefined : fill(st.body, vars))
@@ -334,10 +340,14 @@ export async function runScenario(appDir: string, s: Scenario, signal: AbortSign
   if (!o.run && stray >= 0) return { ...base, pass: false, failedStep: stray + 1, detail: `step ${stray + 1}: the spec declares no command-line program` }
   if (o.run) { // no server: one working directory for the whole scenario, so a later run sees what an earlier one wrote
     const work = mkdtempSync(join(tmpdir(), 'factory-work-'))
+    const fake = o.service ? startFake() : undefined // fresh per scenario, as for a server
     try {
-      const r = await runSteps(0, s.steps, 0, {}, undefined, signal, undefined, { appDir, work, contract: o.run })
+      // The service port only exists inside the program's network namespace; any port will do. {{SERVICE_URL}} is the same address as the program's SERVICE_URL.
+      const service = fake && { port: await freePort(), connect: () => fake.connect() }
+      const r = await runSteps(0, s.steps, 0, service ? { SERVICE_URL: serviceUrl(service.port) } : {}, fake, signal, undefined, { appDir, work, contract: o.run, service })
+      if (r.failedStep === undefined && fake?.overflow()) return { ...base, pass: false, failedStep: s.steps.length, detail: 'the program sent the external service more than the fake keeps' }
       return { ...base, pass: r.failedStep === undefined, ...r }
-    } finally { removeTree(work) }
+    } finally { fake?.close(); removeTree(work) }
   }
   const fake = o.service ? startFake() : undefined
   const ui: { browser?: Browser } | undefined = o.ui ? {} : undefined

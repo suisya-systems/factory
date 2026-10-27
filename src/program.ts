@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync, type Stats } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import type { Duplex } from 'node:stream'
 import { HOME, removeTree, SANDBOX_PATH, sandboxRun, visibleInSandbox } from './sandbox.ts'
 
 export type Contract = { command: string[]; pythonPath?: string[]; deps?: string }
@@ -21,7 +22,7 @@ export const FILE_PATH = /^[\w.-]+(\/[\w.-]+)*$/
 export const okPath = (p: string) => FILE_PATH.test(p) && p.split('/').every((s) => s !== '.' && s !== '..')
 export const ENV_NAME = /^[A-Z][A-Z0-9_]*$/
 // What a scenario may not set: the contract's own variables and the ones that load code or change where code is found.
-export const RESERVED_ENV = /^(PATH|HOME|TMPDIR|VIRTUAL_ENV|PYTHON\w*|LD_\w*|DYLD_\w*|NODE_\w*|BASH_ENV|ENV|IFS)$/
+export const RESERVED_ENV = /^(PATH|HOME|TMPDIR|VIRTUAL_ENV|PYTHON\w*|LD_\w*|DYLD_\w*|NODE_\w*|BASH_ENV|ENV|IFS|SERVICE_URL)$/
 // Bounds: the program is builder-written, so what it prints and writes is capped, and the run is timed.
 export const RUN_LIMITS = { timeoutMs: 20_000, outChars: 200_000, files: 20, fileChars: 64_000, readChars: 200_000 }
 
@@ -140,7 +141,9 @@ function inside(work: string, rel: string): string {
 }
 const asJson = (raw: string): unknown => { try { return raw.trim() ? JSON.parse(raw) : raw } catch { return raw } }
 
-export async function runProgram(p: { appDir: string; work: string; contract: Contract }, r: ProgramRun, signal: AbortSignal): Promise<Envelope> {
+// p.service (the spec also declares an external service): the program reaches the fake at SERVICE_URL, over the bridge of sandbox.ts, and nothing else.
+export const serviceUrl = (port: number) => `http://127.0.0.1:${port}`
+export async function runProgram(p: { appDir: string; work: string; contract: Contract; service?: { port: number; connect: () => Duplex } }, r: ProgramRun, signal: AbortSignal): Promise<Envelope> {
   const c = p.contract
   const set = c.deps ? depsDir(c.deps) : undefined
   if (c.deps) loadDeps(c.deps)
@@ -156,13 +159,13 @@ export async function runProgram(p: { appDir: string; work: string; contract: Co
     writeFileSync(f, text)
   }
   const env: NodeJS.ProcessEnv = { PATH: [...(set ? [join(set, 'venv', 'bin')] : []), SANDBOX_PATH].join(':'), HOME, PYTHONDONTWRITEBYTECODE: '1', PYTHONUTF8: '1',
-    ...(c.pythonPath ? { PYTHONPATH: c.pythonPath.map((d) => join(p.appDir, d)).join(':') } : {}) }
+    ...(c.pythonPath ? { PYTHONPATH: c.pythonPath.map((d) => join(p.appDir, d)).join(':') } : {}), ...(p.service ? { SERVICE_URL: serviceUrl(p.service.port) } : {}) }
   for (const [k, v] of Object.entries(r.env ?? {})) {
     if (!ENV_NAME.test(k) || RESERVED_ENV.test(k) || typeof v !== 'string' || v.includes('\0')) throw new Error(`environment variable ${k} is not allowed`)
     env[k] = v
   }
   const cmd = c.command.map((a) => a.replaceAll('{app}', p.appDir))
-  const ran = await sandboxRun(cmd[0], [...cmd.slice(1), ...r.argv], { workdir: p.work, writable: true, extraRo: [p.appDir], isolateNet: true }, env, r.stdin ?? '', signal, RUN_LIMITS)
+  const ran = await sandboxRun(cmd[0], [...cmd.slice(1), ...r.argv], { workdir: p.work, writable: true, extraRo: [p.appDir], isolateNet: true }, env, r.stdin ?? '', signal, RUN_LIMITS, p.service)
   if (signal.aborted) throw new Error('stopped')
   if (ran.why) throw new Error(`the program was stopped: ${ran.why}`)
   if (ran.code === null) throw new Error('the program was killed by a signal')
@@ -170,7 +173,7 @@ export async function runProgram(p: { appDir: string; work: string; contract: Co
   let total = 0
   for (const rel of r.read ?? []) {
     const f = inside(p.work, rel), st = lstatOrNull(f)
-    if (!st) continue // not written: absent from the envelope, so `jsonHas` / `length` can tell
+    if (!st) continue // not written: absent from the envelope, so `jsonHas` / `jsonAbsent` / `length` can tell
     if (!st.isFile()) throw new Error(`${rel} is not a plain file`)
     if ((total += st.size) > RUN_LIMITS.readChars) throw new Error(`the files to read are larger than ${RUN_LIMITS.readChars} characters in all`)
     out[rel] = asJson(readFileSync(f, 'utf8'))

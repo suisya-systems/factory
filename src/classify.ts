@@ -51,7 +51,7 @@ export function undecidedInRequest(spec: string, request: string): { item: strin
   })
 }
 
-export const CLASSIFIER_BUDGET = { maxCostUsd: 0.5, timeoutMs: 3 * 60_000 }
+export const CLASSIFIER_BUDGET = { maxCostUsd: 1, timeoutMs: 3 * 60_000 }
 
 // What the predictor sees of a scenario: the requests only. Anything else (id, title, summary, kind,
 // expect) would tell it the intended outcome.
@@ -61,7 +61,7 @@ const isSetup = (st: Step) => st.service === true && `${st.method} ${st.path.spl
 const SERVICE_NOTE = `
 A request with "service": true does not go to the app: it goes to the control endpoint of a fake that stands in for the external service the spec names.
 "POST /responses" sets what the fake answers the app for that method and path (reply 204, no body); predict {"status": [204], "body": null, "basis": "convention", "quote": ""} for it.
-"GET /requests" replies 200 with the array of requests the app has sent to the service so far, in order, each {"method", "path" (with query), "headers" (lower-case names), "body" (parsed JSON, else text)}: predict which requests the app sent.
+"GET /requests" replies 200 with the array of requests the app has sent to the service so far, in order, each {"method", "path" (with query), "headers" (lower-case names), "body" (parsed JSON, else text)}: predict which requests the app sent (when the app is a command-line program with "run" requests, the requests that program sent; "{{SERVICE_URL}}" in a request is the base URL of the fake, whose port is not known).
 `
 // #4: a ui step drives the app's pages in a browser; its "response" is the page as the runner reads it.
 const UI_NOTE = `
@@ -161,6 +161,8 @@ export function compareStep(st: Step, p: Prediction, vars: Record<string, unknow
     out.push({ check: `length ${path || '(top)'} ${n}`, result: open(v) ? 'U' : Array.isArray(v) && v.length === n ? 'M' : 'X' })
   }
   for (const path of e.jsonHas ?? []) out.push({ check: `has ${path}`, result: get(body, path) === undefined ? 'U' : 'M' })
+  // A reply that does not show the value does not establish its absence (U); one that shows it contradicts (X).
+  for (const q of e.jsonAbsent ?? []) { const path = fillOpen(q, vars) as string; out.push({ check: `absent ${q}`, result: path === '?' || get(body, path) === undefined ? 'U' : 'X' }) }
   if (expected !== undefined) out.push({ check: 'json', result: tri(expected, body) })
   return out
 }

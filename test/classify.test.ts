@@ -45,7 +45,7 @@ test('draft: spec and scenarios come from separate sessions; the scenario writer
   assert.ok(!sc.includes('no auth'), 'scenario writer saw the spec writer\'s assumptions')
   assert.match(d.spec, /## Interface/) // the builder gets the same names
   assert.deepEqual(d.assumptions.slice(1), ['no auth', '(scenario writer) titles are short'])
-  assert.deepEqual(seen.map((t) => t.maxCostUsd), [1, 1, 0.5])
+  assert.deepEqual(seen.map((t) => t.maxCostUsd), [2, 2, 1])
 })
 
 test('the classifier sees requests only: no id, title, summary, kind or expectations', () => {
@@ -75,6 +75,14 @@ test('classifyReply: readable / basis downgrade / contradicts / unstated', () =>
   assert.equal(r(step([201], {}), ok).label, 'unstated') // jsonHas id: presence not determined
   assert.equal(r(step([201], { id: '?' }), step([200], { title: '?' })).label, 'unstated')
   assert.throws(() => classifyReply(createGet, SPEC, '', { steps: [ok] }), /one entry per step/)
+})
+
+test('classifyReply: jsonAbsent is contradicted by a predicted value, and not established by a reply that is silent', () => {
+  const gone: Scenario = { ...createGet, steps: [createGet.steps[0], { ...createGet.steps[1], expect: { jsonAbsent: ['title'] } }] }
+  const st = (body: unknown) => ({ status: [200], body, basis: 'spec', quote: 'returns 201 with its id' })
+  const label = (b: unknown) => classifyReply(gone, SPEC, '', { steps: [{ ...st({ id: '?' }), status: [201] }, st(b)] }).label
+  assert.equal(label({ title: 'alpha' }), 'contradicts')
+  assert.equal(label({}), 'unstated')
 })
 
 test('classifyReply: lengths inside the body, and arrays as full claims', () => {

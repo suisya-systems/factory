@@ -15,7 +15,7 @@ import { runChange } from './run.ts'
 import { userJudge } from './user.ts'
 import { UNDECIDED, undecidedInRequest, undecidedItems, type Classification } from './classify.ts'
 import { buildRequest, clip, fill, isObj, type Scenario } from './scenario.ts'
-import { CONTROL } from './fake.ts'
+import { CONTROL, usesService } from './fake.ts'
 import { exportTree, removeTree, sandboxGit } from './sandbox.ts'
 import { observe, serve } from './serve.ts'
 import { watch } from './watch.ts'
@@ -30,7 +30,7 @@ const USAGE = `usage: factory <command>
         [--minority]                               the scenario writer picks reasonable minority answers on purpose
                                                    and marks them "[minority]" in its assumptions
         [--minority-brief <text>]                  (with --minority) the experimenter's extra constraints on those points
-        [--service]                                the app calls an external service: the spec names SERVICE_URL and
+        [--service]                                the app calls an external service (goes with --contract too): the spec names SERVICE_URL and
                                                    the hidden scenarios set and check a fake of it while judging
         [--ui]                                     the app has browser pages: the interface names their test ids and the
                                                    hidden scenarios drive them in a sandboxed headless browser while judging
@@ -58,7 +58,7 @@ const USAGE = `usage: factory <command>
                                                    (--rescore keeps each replaced record in replicates/history/)
   tally <id>                                       tables of the replicates' probe answers and scenario passes,
                                                    and the scenario verdicts that changed between rescores
-  user-judge <id> --request <file> [--sessions 0-5 (default 1)] [--max-cost N (default 10, this arm only)] [--mutants <file under vault/>]
+  user-judge <id> --request <file> [--sessions 0-5 (default 1)] [--max-cost N (default 40, this arm only)] [--mutants <file under vault/>]
                                                    REAL model calls: a separate judge arm (#30). A user agent uses each
                                                    recorded build of <id> (run attempts or replicates) and gives a verdict;
                                                    session k leans on one focus (main, input, state, failure, cycling).
@@ -81,6 +81,7 @@ const USAGE = `usage: factory <command>
                                                    contract of a command-line program names the set by the lock file's sha256
   serve --port N                                   (internal) production supervisor
 --model <role>=<model> (repeatable; draft, replicate, probe-isolation, split, watch, user-judge): the model for that role in this command.
+FACTORY_TRANSCRIPTS=1 (run, replicate, lap, plan): keep each builder session as $FACTORY_HOME/transcripts/<id>/<build or attempt>.jsonl.
 After \`stop\`, every command refuses to start until the STOP file is deleted by hand.`
 const COMMANDS = ['draft', 'approve', 'run', 'serve', 'observe', 'stop', 'probe-isolation', 'replicate', 'tally', 'lap', 'split', 'plan', 'watch', 'user-judge', 'deps']
 const MODEL_COMMANDS = ['draft', 'replicate', 'probe-isolation', 'split', 'watch', 'user-judge']
@@ -241,7 +242,7 @@ export function approvalSummary(id: string, d: Draft, version: string, request?:
     ...(undecided.length ? ['## Undecided in the spec (left to the builder)', ...undecided, ''] : []),
     ...(minority.length ? ['## Minority choices (the scenario writer chose these on purpose; most builders are expected to miss them at first)', ...minority.map((a) => `- ${a}`), ''] : []),
     ...(d.base?.baseSha ? [`Extends: ${d.base.baseSha} (the ship target must still be at this commit when the change runs)${d.base.paths?.length ? `; the drafters were shown only: ${d.base.paths.join(', ')}` : ''}`, ''] : []),
-    ...(usesRun(d.spec) ? [`Command-line program: runs as \`${contractOf(d.spec).command.join(' ')}\`${contractOf(d.spec).deps ? `, dependency set ${contractOf(d.spec).deps}` : ''} (the contract is in the spec; the scenarios are all run steps)`, ''] : []),
+    ...(usesRun(d.spec) ? [`Command-line program: runs as \`${contractOf(d.spec).command.join(' ')}\`${contractOf(d.spec).deps ? `, dependency set ${contractOf(d.spec).deps}` : ''} (the contract is in the spec; the scenarios are run steps${usesService(d.spec) ? ' and service steps' : ''})${usesService(d.spec) ? '; it also calls an external service, a fake of which each scenario gets at SERVICE_URL' : ''}`, ''] : []),
     `## Scenarios: ${d.scenarios.length} total`,
     'Self-report = the scenario writer\'s own claim that the request states the behaviour (it never saw the spec or the spec writer\'s assumptions).', '',
     '| kind | self-report: stated | self-report: unstated |', '|---|---|---|',
@@ -321,7 +322,7 @@ export async function main(argv: string[], model: Model = realModel): Promise<nu
         const iface = v['iface-from'] ? specIface(loadApproved(sd, v['iface-from']).spec) : undefined
         if (v['minority-brief'] !== undefined && (!v.minority || !v['minority-brief'].trim())) throw new Error('--minority-brief needs --minority and a text')
         if (v['base-path'] && !v.base) throw new Error('--base-path needs --base')
-        if (v.contract && (v.service || v.ui)) throw new Error('--contract (a command-line program) does not go with --service or --ui')
+        if (v.contract && v.ui) throw new Error('--contract (a command-line program) does not go with --ui')
         const run = v.contract ? checkContract(JSON.parse(readFileSync(v.contract, 'utf8'))) : undefined
         if (run?.deps) loadDeps(run.deps) // a missing dependency set fails here, before any spend
         const app = v.base ? await appSnapshot(resolve(v.base), v['base-path']) : null
