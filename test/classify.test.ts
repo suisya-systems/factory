@@ -410,3 +410,26 @@ test('#71: the number of scenarios follows the request size, written in batches 
   const dup: Model = async (t) => ({ ok: true, costUsd: 0, text: JSON.stringify(t.role === 'spec-drafter' ? { spec: SPEC, interface: IFACE, assumptions: [] } : t.role === 'scenario-drafter' ? { scenarios: [createGet] } : { steps: [] }) })
   await assert.rejects(draft(dup, words(1658)), /id "create-get" is already used by an earlier batch/)
 })
+
+test('#71: a summary leak in a later batch is repaired in that batch, not left to fail the whole draft', async () => {
+  const words = Array(1658).fill('word').join(' ') // 4 batches
+  const seen: Task[] = []
+  let n = 0
+  const m: Model = async (t) => {
+    seen.push(t)
+    let reply: unknown = { steps: [{ status: null, body: null, basis: 'convention', quote: '' }, { status: null, body: null, basis: 'convention', quote: '' }] }
+    if (t.role === 'spec-drafter') reply = { spec: SPEC, interface: IFACE, assumptions: [] }
+    if (t.role === 'scenario-drafter') {
+      const call = n++ // batch 1 = call 0; batch 2 = calls 1 (leaks) and 2 (repair); batches 3, 4 = calls 3, 4
+      const batch = call < 2 ? call : call - 1
+      reply = { scenarios: [{ ...createGet, id: `s-${batch}`, summary: call === 1 ? 'alpha comes back' : createGet.summary }] }
+    }
+    return { ok: true, costUsd: 0.1, text: JSON.stringify(reply) }
+  }
+  const d = await draft(m, words)
+  const calls = seen.filter((t) => t.role === 'scenario-drafter')
+  assert.equal(calls.length, 5)
+  assert.match(calls[2].instruction, /batch 2 of 4/)
+  assert.match(calls[2].instruction, /PREVIOUS REPLY WAS REJECTED: [\s\S]*concrete value [^\n]*"alpha"/)
+  assert.deepEqual(d.scenarios.map((s) => s.id), ['s-0', 's-1', 's-2', 's-3'])
+})
