@@ -10,7 +10,9 @@ import { countedInCalls, requestedModel, type Model, type Result } from './adapt
 // ceilings (lap 3; lap 2 spent $0.47 / $0.23 per call). userCallUsd: one turn of the user agent (#30, no tools).
 // maxCostUsd: $40 since lap 14 (it was $10; the classifier ($1) and drafter ($2) per-call ceilings rose with it; the scenario drafter went to $5 on 2026-10-27, owner decision, factory-notes#47). lapCostUsd: $260 since lap 9, screen included (owner decision 2026-10-18); $150 in lap 8, $30 in laps 1-7. lapCountedCalls: calls of models whose
 // spend is not reported in USD (lap 8: 200 by the owner, 1 of them spent outside the factory on the adapter smoke).
-export const CAPS = { maxCostUsd: 40, lapCostUsd: 260, lapCountedCalls: 199, maxAttempts: 5, builderCallUsd: 5, judgeCallUsd: 2, scenarioDrafterUsd: 5, userCallUsd: 0.5, modelTimeoutMs: 20 * 60_000, pollMs: 500 }
+// drafterRepairs: repair rounds after a drafter's first reply fails validation; 2 since 2026-10-28 (owner decision; it was 1:
+// in lap 14's rerun a batch's scenario summaries still leaked step values after the single repair).
+export const CAPS = { maxCostUsd: 40, lapCostUsd: 260, lapCountedCalls: 199, maxAttempts: 5, builderCallUsd: 5, judgeCallUsd: 2, scenarioDrafterUsd: 5, drafterRepairs: 2, userCallUsd: 0.5, modelTimeoutMs: 20 * 60_000, pollMs: 500 }
 
 export class Stop extends Error {}
 

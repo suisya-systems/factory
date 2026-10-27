@@ -7,7 +7,7 @@ import type { Model, Task } from '../src/adapter.ts'
 import { main, approvalSummary } from '../src/cli.ts'
 import { classify, classifyReply, compareStep, predictInstruction, undecidedInRequest, withoutUndecided } from '../src/classify.ts'
 import { startGuard, Stop } from '../src/limits.ts'
-import { draft, extractJson, SCENARIO_COUNT, scenarioBatches } from '../src/roles.ts'
+import { ask, draft, extractJson, SCENARIO_COUNT, scenarioBatches } from '../src/roles.ts'
 import { runScenario, type Scenario } from '../src/scenario.ts'
 import { vaultDir } from '../src/vault.ts'
 import { freshState, gitTarget, SCENARIOS, tmp, writeApp } from './helpers.ts'
@@ -236,29 +236,47 @@ test('classifyReply: a determined captured value is kept for later steps; an und
   assert.equal(label({ version: '?' }, { version: '{{v}}' }), 'unstated')
 })
 
-test('a rejected drafter reply gets one repair round with the error, in a fresh call; a second rejection fails', async () => {
+test('a rejected drafter reply gets up to two repair rounds with the error, in a fresh call; a third rejection fails', async () => {
   const leaky = { ...createGet, summary: 'alpha comes back' } // 'alpha' is a value from its steps
-  const run = async (fixed: boolean) => {
+  const run = async (bad: number) => {
     const seen: Task[] = []
     let n = 0
     const m: Model = async (t) => {
       seen.push(t)
       const reply = t.role === 'spec-drafter' ? { spec: SPEC, interface: IFACE, assumptions: [] }
-        : t.role === 'scenario-drafter' ? { scenarios: [n++ === 0 || !fixed ? leaky : createGet] }
+        : t.role === 'scenario-drafter' ? { scenarios: [n++ < bad ? leaky : createGet] }
           : { steps: [{ status: null, body: null, basis: 'convention', quote: '' }, { status: null, body: null, basis: 'convention', quote: '' }] }
       return { ok: true, costUsd: 0.1, text: JSON.stringify(reply) }
     }
     return { seen, d: await draft(m, 'x').catch((e: Error) => e) }
   }
-  const good = await run(true)
-  assert.deepEqual(good.seen.map((t) => t.role), ['spec-drafter', 'scenario-drafter', 'scenario-drafter', 'classifier'])
+  const good = await run(2)
+  assert.deepEqual(good.seen.map((t) => t.role), ['spec-drafter', 'scenario-drafter', 'scenario-drafter', 'scenario-drafter', 'classifier'])
   assert.match(good.seen[2].instruction, /PREVIOUS REPLY WAS REJECTED: [\s\S]*concrete value [^\n]*"alpha"/)
   assert.match(good.seen[2].instruction, /scenario "create-get": /) // the repair names the scenario
   assert.match(good.seen[2].instruction, /Change only what the error names/)
   assert.ok(!(good.d instanceof Error) && good.d.scenarios[0].summary === createGet.summary)
-  const bad = await run(false)
+  const bad = await run(3)
   assert.ok(bad.d instanceof Error && /concrete value/.test(bad.d.message))
-  assert.equal(bad.seen.filter((t) => t.role === 'scenario-drafter').length, 2)
+  assert.equal(bad.seen.filter((t) => t.role === 'scenario-drafter').length, 3)
+})
+
+test('2026-10-28: ask accepts a reply rejected twice; each repair sees the latest reply; a third rejection throws with all three', async () => {
+  const run = async (bad: number) => {
+    const seen: string[] = []
+    let n = 0
+    const m: Model = async (t) => { seen.push(t.instruction); n++; return { ok: true, costUsd: 0, text: n <= bad ? `{"n": ${n}}` : '{"n": 0}' } }
+    const r = await ask(m, 'scenario-drafter', 'go', (j) => { if (j.n) throw new Error(`bad ${j.n}`); return j }).catch((e: Error & { rejected?: unknown[] }) => e)
+    return { seen, r }
+  }
+  const ok = await run(2)
+  assert.deepEqual(ok.r, { n: 0 })
+  assert.equal(ok.seen.length, 3)
+  assert.match(ok.seen[2], /REJECTED: bad 2\nPREVIOUS REPLY:\n\{"n": 2\}/)
+  const no = await run(3)
+  assert.ok(no.r instanceof Error && no.r.message === 'bad 3')
+  assert.equal(no.seen.length, 3)
+  assert.deepEqual((no.r as Error & { rejected: { reply: string }[] }).rejected.map((x) => x.reply), ['{"n": 1}', '{"n": 2}', '{"n": 3}'])
 })
 
 test('lap 6: --minority asks for marked minority choices; a reply without a well-formed one citing real ids is repaired, then fails', async () => {
@@ -294,7 +312,7 @@ test('lap 6: --minority asks for marked minority choices; a reply without a well
   assert.ok(briefed.assumptions.includes('(experimenter) minority brief: Pick 4 or 5 points.'))
   assert.match(approvalSummary('x', briefed, 'v'), /- \(experimenter\) minority brief: Pick 4 or 5 points\./)
   for (const [bad, why] of [[ok.replace(createGet.id, 'nope'), /unknown scenario "nope"/], [ok.replace(' (most would: everyone in turn)', ''), /malformed/]] as const) {
-    const r = await run(true, [bad], [bad])
+    const r = await run(true, [bad], [bad], [bad])
     assert.ok(r.d instanceof Error && why.test(r.d.message), String(r.d))
   }
 })

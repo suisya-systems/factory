@@ -15,10 +15,10 @@ test('a failed drafter still records its spend', async () => {
   const req = join(tmp('req'), 'req.txt')
   writeFileSync(req, 'a memo api')
   await assert.rejects(main(['draft', 'd1', '--request', req], async () => ({ ok: true, text: 'sorry', costUsd: 2 })), /no parseable JSON/)
-  assert.equal(JSON.parse(readFileSync(join(sd, 'runs', 'd1', 'draft-cost.json'), 'utf8')).totalUsd, 4) // the reply and its one repair round
+  assert.equal(JSON.parse(readFileSync(join(sd, 'runs', 'd1', 'draft-cost.json'), 'utf8')).totalUsd, 6) // the reply and its two repair rounds
   const kept = readdirSync(join(sd, 'runs', 'd1')).filter((f) => f.startsWith('rejected-'))
-  assert.equal(kept.length, 1) // both rejected replies, kept for the experimenter
-  assert.deepEqual(JSON.parse(readFileSync(join(sd, 'runs', 'd1', kept[0]), 'utf8')).map((r: { role: string; reply: string }) => [r.role, r.reply]), [['spec-drafter', 'sorry'], ['spec-drafter', 'sorry']])
+  assert.equal(kept.length, 1) // every rejected reply, kept for the experimenter
+  assert.deepEqual(JSON.parse(readFileSync(join(sd, 'runs', 'd1', kept[0]), 'utf8')).map((r: { role: string; reply: string }) => [r.role, r.reply]), [['spec-drafter', 'sorry'], ['spec-drafter', 'sorry'], ['spec-drafter', 'sorry']])
 })
 
 test('--minority-brief needs --minority, before any model call', async () => {
@@ -76,8 +76,8 @@ test('a re-draft adds to the earlier drafter spend instead of overwriting it', a
   await assert.rejects(main(['draft', 'd2', '--request', req], m(2)))
   await assert.rejects(main(['draft', 'd2', '--request', req], m(3)))
   const l = JSON.parse(readFileSync(join(sd, 'runs', 'd2', 'draft-cost.json'), 'utf8'))
-  assert.equal(l.totalUsd, 10) // (2 + 3), each with its repair round
-  assert.deepEqual(l.byRole, { 'spec-drafter': 10 })
+  assert.equal(l.totalUsd, 15) // (2 + 3), each with its two repair rounds
+  assert.deepEqual(l.byRole, { 'spec-drafter': 15 })
 })
 
 test('probe-isolation: a canary the model wrote into its workdir counts as found; the canary file is removed', async () => {
