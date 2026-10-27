@@ -154,3 +154,69 @@ test('the approved set hash changes with the paths the drafters were shown', asy
   assert.equal(a, order) // a duplicate path is not another choice
   assert.notEqual(a, await draftWith('h-e')) // no paths at all is another version too
 })
+
+// ---- path:START-END, for a file that alone is too big ----
+const LONG = Array.from({ length: 10 }, (_, i) => `line ${i + 1} OUTSIDE-${i + 1}`).join('\n') + '\n'
+
+test('checkBasePaths: START-END after the file; a range is not a directory choice, and a bad range is refused', () => {
+  assert.deepEqual(checkBasePaths(['./src/a.ts:3-5', 'docs']), ['src/a.ts:3-5', 'docs'])
+  assert.deepEqual(checkBasePaths(['f.ts:007-9']), ['f.ts:7-9'])
+  for (const bad of ['f.ts:0-3', 'f.ts:5-2', '../f.ts:1-2', '/f.ts:1-2']) assert.throws(() => checkBasePaths([bad]), /--base-path/, bad)
+})
+
+test('a line range pastes only those lines of the file; the lines outside never reach the text', async () => {
+  const repo = repoWith({ ...FILES, 'src/long.py': LONG })
+  const a = await appSnapshot(repo, ['src/long.py:3-5'])
+  assert.deepEqual(a.paths, ['src/long.py:3-5'])
+  assert.ok(a.text.includes('=== src/long.py (lines 3-5 of 10)\nline 3 OUTSIDE-3\nline 4 OUTSIDE-4\nline 5 OUTSIDE-5\n'))
+  for (const n of [1, 2, 6, 7, 8, 9, 10]) assert.ok(!a.text.includes(`line ${n} `), `line ${n} was pasted`)
+  assert.ok(!a.text.includes('const a = 1'), 'a file nobody asked for was pasted')
+  // the other files are listed by name; the partly shown one is not "not shown"
+  assert.match(a.text.split('\n')[0], /^=== NOT SHOWN \(\d+ more .*README\.md.*src\/a\.ts/)
+  assert.ok(!a.text.split('\n')[0].includes('src/long.py'))
+})
+
+test('line ranges of one file: sorted, overlapping or touching ones joined, the end clamped to the file; a whole choice wins', async () => {
+  const repo = repoWith({ ...FILES, 'src/long.py': LONG })
+  const m = await appSnapshot(repo, ['src/long.py:8-99', 'src/long.py:2-3', 'src/long.py:4-5', 'src/long.py:9-9'])
+  assert.deepEqual(m.text.match(/^=== src\/long\.py .*$/gm), ['=== src/long.py (lines 2-5 of 10)', '=== src/long.py (lines 8-10 of 10)'])
+  assert.ok(!m.text.includes('line 6 ') && !m.text.includes('line 7 ') && !m.text.includes('line 1 '))
+  const whole = await appSnapshot(repo, ['src', 'src/long.py:2-3'])
+  assert.ok(whole.text.includes('=== src/long.py\nline 1 OUTSIDE-1\n') && !whole.text.includes('(lines '), 'the directory choice already shows the whole file')
+})
+
+test('a line range needs a tracked text file with that many lines', async () => {
+  const repo = repoWith({ ...FILES, 'src/long.py': LONG, 'bin.dat': Buffer.from([1, 0, 2]) })
+  await assert.rejects(appSnapshot(repo, ['src:1-2']), /a line range needs a tracked text file/) // a directory
+  await assert.rejects(appSnapshot(repo, ['src/nope.py:1-2']), /a line range needs a tracked text file/)
+  await assert.rejects(appSnapshot(repo, ['bin.dat:1-2']), /a line range needs a tracked text file/)
+  await assert.rejects(appSnapshot(repo, ['src/long.py:11-12']), /src\/long\.py:11-12: the file has 10 lines/)
+})
+
+test('the size cap counts the lines shown, and its error points at line ranges', async () => {
+  const big = 'x'.repeat(99) + '\n'
+  const repo = repoWith({ 'src/big.py': big.repeat(3000) }) // 300,000 characters in one file
+  await assert.rejects(appSnapshot(repo, ['src/big.py']), /Choose what they need with --base-path <path> \(repeatable; <file>:START-END for lines of a big file\)/)
+  const a = await appSnapshot(repo, ['src/big.py:100-200'])
+  assert.ok(a.text.length < 20_000)
+})
+
+test('draft with a line range: base.json keeps it, the drafters and the classifier get the same lines and none of the others, the hash follows the range', async () => {
+  const repo = repoWith({ ...FILES, 'src/long.py': LONG })
+  const req = join(tmp('req'), 'r.md'); writeFileSync(req, 'tags please')
+  const { model, seen } = fake()
+  assert.equal(await main(['draft', 'bp-r1', '--request', req, '--base', repo, '--base-path', 'src/long.py:3-5'], model), 0)
+  assert.deepEqual(baseJson('bp-r1').paths, ['src/long.py:3-5'])
+  const expected = (await appSnapshot(repo, ['src/long.py:3-5'])).text
+  for (const role of ['spec-drafter', 'scenario-drafter', 'classifier']) {
+    const ts = seen.filter((t) => t.role === role)
+    assert.ok(ts.length > 0, role)
+    for (const t of ts) {
+      assert.ok(t.instruction.includes(expected), `${role} did not get the same snapshot`)
+      for (const n of [1, 2, 6, 10]) assert.ok(!t.instruction.includes(`OUTSIDE-${n}\n`), `${role} saw line ${n}, outside the range`)
+    }
+  }
+  assert.match(readFileSync(join(vaultDir(sd, 'bp-r1'), 'approval-summary.md'), 'utf8'), /the drafters were shown only: src\/long\.py:3-5/)
+  assert.equal(await main(['draft', 'bp-r2', '--request', req, '--base', repo, '--base-path', 'src/long.py:3-6'], fake().model), 0)
+  assert.notEqual(hash(vaultDir(sd, 'bp-r1')), hash(vaultDir(sd, 'bp-r2')))
+})

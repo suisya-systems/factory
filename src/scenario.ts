@@ -37,12 +37,18 @@ const objKeys = (x: unknown): string[] => (Array.isArray(x) ? x.flatMap(objKeys)
 // Lap 4: amounts (yen) are this app's expected values, so numbers count too.
 const numbers = (x: unknown) => leaves(x, Number.isInteger as (v: unknown) => v is number)
 
-// A run's arguments that are scenario data: not the leading sub-command words and not the flags, which are interface names the builder knows.
-// A word with a digit is a value, not a sub-command; "--flag=value" counts its value.
+// A run's arguments that are scenario data. The flags are interface names the builder knows, and so are the sub-command words at the front:
+// with the interface's command words (draft time) only those exact words are exempt, so a value like `greet alice` is data; without them (a
+// set re-read at approval, already checked at draft) a leading lower-case word without digits is taken for a sub-command. "--flag=value" counts its value.
 const SUB = /^[a-z][a-z-]*$/
-const argvData = (run: string[]) => { const i = run.findIndex((a) => !SUB.test(a)); return (i < 0 ? [] : run.slice(i)).flatMap((a) => (a.startsWith('--') ? a.split('=').slice(1).join('=') || [] : a.startsWith('-') ? [] : a)) }
+export const argvData = (run: string[], commandWords?: Set<string>) => {
+  let i = 0
+  while (i < run.length && (commandWords ? commandWords.has(run[i]) : SUB.test(run[i]))) i++
+  return run.slice(i).flatMap((a) => (a.startsWith('--') ? a.split('=').slice(1).join('=') || [] : a.startsWith('-') ? [] : a))
+}
 
-export function validateScenarios(x: unknown): Scenario[] {
+// o.commandWords (draft time, a program): the words of the interface's commands, the only leading arguments the summary rule exempts.
+export function validateScenarios(x: unknown, o: { commandWords?: Set<string> } = {}): Scenario[] {
   if (!Array.isArray(x) || x.length === 0) throw new Error('scenarios must be a non-empty array')
   const ids = new Set<string>()
   // Summary problems are collected over all scenarios (id, rule, value) so one repair round can fix every one;
@@ -105,7 +111,7 @@ export function validateScenarios(x: unknown): Scenario[] {
       // answer in it (json and headers, keys too, and the path) is scenario data; the envelope keys and method are not (#42).
       const bare = (p: unknown) => (typeof p === 'string' ? [p.split('?')[0].replace(/\{\{\w+\}\}/g, '')] : [])
       const canned = st.service && isObj(st.body) ? [st.body.json, st.body.headers] : []
-      const lits = [...(st.run ? [...argvData(st.run), ...strings(st.stdin), ...strings(st.files), ...Object.keys(st.files ?? {}), ...(st.read ?? []), ...strings(st.env)] : []), ...bare(st.path), ...strings(st.text), ...(st.service ? [...(isObj(st.body) ? bare(st.body.path) : []), ...strings(canned), ...objKeys(canned)] : strings(st.body)), ...strings(e.json), ...strings(st.headers)]
+      const lits = [...(st.run ? [...argvData(st.run, o.commandWords), ...strings(st.stdin), ...strings(st.files), ...Object.keys(st.files ?? {}), ...(st.read ?? []), ...strings(st.env)] : []), ...bare(st.path), ...strings(st.text), ...(st.service ? [...(isObj(st.body) ? bare(st.body.path) : []), ...strings(canned), ...objKeys(canned)] : strings(st.body)), ...strings(e.json), ...strings(st.headers)]
         .filter((v) => v.length >= 3 && v !== '/').map((v) => v.toLowerCase())
       const leaked = lits.find((v) => s.summary.toLowerCase().includes(v))
         ?? [e.status ?? [], ...numbers(st.body), ...numbers(st.files), ...numbers(e.json)].flat().find((c: number) => Math.abs(c) >= 100 && new RegExp(`(?<!\\d)${c}(?!\\d)`).test(s.summary))

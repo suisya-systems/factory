@@ -35,8 +35,9 @@ const USAGE = `usage: factory <command>
         [--ui]                                     the app has browser pages: the interface names their test ids and the
                                                    hidden scenarios drive them in a sandboxed headless browser while judging
         [--iface-from <approved id>]               the spec's interface must stay within that change's interface (plan parts)
-        [--base-path <path>]                       (with --base, repeatable) show the drafters only the tracked files at or under
-                                                   that path (the rest are listed by name); the choice is part of the approved version
+        [--base-path <path>[:START-END]]           (with --base, repeatable) show the drafters only the tracked files at or under
+                                                   that path, or only those lines of one file (the rest are listed by name, lines
+                                                   outside are not shown at all); the choice is part of the approved version
         [--contract <file>]                        the app is a command-line program: the file is its execution contract (JSON:
                                                    command, pythonPath, deps); the hidden scenarios start it with "run" steps while judging
   split <plan> --request <file> [--base <repo> [--base-path <path>]] [--contract <file>]
@@ -96,15 +97,20 @@ function foundIn(dir: string, needles: string[]): boolean {
 // The app being extended, as the drafters and the classifier see it: the tracked text files at HEAD,
 // exported the same way the judge and the shipper export a commit.
 // paths (`--base-path`): only the files at or under these repo-relative paths are pasted; the rest are listed by name, so a repository
-// larger than the cap can still be a base. The builder works in a clone of the whole repository either way.
+// larger than the cap can still be a base. `path:START-END` (a file, 1-based inclusive lines) pastes just those lines of it, for a file
+// that alone is too big: the lines outside are never given to the drafters or the classifier. The builder works in a clone of the whole
+// repository either way.
 // ponytail: pasted whole into the prompts (capped); give the drafters read access instead if apps grow.
 const APP_MAX_CHARS = 200_000
 const NOT_SHOWN_MAX = 300
+const RANGE = /^(.+):(\d+)-(\d+)$/
 export function checkBasePaths(paths: string[]): string[] {
   return paths.map((p) => {
-    const n = p.replace(/^(\.\/)+/, '').replace(/\/+$/, '')
+    const m = p.match(RANGE)
+    if (m && (+m[2] < 1 || +m[3] < +m[2])) throw new Error(`--base-path ${p}: a line range is START-END with 1 <= START <= END`)
+    const n = (m ? m[1] : p).replace(/^(\.\/)+/, '').replace(/\/+$/, '')
     if (!n || n.startsWith('/') || n.includes('\\') || n.includes('\0') || n.split('/').some((s) => s === '..' || s === '.' || s === '')) throw new Error(`--base-path ${p}: needs a plain path relative to the repository root`)
-    return n
+    return m ? `${n}:${+m[2]}-${+m[3]}` : n
   })
 }
 export async function appSnapshot(repo: string, basePaths: string[] = []): Promise<{ sha: string; text: string; paths: string[] }> {
@@ -122,14 +128,37 @@ export async function appSnapshot(repo: string, basePaths: string[] = []): Promi
       files.push([relative(dir, join(e.parentPath, e.name)), body])
     }
     const at = (rel: string, p: string) => rel === p || rel.startsWith(`${p}/`)
-    for (const p of paths) if (!files.some(([rel]) => at(rel, p))) throw new Error(`--base-path ${p}: no tracked text file at or under it`)
-    const shown = paths.length ? files.filter(([rel]) => paths.some((p) => at(rel, p))) : files
-    let text = shown.map(([rel, body]) => `=== ${rel}\n${body}\n`).join('')
+    const whole = paths.filter((p) => !RANGE.test(p))
+    const ranges = paths.flatMap((p) => { const m = p.match(RANGE); return m ? [{ file: m[1], from: +m[2], to: +m[3] }] : [] })
+    for (const p of whole) if (!files.some(([rel]) => at(rel, p))) throw new Error(`--base-path ${p}: no tracked text file at or under it`)
+    for (const r of ranges) if (!files.some(([rel]) => rel === r.file)) throw new Error(`--base-path ${r.file}:${r.from}-${r.to}: a line range needs a tracked text file`)
+    const wholeAt = (rel: string) => !paths.length || whole.some((p) => at(rel, p))
+    const rangesOf = (rel: string) => { // sorted, overlapping or touching ranges joined
+      const out: { from: number; to: number }[] = []
+      for (const r of ranges.filter((x) => x.file === rel).sort((a, b) => a.from - b.from)) { const l = out.at(-1); if (l && r.from <= l.to + 1) l.to = Math.max(l.to, r.to); else out.push({ from: r.from, to: r.to }) }
+      return out
+    }
+    const shown = files.filter(([rel]) => wholeAt(rel) || rangesOf(rel).length)
+    let text = ''
+    const sizes = new Map<string, number>()
+    for (const [rel, body] of shown) {
+      let part = ''
+      if (wholeAt(rel)) part = `=== ${rel}\n${body}\n`
+      else {
+        const lines = body.split('\n')
+        if (lines.at(-1) === '') lines.pop()
+        for (const r of rangesOf(rel)) {
+          if (r.from > lines.length) throw new Error(`--base-path ${rel}:${r.from}-${r.to}: the file has ${lines.length} lines`)
+          part += `=== ${rel} (lines ${r.from}-${Math.min(r.to, lines.length)} of ${lines.length})\n${lines.slice(r.from - 1, r.to).join('\n')}\n`
+        }
+      }
+      text += part
+      const k = rel.split('/').slice(0, 3).slice(0, rel.split('/').length - 1).join('/') || rel
+      sizes.set(k, (sizes.get(k) ?? 0) + part.length)
+    }
     if (text.length > APP_MAX_CHARS) {
-      const size = new Map<string, number>()
-      for (const [rel, body] of shown) { const k = rel.split('/').slice(0, 3).slice(0, rel.split('/').length - 1).join('/') || rel; size.set(k, (size.get(k) ?? 0) + body.length) }
-      const top = [...size].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, n]) => `${k} ${n}`).join('; ')
-      throw new Error(`--base ${repo}: ${paths.length ? 'the chosen paths hold' : 'the app holds'} ${text.length} characters, more than the ${APP_MAX_CHARS} the drafters are shown. Largest: ${top}. Choose what they need with --base-path <path> (repeatable)`)
+      const top = [...sizes].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([k, n]) => `${k} ${n}`).join('; ')
+      throw new Error(`--base ${repo}: ${paths.length ? 'the chosen paths hold' : 'the app holds'} ${text.length} characters, more than the ${APP_MAX_CHARS} the drafters are shown. Largest: ${top}. Choose what they need with --base-path <path> (repeatable; <file>:START-END for lines of a big file)`)
     }
     if (paths.length) {
       const hidden = files.filter(([rel]) => !shown.some(([r]) => r === rel)).map(([rel]) => rel)

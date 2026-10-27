@@ -259,7 +259,8 @@ export async function draft(model: Model, request: string, o: { signals?: string
   const k = await ask(model, 'scenario-drafter', `You are the scenario writer of a software factory. Write hidden acceptance scenarios (${usesRun(spec) ? 'command-line program' : 'HTTP JSON API'}) for the request. ` +
     `A builder will implement a spec you do not see; your scenarios judge it.\n\n${req}\nINTERFACE (names and shapes the builder uses; it says nothing about behaviour):\n${j.iface}\n\n${usesRun(spec) ? RUN_SCENARIO_FORMAT : SCENARIO_FORMAT}${usesService(spec) ? `\n\n${SERVICE_STEPS}` : ''}${usesUi(spec) ? `\n\n${UI_STEPS}` : ''}${usesRun(spec) ? `\n\n${RUN_STEPS}\nCOMMAND (the factory adds it before your "run" arguments; "{app}" is the repository root): ${contractOf(spec).command.join(' ')}` : ''}${o.minority ? minorityPrompt(o.minorityBrief) : ''}`,
   (k) => {
-    const scenarios = validateScenarios(k.scenarios), more = k.assumptions === undefined ? [] : strs(k.assumptions, 'scenario drafter')
+    const words = usesRun(spec) ? new Set<string>((JSON.parse(j.iface).commands ?? []).flatMap((c: string) => c.split(' '))) : undefined
+    const scenarios = validateScenarios(k.scenarios, { commandWords: words }), more = k.assumptions === undefined ? [] : strs(k.assumptions, 'scenario drafter')
     // A program has no server to send requests to, and a server no program to run: one kind of step per spec.
     if (scenarios.some((s) => s.steps.some((st) => !!st.run !== usesRun(spec)))) throw new Error(`scenario drafter: ${usesRun(spec) ? 'every step of a command-line program is a "run" step' : 'a "run" step needs a spec that declares a command-line program'}`)
     if (o.minority) checkMinority(more, scenarios)

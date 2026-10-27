@@ -114,6 +114,17 @@ test('run steps validate: argv, stdin, files, read, env; one summary rule over t
   assert.doesNotThrow(argv(['delegate-plan', '--dry-run'], 'the delegate-plan sub-command takes a dry-run flag'))
 })
 
+// Codex review: a value like `greet alice` looks like two sub-command words; with the interface's command words only those are exempt.
+test('the summary rule at draft time exempts the interface\'s command words only, so a positional value is data', () => {
+  const words = new Set(['dispatcher', 'delegate-plan'])
+  const one = (summary: string, run: string[], o?: { commandWords: Set<string> }) => () => validateScenarios([sc([{ run, expect: { status: 0 } }], summary)], o)
+  assert.throws(one('greeting alice succeeds', ['greet', 'alice'], { commandWords: new Set(['greet']) }), /concrete value from the steps \("alice"/)
+  assert.doesNotThrow(one('greeting succeeds', ['greet', 'alice'], { commandWords: new Set(['greet']) }))
+  assert.doesNotThrow(one('the dispatcher delegate-plan command prints a plan', ['dispatcher', 'delegate-plan', '--dry-run'], { commandWords: words }))
+  assert.throws(one('the pane in the plan is accepted', ['dispatcher', 'delegate-plan', 'pane'], { commandWords: words }), /concrete value/)
+  assert.doesNotThrow(one('greeting alice succeeds', ['greet', 'alice'])) // a set re-read at approval has no interface at hand: the lenient rule, already held at draft
+})
+
 test('a key with dots (a file name in the envelope) is reached by its dot path', () => {
   const env = { stdout: { items: [1] }, files: { 'out/plan.json': { n: 7, a: { b: 1 } }, 'a.b': 'dotted' } }
   assert.equal(get(env, 'files.out/plan.json.n'), 7)
@@ -257,6 +268,16 @@ test('draft with a contract: the spec declares the program, both drafters are to
   assert.match(d.assumptions[0], /"commands":\["dispatcher plan"\]/)
   assert.equal(d.classification?.[0].label, 'readable')
   assert.match(seen.find((t) => t.role === 'classifier')!.instruction, /A request with "run" is not an HTTP request/)
+})
+
+test('draft with a contract: a summary naming a positional argument value is sent back (the interface says which words are commands)', async () => {
+  const seen: Task[] = []
+  const leaky = { scenarios: [{ ...GOOD.scenarios[0], summary: 'the plan sub-command prints the plan for tokyo', steps: [{ run: ['dispatcher', 'plan', 'tokyo'], expect: { status: 0 } }] }], assumptions: [] }
+  const fixed = { scenarios: [{ ...leaky.scenarios[0], summary: 'the plan sub-command prints a plan for the place' }], assumptions: [] }
+  let n = 0
+  const d = await draft(fakeDrafters(() => (n++ === 0 ? leaky : fixed), seen), 'r', { run: CONTRACT })
+  assert.equal(n, 2) // the first reply was rejected once
+  assert.equal(d.scenarios[0].summary, 'the plan sub-command prints a plan for the place')
 })
 
 test('draft with a contract: a scenario with an HTTP step is sent back once, then refused; without a contract a run step is refused', async () => {
