@@ -160,8 +160,8 @@ function checkMinority(more: string[], scenarios: Scenario[]) {
 }
 
 export const appBlock = (app: string) => (app ? `\nEXISTING APP (the current code; the request extends it):\n${app}\n` : '')
-// Each drafter gets at most $2 so the classifier calls (CLASSIFIER_BUDGET each, about 15) still fit in the draft cap.
-const draftTask = (role: string, instruction: string) => ({ ...base, maxCostUsd: 2, role, instruction, workdir: mkdtempSync(join(tmpdir(), 'factory-draft-')), access: 'none' as const })
+// Each drafter gets at most $2 (the scenario drafter CAPS.scenarioDrafterUsd = $5) so the classifier calls (CLASSIFIER_BUDGET each, about 15) still fit in the draft cap.
+const draftTask = (role: string, instruction: string) => ({ ...base, maxCostUsd: role === 'scenario-drafter' ? CAPS.scenarioDrafterUsd : 2, role, instruction, workdir: mkdtempSync(join(tmpdir(), 'factory-draft-')), access: 'none' as const })
 
 // Every entry must be a bare name, so a value cannot be written in the lap-3 form ("action: create|update").
 // ponytail: syntax only; values spelled as names (a field "listing" its values) still pass, so the
