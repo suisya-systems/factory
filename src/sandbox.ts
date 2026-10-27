@@ -260,6 +260,39 @@ export function sandboxExec(cmd: string, args: string[], o: SandboxOpts, env: No
   })
 }
 
+// A program of the builder's (a `run` step) run to its end: stdin in, stdout and stderr out apart, bounded in time and size.
+// why: set when the factory stopped it (timeout, too much output, abort); code is then meaningless.
+export type Ran = { code: number | null; stdout: string; stderr: string; why?: string }
+export function sandboxRun(cmd: string, args: string[], o: SandboxOpts, env: NodeJS.ProcessEnv, input: string, signal: AbortSignal, lim: { timeoutMs: number; outChars: number }): Promise<Ran> {
+  const c = sandboxSpawn(cmd, args, o, { env, cwd: o.workdir, stdio: ['pipe', 'pipe', 'pipe'] })
+  let stdout = '', stderr = '', why: string | undefined
+  const kill = (w: string) => { why ??= w; killTree(c, 500) }
+  const add = (which: 'stdout' | 'stderr') => (d: string) => {
+    if (which === 'stdout') stdout += d; else stderr += d
+    if (stdout.length > lim.outChars || stderr.length > lim.outChars) kill(`more than ${lim.outChars} characters of output`) // builder-written: never buffer without a bound
+  }
+  c.stdout!.setEncoding('utf8').on('data', add('stdout')) // decoded as a stream: a character split between two chunks stays whole
+  c.stderr!.setEncoding('utf8').on('data', add('stderr'))
+  c.stdin!.on('error', () => {}) // the program may exit without reading its input
+  c.stdin!.end(input)
+  const timer = setTimeout(() => kill(`timeout after ${lim.timeoutMs}ms`), lim.timeoutMs)
+  const onAbort = () => kill('stopped')
+  if (signal.aborted) onAbort()
+  else signal.addEventListener('abort', onAbort, { once: true })
+  return new Promise((ok) => {
+    const done = (code: number | null) => { clearTimeout(timer); signal.removeEventListener('abort', onAbort); ok({ code, stdout: stdout.slice(0, lim.outChars), stderr: stderr.slice(0, lim.outChars), why }) }
+    c.on('error', () => { why ??= 'the program could not be started'; done(null) })
+    c.on('close', done)
+  })
+}
+
+// A dir the sandbox shows as is (not $HOME, /tmp, /mnt, /run, /var/tmp or the XDG runtime dir: sandboxCommand hides those).
+export function visibleInSandbox(dir: string): boolean {
+  const p = real(dir)
+  const xdg = process.env.XDG_RUNTIME_DIR ? [real(process.env.XDG_RUNTIME_DIR)] : []
+  return ![HOME, '/tmp', '/mnt', '/run', '/var/tmp', ...xdg].some((h) => within(p, h))
+}
+
 const GIT_ENV = { PATH: '/usr/bin:/bin', HOME: '/tmp', GIT_CONFIG_NOSYSTEM: '1' }
 export function sandboxGit(workdir: string, args: string[], writable: boolean, extraRo: string[] = [], signal?: AbortSignal) {
   return sandboxExec('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'user.name=factory', '-c', 'user.email=factory@localhost', ...args], { workdir, writable, extraRo }, GIT_ENV, signal)

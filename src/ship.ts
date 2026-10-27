@@ -13,10 +13,12 @@ const CLI = join(dirname(fileURLToPath(import.meta.url)), 'cli.ts')
 // ponytail: fixed ship branch (the practice repo's main); make it a run option if targets vary.
 export const SHIP_BRANCH = 'main'
 
+// serve false (a command-line program: nothing listens, so nothing is started, flipped or restarted): only the last step,
+// the fast-forward of the ship target, is done; the checks before it are the same.
 // Order: export + smoke-start the release (nothing visible changed yet) -> last stop check ->
 // flip 'current' + restart -> fast-forward the ship target. A failed start OR a failed fast-forward
 // rolls back to the previous release. The target must be clean and on SHIP_BRANCH before anything goes live.
-export async function ship(mark: PassMark, workspace: string, target: string, stateDir: string, port: number, signal?: AbortSignal): Promise<{ release: string }> {
+export async function ship(mark: PassMark, workspace: string, target: string, stateDir: string, port: number, signal?: AbortSignal, serve = true): Promise<{ release: string }> {
   const { sha } = mark
   const stopped = () => { if (signal?.aborted) throw new Error('stopped before the release went live') }
   // An aborted git/export reports a plain failure: name the stop instead of a misleading git error.
@@ -31,9 +33,11 @@ export async function ship(mark: PassMark, workspace: string, target: string, st
 
   const prod = prodDir(stateDir, port)
   const rel = join(prod, 'releases', sha) // per prod: two runs shipping one sha at once never write the same files
-  mkdirSync(rel, { recursive: true })
-  await exportTree(workspace, sha, rel, signal).finally(stopped) // same export the judge tested
-  await smoke(rel, signal)
+  if (serve) {
+    mkdirSync(rel, { recursive: true })
+    await exportTree(workspace, sha, rel, signal).finally(stopped) // same export the judge tested
+    await smoke(rel, signal)
+  }
   // fetch moves no ref; it runs sandboxed because git reads the (builder-written) source repo.
   const f = await git(target, ['-c', 'transfer.fsckObjects=true', 'fetch', '-q', workspace, sha], true, [workspace], signal)
   if (f.code !== 0) throw new Error(`fetch into ship target failed: ${f.out.trim()}`)
@@ -44,6 +48,11 @@ export async function ship(mark: PassMark, workspace: string, target: string, st
   if (st.code !== 0 || st.out.trim() !== '') throw new Error('ship target has local changes or untracked files; refusing to ship')
   stopped() // last point where a stop cancels the ship; after this it runs to completion
 
+  if (!serve) {
+    const m = await sandboxGit(target, ['merge', '--ff-only', '-q', sha], true)
+    if (m.code !== 0) throw new Error(`fast-forward of ship target failed: ${m.out.trim()}`)
+    return { release: '' }
+  }
   const cur = join(prod, 'current')
   const prev = existsSync(cur) ? readlinkSync(cur) : null
   flip(prod, rel)

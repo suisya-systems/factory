@@ -4,14 +4,19 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { openBrowser, TARGET, UI_ACTIONS, UI_LIMITS, usesUi, type Browser } from './browser.ts'
 import { CONTROL, startFake, usesService, type Fake } from './fake.ts'
+import { contractOf, ENV_NAME, okPath, RESERVED_ENV, RUN_LIMITS, runProgram, usesRun, type Contract } from './program.ts'
 import { freePort, killTree, removeTree, spawnApp, waitPort } from './sandbox.ts'
 
 export type Expect = { status?: number | number[]; json?: unknown; jsonHas?: string[]; isArray?: boolean; length?: number | Record<string, number> }
 // service: the step goes to the fake external service's control endpoint (fake.ts), not to the app.
 // ui (#4): a browser step instead of an HTTP request (no method, body, headers): "goto" a path, "click" / "fill" (with text)
 // a target "<testId>" or "<testId>.<n>". Its response is the page: json {"<testId>": [visible texts]}, status (goto only).
+// run: a step that starts the declared command-line program (program.ts) with these arguments instead of sending a request (no method, path,
+// body, headers). stdin: its standard input; files: path -> content (a string, or JSON that is written as text) put in its working directory first;
+// read: paths of files it wrote that come back; env: extra variables. Its response is the envelope {stdout, stderr, files} with status = exit code.
 export type Step = { method: string; path: string; body?: unknown; headers?: Record<string, string>; expect: Expect; capture?: Record<string, string>; service?: true
-  ui?: 'goto' | 'click' | 'fill'; target?: string; text?: string }
+  ui?: 'goto' | 'click' | 'fill'; target?: string; text?: string
+  run?: string[]; stdin?: string; files?: Record<string, unknown>; read?: string[]; env?: Record<string, string> }
 // inSpec: the drafter's claim that the spec states this behaviour (used to split pass rates; self-reported, not verified).
 export type Scenario = { id: string; title: string; summary: string; inSpec: boolean; kind: string; steps: Step[] }
 export type ScenarioResult = { id: string; inSpec: boolean; kind: string; pass: boolean; failedStep?: number; detail: string }
@@ -32,6 +37,11 @@ const objKeys = (x: unknown): string[] => (Array.isArray(x) ? x.flatMap(objKeys)
 // Lap 4: amounts (yen) are this app's expected values, so numbers count too.
 const numbers = (x: unknown) => leaves(x, Number.isInteger as (v: unknown) => v is number)
 
+// A run's arguments that are scenario data: not the leading sub-command words and not the flags, which are interface names the builder knows.
+// A word with a digit is a value, not a sub-command; "--flag=value" counts its value.
+const SUB = /^[a-z][a-z-]*$/
+const argvData = (run: string[]) => { const i = run.findIndex((a) => !SUB.test(a)); return (i < 0 ? [] : run.slice(i)).flatMap((a) => (a.startsWith('--') ? a.split('=').slice(1).join('=') || [] : a.startsWith('-') ? [] : a)) }
+
 export function validateScenarios(x: unknown): Scenario[] {
   if (!Array.isArray(x) || x.length === 0) throw new Error('scenarios must be a non-empty array')
   const ids = new Set<string>()
@@ -51,7 +61,18 @@ export function validateScenarios(x: unknown): Scenario[] {
     for (const [j, st] of s.steps.entries()) {
       const ws = `${w}.steps[${j}]`
       if (!isObj(st)) throw new Error(`${ws}: not an object`)
-      if (st.ui !== undefined) {
+      if (st.run !== undefined) {
+        keys(st, ['run', 'stdin', 'files', 'read', 'env', 'expect', 'capture'], ws)
+        if (!Array.isArray(st.run) || !st.run.every((a: unknown) => typeof a === 'string' && a.length <= 500 && !a.includes('\0'))) throw new Error(`${ws}: run must be a list of argument strings`)
+        if (st.stdin !== undefined && typeof st.stdin !== 'string') throw new Error(`${ws}: stdin must be a string`)
+        if (st.files !== undefined && (!isObj(st.files) || Object.keys(st.files).length > RUN_LIMITS.files || !Object.entries(st.files).every(([f, c]) => okPath(f.replace(/\{\{\w+\}\}/g, 'x')) && (typeof c === 'string' ? c : JSON.stringify(c)).length <= RUN_LIMITS.fileChars)))
+          throw new Error(`${ws}: files must map plain relative paths (at most ${RUN_LIMITS.files}) to a string or JSON of at most ${RUN_LIMITS.fileChars} characters`)
+        if (st.read !== undefined && !(Array.isArray(st.read) && st.read.length <= RUN_LIMITS.files && st.read.every((f: unknown) => typeof f === 'string' && okPath(f.replace(/\{\{\w+\}\}/g, 'x')))))
+          throw new Error(`${ws}: read must be a list of plain relative file paths (at most ${RUN_LIMITS.files})`)
+        if (st.env !== undefined && !(isObj(st.env) && Object.entries(st.env).every(([k, v]) => ENV_NAME.test(k) && !RESERVED_ENV.test(k) && typeof v === 'string')))
+          throw new Error(`${ws}: env must map upper-case variable names (not PATH, HOME, PYTHON*, LD_* ...) to strings`)
+        if (st.expect === undefined) throw new Error(`${ws}: expect must be an object`)
+      } else if (st.ui !== undefined) {
         keys(st, ['ui', 'path', 'target', 'text', 'expect', 'capture'], ws)
         if (!UI_ACTIONS.includes(st.ui)) throw new Error(`${ws}: ui must be one of ${UI_ACTIONS.join(', ')}`)
         if ((st.ui === 'goto') !== (st.path !== undefined) || (st.ui === 'goto') === (st.target !== undefined) || (st.ui === 'fill') !== (st.text !== undefined))
@@ -84,10 +105,10 @@ export function validateScenarios(x: unknown): Scenario[] {
       // answer in it (json and headers, keys too, and the path) is scenario data; the envelope keys and method are not (#42).
       const bare = (p: unknown) => (typeof p === 'string' ? [p.split('?')[0].replace(/\{\{\w+\}\}/g, '')] : [])
       const canned = st.service && isObj(st.body) ? [st.body.json, st.body.headers] : []
-      const lits = [...bare(st.path), ...strings(st.text), ...(st.service ? [...(isObj(st.body) ? bare(st.body.path) : []), ...strings(canned), ...objKeys(canned)] : strings(st.body)), ...strings(e.json), ...strings(st.headers)]
+      const lits = [...(st.run ? [...argvData(st.run), ...strings(st.stdin), ...strings(st.files), ...Object.keys(st.files ?? {}), ...(st.read ?? []), ...strings(st.env)] : []), ...bare(st.path), ...strings(st.text), ...(st.service ? [...(isObj(st.body) ? bare(st.body.path) : []), ...strings(canned), ...objKeys(canned)] : strings(st.body)), ...strings(e.json), ...strings(st.headers)]
         .filter((v) => v.length >= 3 && v !== '/').map((v) => v.toLowerCase())
       const leaked = lits.find((v) => s.summary.toLowerCase().includes(v))
-        ?? [e.status ?? [], ...numbers(st.body), ...numbers(e.json)].flat().find((c: number) => Math.abs(c) >= 100 && new RegExp(`(?<!\\d)${c}(?!\\d)`).test(s.summary))
+        ?? [e.status ?? [], ...numbers(st.body), ...numbers(st.files), ...numbers(e.json)].flat().find((c: number) => Math.abs(c) >= 100 && new RegExp(`(?<!\\d)${c}(?!\\d)`).test(s.summary))
       if (leaked !== undefined) bad.push(`scenario "${s.id}": summary contains a concrete value from the steps (${JSON.stringify(String(leaked))}; step ${j}); reword it without that value`)
     }
   }
@@ -97,7 +118,17 @@ export function validateScenarios(x: unknown): Scenario[] {
 
 // ---- matching ----
 // Own properties only: 'constructor' etc. must not count as present.
-export const get = (o: any, path: string) => path.split('.').reduce((v, k) => (v !== null && typeof v === 'object' && Object.hasOwn(v, k) ? v[k] : undefined), o)
+// A key may hold dots (a run's file "plan.json" in the envelope): the shortest run of segments that names an own key is taken, backtracking.
+function walk(v: any, segs: string[]): unknown {
+  if (!segs.length) return v
+  if (v === null || typeof v !== 'object') return undefined
+  for (let j = 1; j <= segs.length; j++) {
+    const k = segs.slice(0, j).join('.')
+    if (Object.hasOwn(v, k)) { const r = walk(v[k], segs.slice(j)); if (r !== undefined) return r }
+  }
+  return undefined
+}
+export const get = (o: any, path: string): any => walk(o, path.split('.'))
 
 // ponytail: arrays match by position (expected is a prefix of actual); unordered containment if specs leave order open.
 export function subset(expected: unknown, actual: unknown): boolean {
@@ -213,12 +244,24 @@ async function uiStep(ui: { browser?: Browser }, st: Step, port: number, vars: R
   }
 }
 
-async function runSteps(port: number, steps: Step[], from: number, vars: Record<string, unknown>, fake: Fake | undefined, signal: AbortSignal, ui?: { browser?: Browser }): Promise<{ failedStep?: number; detail: string }> {
+// prog (the spec declares a command-line program): where its run steps start it.
+type Prog = { appDir: string; work: string; contract: Contract }
+async function runSteps(port: number, steps: Step[], from: number, vars: Record<string, unknown>, fake: Fake | undefined, signal: AbortSignal, ui?: { browser?: Browser }, prog?: Prog): Promise<{ failedStep?: number; detail: string }> {
   for (const [i, st] of steps.entries()) {
     const n = from + i + 1
     try {
       let failed: string | null
-      if (st.service) {
+      if (st.run) {
+        if (!prog) return { failedStep: n, detail: `step ${n}: the spec declares no command-line program` }
+        const r = await runProgram(prog, {
+          argv: (fill(st.run, vars) as unknown[]).map(String), stdin: st.stdin === undefined ? undefined : String(fill(st.stdin, vars)),
+          files: st.files === undefined ? undefined : Object.fromEntries(Object.entries(fill(st.files, vars) as Record<string, unknown>).map(([f, c]) => [f, typeof c === 'string' ? c : JSON.stringify(c)])),
+          read: st.read === undefined ? undefined : (fill(st.read, vars) as unknown[]).map(String), env: st.env === undefined ? undefined : Object.fromEntries(Object.entries(fill(st.env, vars) as Record<string, unknown>).map(([k, e]) => [k, String(e)])),
+        }, signal)
+        failed = checkStep(st, r.status, r.json, vars)
+      } else if (prog) {
+        return { failedStep: n, detail: `step ${n}: a command-line program is checked with run steps only` }
+      } else if (st.service) {
         if (!fake) return { failedStep: n, detail: `step ${n}: the spec declares no external service` }
         const r = fake.control(st.method, fill(st.path, vars) as string, st.body === undefined ? undefined : fill(st.body, vars))
         failed = checkStep(st, r.status, r.json, vars)
@@ -270,10 +313,20 @@ async function withApp<T>(appDir: string, signal: AbortSignal, go: (port: number
 // o.service (#17, the approved spec declares an external service): a fresh fake per scenario; the
 // scenario's leading service steps run before the app starts, so an app that calls the service at startup sees them.
 // o.ui (#4, the spec declares a browser UI): a fresh browser per scenario, opened at its first ui step.
-export type JudgeOpts = { service?: boolean; ui?: boolean }
-export const judgeOpts = (spec: string): JudgeOpts => ({ service: usesService(spec), ui: usesUi(spec) })
+// o.run (the spec declares a command-line program): the scenario's run steps start it in a fresh working directory; no app server is started.
+export type JudgeOpts = { service?: boolean; ui?: boolean; run?: Contract }
+export const judgeOpts = (spec: string): JudgeOpts => ({ service: usesService(spec), ui: usesUi(spec), ...(usesRun(spec) ? { run: contractOf(spec) } : {}) })
 export async function runScenario(appDir: string, s: Scenario, signal: AbortSignal, o: JudgeOpts = {}): Promise<ScenarioResult> {
   const base = { id: s.id, inSpec: s.inSpec, kind: s.kind }
+  const stray = s.steps.findIndex((st) => st.run)
+  if (!o.run && stray >= 0) return { ...base, pass: false, failedStep: stray + 1, detail: `step ${stray + 1}: the spec declares no command-line program` }
+  if (o.run) { // no server: one working directory for the whole scenario, so a later run sees what an earlier one wrote
+    const work = mkdtempSync(join(tmpdir(), 'factory-work-'))
+    try {
+      const r = await runSteps(0, s.steps, 0, {}, undefined, signal, undefined, { appDir, work, contract: o.run })
+      return { ...base, pass: r.failedStep === undefined, ...r }
+    } finally { removeTree(work) }
+  }
   const fake = o.service ? startFake() : undefined
   const ui: { browser?: Browser } | undefined = o.ui ? {} : undefined
   try {
