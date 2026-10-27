@@ -79,6 +79,13 @@ const SERVICE_STEPS = `EXTERNAL SERVICE: the app calls the external service the 
 Service steps before the scenario's first app step run before the app starts. The fake starts empty in every scenario.
 Use the service's API exactly as the request describes it. The summary rule covers service steps too.`
 
+// A program that also calls the external service: the same two service steps, between "run" steps.
+const SERVICE_WITH_RUN = `The app is a command-line program, so "the app" above is the program, and a "run" step (not an app start) is what makes it call the service.
+Order the steps as the check needs: "POST /responses" steps to set the answers, then the "run" step, then "GET /requests" to see what the program sent. A "service" step may also come between two "run" steps.
+The program finds the service at its environment variable SERVICE_URL (do not set it in "env"). To give the address to the program in a file or an argument, write {{SERVICE_URL}} in "files", "run" or "stdin"
+(e.g. "files": {"config.json": {"url": "{{SERVICE_URL}}/topic"}}). "{{SERVICE_URL}}" is a base URL like http://127.0.0.1:41234 and you do not know the port: never write the port, and do not check it.
+A "run" step still has no network except the service. A service step has no "capture" of values from a run. The fake starts empty in every scenario; the working directory is shared by the "run" steps only.`
+
 // #4: only for a spec that declares a browser UI (browser.ts). The spec drafter names the elements; the scenario writer drives them.
 const UI_IFACE = `BROWSER UI: the app has pages a user works in a browser. Add "testIds": ["name", ...] to the interface: the data-testid of every element
 a page shows or a user acts on (inputs, buttons, list items, texts to read), bare names without ".". Pages are endpoints too ("GET /path").`
@@ -112,9 +119,9 @@ Use "jsonAbsent" to check that a value is NOT there (a record that must have bee
 Use ONLY the command, flag and file names in the INTERFACE. Where the request does not fix an exit code, accept every reasonable one (e.g. [1, 2]).
 Each scenario starts from an EMPTY working directory.
 Write 8-15 scenarios, a mix of inSpec true and false. You cannot ask questions: record every guess in assumptions.`
-const RUN_STEPS = `COMMAND-LINE PROGRAM: the app is a program, not an HTTP server. Every step runs it (a step has no "method", "path", "body" or "headers").
+const RUN_STEPS = `COMMAND-LINE PROGRAM: the app is a program, not an HTTP server. Every step runs it (a step has no "method", "path", "body" or "headers"), except the "service": true steps below when the spec declares an external service.
 The factory runs the program's command (given below as COMMAND) followed by the step's "run" arguments, in a working directory that is empty at the start of the scenario and stays the same
-for its later steps: the step's "files" are written there first, and a file one run writes is there for the next run. No network. A run is stopped after 20 seconds; at most 20 files in ("files") and 20 out ("read"),
+for its later steps: the step's "files" are written there first, and a file one run writes is there for the next run. No network (except the external service, when the spec declares one, below). A run is stopped after 20 seconds; at most 20 files in ("files") and 20 out ("read"),
 each file in at most 64,000 characters. "env" may not set PATH, HOME, TMPDIR, PYTHON*, LD_*, NODE_* or VIRTUAL_ENV.
 The step's response: "status" is the exit code; the JSON body is {"stdout": <the standard output parsed as JSON when it is JSON, else the text>, "stderr": "<text>",
 "files": {"<path>": <the file, parsed as JSON when it is JSON, else its text>}} with the files named in "read" (a file that was not written is absent).
@@ -252,19 +259,19 @@ export async function draft(model: Model, request: string, o: { signals?: string
   })
   const assumptions = [`Interface (names and shapes only): ${j.iface}`, ...(o.iface ? [`(plan) the interface is within the approved plan interface: ${o.iface}`] : []), ...j.assumptions]
   // The builder sees the same names the scenarios use.
-  let body = o.service ? withService(j.spec) : j.spec
+  let body = o.service ? withService(j.spec, !!o.run) : j.spec
   if (o.ui) body = withUi(body)
   if (o.run) body = withRun(body, o.run)
-  if (usesRun(body) && (usesService(body) || usesUi(body))) throw new Error('a command-line program does not go with an external service or browser pages')
+  if (usesRun(body) && usesUi(body)) throw new Error('a command-line program does not go with browser pages')
   const spec = `${body.trimEnd()}${IFACE_HEAD}${j.iface}\n\`\`\`\n`
 
   const k = await ask(model, 'scenario-drafter', `You are the scenario writer of a software factory. Write hidden acceptance scenarios (${usesRun(spec) ? 'command-line program' : 'HTTP JSON API'}) for the request. ` +
-    `A builder will implement a spec you do not see; your scenarios judge it.\n\n${req}\nINTERFACE (names and shapes the builder uses; it says nothing about behaviour):\n${j.iface}\n\n${usesRun(spec) ? RUN_SCENARIO_FORMAT : SCENARIO_FORMAT}${usesService(spec) ? `\n\n${SERVICE_STEPS}` : ''}${usesUi(spec) ? `\n\n${UI_STEPS}` : ''}${usesRun(spec) ? `\n\n${RUN_STEPS}\nCOMMAND (the factory adds it before your "run" arguments; "{app}" is the repository root): ${contractOf(spec).command.join(' ')}` : ''}${o.minority ? minorityPrompt(o.minorityBrief) : ''}`,
+    `A builder will implement a spec you do not see; your scenarios judge it.\n\n${req}\nINTERFACE (names and shapes the builder uses; it says nothing about behaviour):\n${j.iface}\n\n${usesRun(spec) ? RUN_SCENARIO_FORMAT : SCENARIO_FORMAT}${usesService(spec) ? `\n\n${SERVICE_STEPS}${usesRun(spec) ? `\n${SERVICE_WITH_RUN}` : ''}` : ''}${usesUi(spec) ? `\n\n${UI_STEPS}` : ''}${usesRun(spec) ? `\n\n${RUN_STEPS}\nCOMMAND (the factory adds it before your "run" arguments; "{app}" is the repository root): ${contractOf(spec).command.join(' ')}` : ''}${o.minority ? minorityPrompt(o.minorityBrief) : ''}`,
   (k) => {
     const words = usesRun(spec) ? new Set<string>((JSON.parse(j.iface).commands ?? []).flatMap((c: string) => c.split(' '))) : undefined
     const scenarios = validateScenarios(k.scenarios, { commandWords: words }), more = k.assumptions === undefined ? [] : strs(k.assumptions, 'scenario drafter')
-    // A program has no server to send requests to, and a server no program to run: one kind of step per spec.
-    if (scenarios.some((s) => s.steps.some((st) => !!st.run !== usesRun(spec)))) throw new Error(`scenario drafter: ${usesRun(spec) ? 'every step of a command-line program is a "run" step' : 'a "run" step needs a spec that declares a command-line program'}`)
+    // A program has no server to send requests to, and a server no program to run: a program's steps are "run" steps, and the fake service's ("service": true) when the spec declares one.
+    if (scenarios.some((s) => s.steps.some((st) => !!st.run !== usesRun(spec) && !(usesRun(spec) && usesService(spec) && st.service)))) throw new Error(`scenario drafter: ${usesRun(spec) ? `every step of a command-line program is a "run" step${usesService(spec) ? ' or a "service" step' : ''}` : 'a "run" step needs a spec that declares a command-line program'}`)
     if (o.minority) checkMinority(more, scenarios)
     return { scenarios, more }
   })
@@ -294,7 +301,7 @@ function programContract(spec: string): string {
   const c = contractOf(spec), deps = c.deps ? loadDeps(c.deps) : null
   return `RUN CONTRACT (fixed, non-negotiable):
 - A command-line program, not a server. The factory runs \`${c.command.join(' ')} <arguments of a check>\` from a fresh empty working directory${c.pythonPath ? `, with PYTHONPATH=${c.pythonPath.map((d) => `<repository>/${d}`).join(':')}` : ''}. The program reads its input from files in that directory and from standard input; its result is its exit code, standard output, standard error and files it writes under that directory.
-- ${deps ? `Python ${deps.python.split('.').slice(0, 2).join('.')} with the standard library and exactly these packages, installed read-only and pinned by hash: ${deps.packages.join(', ')}. To try your code run it with ${depsDir(c.deps!)}/venv/bin/python3.` : 'Standard library only.'} No other dependencies, no package installs, no network at runtime.
+- ${deps ? `Python ${deps.python.split('.').slice(0, 2).join('.')} with the standard library and exactly these packages, installed read-only and pinned by hash: ${deps.packages.join(', ')}. To try your code run it with ${depsDir(c.deps!)}/venv/bin/python3.` : 'Standard library only.'} No other dependencies, no package installs, no network at runtime${usesService(spec) ? ' except the external service at the environment variable SERVICE_URL (see the spec)' : ''}.
 - The repository is read-only at runtime: the program writes nothing under it (no bytecode, no caches).
 - Work only inside the current directory. The factory commits your work when you finish.`
 }

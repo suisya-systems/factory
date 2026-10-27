@@ -1,10 +1,11 @@
 // Deterministic HTTP scenario runner. Each scenario gets a FRESH sandboxed app instance.
 import { mkdtempSync } from 'node:fs'
+import type { Duplex } from 'node:stream'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { openBrowser, TARGET, UI_ACTIONS, UI_LIMITS, usesUi, type Browser } from './browser.ts'
 import { CONTROL, startFake, usesService, type Fake } from './fake.ts'
-import { contractOf, ENV_NAME, okPath, RESERVED_ENV, RUN_LIMITS, runProgram, usesRun, type Contract } from './program.ts'
+import { contractOf, ENV_NAME, okPath, RESERVED_ENV, RUN_LIMITS, runProgram, serviceUrl, usesRun, type Contract } from './program.ts'
 import { freePort, killTree, removeTree, spawnApp, waitPort } from './sandbox.ts'
 
 export type Expect = { status?: number | number[]; json?: unknown; jsonHas?: string[]; jsonAbsent?: string[]; isArray?: boolean; length?: number | Record<string, number> }
@@ -262,7 +263,7 @@ async function uiStep(ui: { browser?: Browser }, st: Step, port: number, vars: R
 }
 
 // prog (the spec declares a command-line program): where its run steps start it.
-type Prog = { appDir: string; work: string; contract: Contract }
+type Prog = { appDir: string; work: string; contract: Contract; service?: { port: number; connect: () => Duplex } }
 async function runSteps(port: number, steps: Step[], from: number, vars: Record<string, unknown>, fake: Fake | undefined, signal: AbortSignal, ui?: { browser?: Browser }, prog?: Prog): Promise<{ failedStep?: number; detail: string }> {
   for (const [i, st] of steps.entries()) {
     const n = from + i + 1
@@ -276,8 +277,8 @@ async function runSteps(port: number, steps: Step[], from: number, vars: Record<
           read: st.read === undefined ? undefined : (fill(st.read, vars) as unknown[]).map(String), env: st.env === undefined ? undefined : Object.fromEntries(Object.entries(fill(st.env, vars) as Record<string, unknown>).map(([k, e]) => [k, String(e)])),
         }, signal)
         failed = checkStep(st, r.status, r.json, vars)
-      } else if (prog) {
-        return { failedStep: n, detail: `step ${n}: a command-line program is checked with run steps only` }
+      } else if (prog && !st.service) {
+        return { failedStep: n, detail: `step ${n}: a command-line program is checked with run steps and service steps only` }
       } else if (st.service) {
         if (!fake) return { failedStep: n, detail: `step ${n}: the spec declares no external service` }
         const r = fake.control(st.method, fill(st.path, vars) as string, st.body === undefined ? undefined : fill(st.body, vars))
@@ -339,10 +340,14 @@ export async function runScenario(appDir: string, s: Scenario, signal: AbortSign
   if (!o.run && stray >= 0) return { ...base, pass: false, failedStep: stray + 1, detail: `step ${stray + 1}: the spec declares no command-line program` }
   if (o.run) { // no server: one working directory for the whole scenario, so a later run sees what an earlier one wrote
     const work = mkdtempSync(join(tmpdir(), 'factory-work-'))
+    const fake = o.service ? startFake() : undefined // fresh per scenario, as for a server
     try {
-      const r = await runSteps(0, s.steps, 0, {}, undefined, signal, undefined, { appDir, work, contract: o.run })
+      // The service port only exists inside the program's network namespace; any port will do. {{SERVICE_URL}} is the same address as the program's SERVICE_URL.
+      const service = fake && { port: await freePort(), connect: () => fake.connect() }
+      const r = await runSteps(0, s.steps, 0, service ? { SERVICE_URL: serviceUrl(service.port) } : {}, fake, signal, undefined, { appDir, work, contract: o.run, service })
+      if (r.failedStep === undefined && fake?.overflow()) return { ...base, pass: false, failedStep: s.steps.length, detail: 'the program sent the external service more than the fake keeps' }
       return { ...base, pass: r.failedStep === undefined, ...r }
-    } finally { removeTree(work) }
+    } finally { fake?.close(); removeTree(work) }
   }
   const fake = o.service ? startFake() : undefined
   const ui: { browser?: Browser } | undefined = o.ui ? {} : undefined

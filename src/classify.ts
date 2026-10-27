@@ -61,7 +61,7 @@ const isSetup = (st: Step) => st.service === true && `${st.method} ${st.path.spl
 const SERVICE_NOTE = `
 A request with "service": true does not go to the app: it goes to the control endpoint of a fake that stands in for the external service the spec names.
 "POST /responses" sets what the fake answers the app for that method and path (reply 204, no body); predict {"status": [204], "body": null, "basis": "convention", "quote": ""} for it.
-"GET /requests" replies 200 with the array of requests the app has sent to the service so far, in order, each {"method", "path" (with query), "headers" (lower-case names), "body" (parsed JSON, else text)}: predict which requests the app sent.
+"GET /requests" replies 200 with the array of requests the app has sent to the service so far, in order, each {"method", "path" (with query), "headers" (lower-case names), "body" (parsed JSON, else text)}: predict which requests the app sent (when the app is a command-line program with "run" requests, the requests that program sent; "{{SERVICE_URL}}" in a request is the base URL of the fake, whose port is not known).
 `
 // #4: a ui step drives the app's pages in a browser; its "response" is the page as the runner reads it.
 const UI_NOTE = `

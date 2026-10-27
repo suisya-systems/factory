@@ -9,6 +9,7 @@ import type { Model, Task } from '../src/adapter.ts'
 import { approvalSummary, requestLines } from '../src/cli.ts'
 import { predictInstruction, requestsOnly } from '../src/classify.ts'
 import { buildDeps, checkContract, contractOf, loadDeps, RUN_LIMITS, usesRun, withRun, type Contract } from '../src/program.ts'
+import { usesService } from '../src/fake.ts'
 import { draft, runContract } from '../src/roles.ts'
 import { get, judgeOpts, runScenario, validateScenarios, type Scenario } from '../src/scenario.ts'
 import { undecidedItems } from '../src/classify.ts'
@@ -34,6 +35,11 @@ else if (cmd === 'fifo') require('node:child_process').execFileSync('mkfifo', ['
 else if (cmd === 'spin') setInterval(() => {}, 1000)
 else if (cmd === 'loud') process.stdout.write('x'.repeat(10000))
 else if (cmd === 'poke') { try { fs.writeFileSync(path.join(__dirname, 'poked'), 'x'); process.stdout.write('"wrote"') } catch { process.stdout.write('"refused"') } }
+else if (cmd === 'notify') { // POST to the service named by the argument, else by SERVICE_URL; print what came back
+  const base = rest[0] ?? process.env.SERVICE_URL
+  fetch(base + '/topic', { method: 'POST', headers: { 'x-token': 'k1' }, body: JSON.stringify({ message: 'hi' }) })
+    .then(async (r) => process.stdout.write(JSON.stringify({ status: r.status, url: process.env.SERVICE_URL ?? null, base })), () => process.stdout.write(JSON.stringify({ status: 'down', url: process.env.SERVICE_URL ?? null, base })))
+} else if (cmd === 'fd3') { try { require('node:fs').writeSync(3, 'x'); process.stdout.write('"open"') } catch { process.stdout.write('"closed"') } }
 else if (cmd === 'text') process.stdout.write('plain words\\n')
 `
 const CONTRACT: Contract = { command: ['node', '{app}/cli.cjs'] }
@@ -239,7 +245,7 @@ test('one kind of step per spec: a run needs the declared program, a program tak
   assert.match(undeclared.detail, /declares no command-line program/)
   const http = await run([{ method: 'GET', path: '/x', expect: { status: 200 } }])
   assert.equal(http.pass, false)
-  assert.match(http.detail, /run steps only/)
+  assert.match(http.detail, /run steps and service steps only/)
 })
 
 test('no server is started for a program: a scenario of run steps needs no package.json and no port', async () => {
@@ -318,9 +324,9 @@ test('draft with a contract: a scenario with an HTTP step is sent back once, the
   await assert.rejects(draft(fakeDrafters(() => GOOD), 'r'), /a "run" step needs a spec that declares a command-line program/)
 })
 
-test('a program does not go with a service or browser pages, however the spec came about', async () => {
+test('a program does not go with browser pages, however the spec came about', async () => {
   const ui = '# P\n\n## Undecided\n- x\n\n## Browser UI (factory)\n\nx\n'
-  await assert.rejects(draft(fakeDrafters(() => GOOD), 'r', { run: CONTRACT, reuse: { body: ui, iface: '{"commands":["a"]}' } }), /does not go with an external service or browser pages/)
+  await assert.rejects(draft(fakeDrafters(() => GOOD), 'r', { run: CONTRACT, reuse: { body: ui, iface: '{"commands":["a"]}' } }), /does not go with browser pages/)
 })
 
 test('the interface of a program: command words, flags per command, file names; names only', async () => {
@@ -331,4 +337,66 @@ test('the interface of a program: command words, flags per command, file names; 
   await assert.rejects(bad({ flags: ['--x'] }), /flags must be an object/)
   await assert.rejects(bad({ files: ['/etc/passwd'] }), /files must be plain file names/)
   await assert.rejects(bad({ commands: ['plan'], fields: { x: ['exit 404'] } }), /interface/)
+})
+
+// ---- a program that calls the fake external service (lap 14) ----
+const SVC = { run: CONTRACT, service: true }
+const set = (status: number) => ({ service: true, method: 'POST', path: '/responses', body: { method: 'POST', path: '/topic', status, json: { ok: true } }, expect: { status: 204 } })
+const seen = { service: true, method: 'GET', path: '/requests', expect: { status: 200, length: 1, json: [{ method: 'POST', path: '/topic', headers: { 'x-token': 'k1' }, body: { message: 'hi' } }] } }
+
+test('service steps are valid between run steps; SERVICE_URL is not the scenario\'s to set', () => {
+  assert.doesNotThrow(() => validateScenarios([sc([set(200), { run: ['notify', '{{SERVICE_URL}}'], expect: { status: 0 } }, seen])]))
+  assert.throws(() => validateScenarios([sc([{ run: ['echo'], env: { SERVICE_URL: 'http://x' }, expect: { status: 0 } }])]), /env must map/)
+})
+
+test('a program posts to the fake: set the answer, run, read what it sent', { skip: !NAMESPACES && 'needs namespaces' }, async () => {
+  const r = await run([set(200), { run: ['notify'], expect: { status: 0, json: { stdout: { status: 200 } } } }, seen], SVC)
+  assert.equal(r.pass, true, r.detail)
+})
+
+test('{{SERVICE_URL}} is the address the program finds in SERVICE_URL', { skip: !NAMESPACES && 'needs namespaces' }, async () => {
+  const r = await run([set(201), { run: ['notify', '{{SERVICE_URL}}'], expect: { status: 0, json: { stdout: { status: 201 } } }, capture: { u: 'stdout.url' } },
+    { run: ['echo', '{{u}}'], expect: { status: 0 } }], SVC)
+  assert.equal(r.pass, true, r.detail)
+  const same = await run([set(200), { run: ['notify', '{{SERVICE_URL}}'], expect: { status: 0, json: { stdout: { status: 200 } } }, capture: { b: 'stdout.base', u: 'stdout.url' } }, seen], SVC)
+  assert.equal(same.pass, true, same.detail)
+})
+
+test('no answer set: the program gets the fake\'s 404; the fake is fresh in every scenario', { skip: !NAMESPACES && 'needs namespaces' }, async () => {
+  const r = await run([{ run: ['notify'], expect: { status: 0, json: { stdout: { status: 404 } } } }, seen], SVC)
+  assert.equal(r.pass, true, r.detail)
+  const again = await run([{ service: true, method: 'GET', path: '/requests', expect: { status: 200, length: 0 } }], SVC)
+  assert.equal(again.pass, true, again.detail)
+})
+
+test('an address with nothing listening refuses the connection and the scenario goes on', { skip: !NAMESPACES && 'needs namespaces' }, async () => {
+  const r = await run([{ run: ['notify', 'http://127.0.0.1:9'], expect: { status: 0, json: { stdout: { status: 'down' } } } }, { service: true, method: 'GET', path: '/requests', expect: { length: 0 } }], SVC)
+  assert.equal(r.pass, true, r.detail)
+})
+
+test('the program has fd 3 closed (the bridge is not its to use)', { skip: !NAMESPACES && 'needs namespaces' }, async () => {
+  const r = await run([{ run: ['fd3'], expect: { status: 0, json: { stdout: 'closed' } } }], SVC)
+  assert.equal(r.pass, true, r.detail)
+})
+
+test('without a declared service nothing changes: no SERVICE_URL, a service step fails', { skip: !NAMESPACES && 'needs namespaces' }, async () => {
+  const r = await run([{ run: ['notify', 'http://127.0.0.1:9'], expect: { status: 0, json: { stdout: { url: null } } } }])
+  assert.equal(r.pass, true, r.detail)
+  const f = await run([set(200)])
+  assert.equal(f.pass, false)
+  assert.match(f.detail, /declares no external service/)
+})
+
+test('draft with a contract and a service: the spec declares both, the builder is told the exception, service steps are accepted, an HTTP step is not', async () => {
+  const withSvc = { scenarios: [{ ...GOOD.scenarios[0], id: 'notifies', steps: [...GOOD.scenarios[0].steps, { service: true, method: 'GET', path: '/requests', expect: { length: 0 } }] }], assumptions: [] }
+  const seen: Task[] = []
+  const d = await draft(fakeDrafters(() => withSvc, seen), 'a command that notifies', { run: CONTRACT, service: true })
+  assert.equal(usesRun(d.spec), true)
+  assert.equal(usesService(d.spec), true)
+  assert.match(d.spec, /environment variable SERVICE_URL/)
+  assert.match(seen.find((t) => t.role === 'scenario-drafter')!.instruction, /\{\{SERVICE_URL\}\}/)
+  assert.match(runContract(d.spec), /except the external service at the environment variable SERVICE_URL/)
+  await assert.rejects(draft(fakeDrafters(() => HTTP), 'r', { run: CONTRACT, service: true }), /"run" step or a "service" step/)
+  // without a service the scenario writer is not told about one, and a service step is refused
+  await assert.rejects(draft(fakeDrafters(() => withSvc), 'r', { run: CONTRACT }), /every step of a command-line program is a "run" step/)
 })

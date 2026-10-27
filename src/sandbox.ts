@@ -136,19 +136,41 @@ pipe.on('data', frameReader((id, d) => {
   let c = conns.get(id)
   if (!d.length) return c?.end()
   if (!c) {
-    if (id >= REVERSE) return
+    if (id >= REVERSE || !port) return
     c = net.connect(port, '127.0.0.1'); conns.set(id, c)
     c.on('data', (x) => pipe.write(frame(id, x))).on('error', () => {}).on('close', () => { conns.delete(id); pipe.write(frame(id)) })
   }
   c.write(d)
 }, () => process.exit(1)))
 const wait = () => { const c = net.connect(port, '127.0.0.1').on('connect', () => { c.destroy(); pipe.write(frame(0)) }).on('error', () => setTimeout(wait, 100)) }
-wait()
+if (port) wait()
 let rid = REVERSE
 if (sport) net.createServer((c) => {
   const id = rid++; conns.set(id, c)
   c.on('data', (x) => pipe.write(frame(id, x))).on('error', () => {}).on('close', () => { if (conns.delete(id)) pipe.write(frame(id)) })
 }).listen(sport, '127.0.0.1', () => require('node:fs').writeFileSync(${JSON.stringify(RELAY_READY)}, ''))`
+
+// The host side of the service direction alone (a program has nothing listening that the host connects to): each connection the
+// program opens to its service port is handed to the fake. Returns the function that ends them all.
+function serviceBridge(pipe: net.Socket, connect: () => Duplex): () => void {
+  const conns = new Map<number, Duplex>()
+  const opened = new Set<number>() // reverse ids already handed to the fake: a late frame never reopens one
+  pipe.on('error', () => {}).on('data', frameReader((id, d) => {
+    if (id < REVERSE) return
+    if (d.length && !opened.has(id)) {
+      opened.add(id)
+      const s = connect()
+      conns.set(id, s)
+      const done = () => { s.end(); if (conns.delete(id)) pipe.write(frame(id)) }
+      s.on('data', (x: Buffer) => pipe.write(frame(id, x))).on('error', () => {}).on('end', done).on('close', done)
+    }
+    const c = conns.get(id)
+    if (!c) return
+    if (d.length) c.write(d)
+    else { conns.delete(id); c.end() }
+  }, () => pipe.destroy()))
+  return () => { for (const c of conns.values()) c.destroy(); pipe.destroy() }
+}
 
 // App child -> "its host-side port is bound", for waitPort. Readiness is this bridge's own bind,
 // never whatever else might be listening on the port.
@@ -263,8 +285,14 @@ export function sandboxExec(cmd: string, args: string[], o: SandboxOpts, env: No
 // A program of the builder's (a `run` step) run to its end: stdin in, stdout and stderr out apart, bounded in time and size.
 // why: set when the factory stopped it (timeout, too much output, abort); code is then meaningless.
 export type Ran = { code: number | null; stdout: string; stderr: string; why?: string }
-export function sandboxRun(cmd: string, args: string[], o: SandboxOpts, env: NodeJS.ProcessEnv, input: string, signal: AbortSignal, lim: { timeoutMs: number; outChars: number }): Promise<Ran> {
-  const c = sandboxSpawn(cmd, args, o, { env, cwd: o.workdir, stdio: ['pipe', 'pipe', 'pipe'] })
+// service (a program that calls the fake external service): as spawnApp's, the program's 127.0.0.1:service.port is bridged over fd 3 to
+// service.connect() by a relay started in the same sandbox before the program; the program itself gets fd 3 closed.
+export function sandboxRun(cmd: string, args: string[], o: SandboxOpts, env: NodeJS.ProcessEnv, input: string, signal: AbortSignal, lim: { timeoutMs: number; outChars: number }, service?: { port: number; connect: () => Duplex }): Promise<Ran> {
+  const via = service
+    ? ['sh', ['-c', `node -e "$0" 0 "$1" & shift; until [ -e ${RELAY_READY} ]; do sleep 0.05; done; "$@" 3>&-; c=$?; kill $! 2>/dev/null; exit $c`, RELAY, String(service.port), cmd, ...args]] as const
+    : [cmd, args] as const
+  const c = sandboxSpawn(via[0], [...via[1]], o, { env, cwd: o.workdir, stdio: ['pipe', 'pipe', 'pipe', ...(service ? ['pipe' as const] : [])] })
+  const closeBridge = service ? serviceBridge(c.stdio[3] as net.Socket, service.connect) : () => {}
   let stdout = '', stderr = '', why: string | undefined
   const kill = (w: string) => { why ??= w; killTree(c, 500) }
   const add = (which: 'stdout' | 'stderr') => (d: string) => {
@@ -281,7 +309,7 @@ export function sandboxRun(cmd: string, args: string[], o: SandboxOpts, env: Nod
   if (signal.aborted) onAbort()
   else signal.addEventListener('abort', onAbort, { once: true })
   return new Promise((ok) => {
-    const done = (code: number | null) => { clearTimeout(timer); signal.removeEventListener('abort', onAbort); ok({ code, stdout: stdout.slice(0, lim.outChars), stderr: stderr.slice(0, lim.outChars), why }) }
+    const done = (code: number | null) => { clearTimeout(timer); signal.removeEventListener('abort', onAbort); closeBridge(); ok({ code, stdout: stdout.slice(0, lim.outChars), stderr: stderr.slice(0, lim.outChars), why }) }
     c.on('error', () => { why ??= 'the program could not be started'; done(null) })
     c.on('close', done)
   })
