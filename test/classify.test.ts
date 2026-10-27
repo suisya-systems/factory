@@ -45,7 +45,7 @@ test('draft: spec and scenarios come from separate sessions; the scenario writer
   assert.ok(!sc.includes('no auth'), 'scenario writer saw the spec writer\'s assumptions')
   assert.match(d.spec, /## Interface/) // the builder gets the same names
   assert.deepEqual(d.assumptions.slice(1), ['no auth', '(scenario writer) titles are short'])
-  assert.deepEqual(seen.map((t) => t.maxCostUsd), [2, 2, 1])
+  assert.deepEqual(seen.map((t) => t.maxCostUsd), [2, 5, 1])
 })
 
 test('the classifier sees requests only: no id, title, summary, kind or expectations', () => {
