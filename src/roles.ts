@@ -49,14 +49,14 @@ Reply with ONE JSON object and nothing else:
  "assumptions": ["<one line each: what you assumed because the request did not say>"]}
 "interface" holds NAMES AND SHAPES ONLY, and must match the spec: no status codes, no rules (no AND/OR, matching, ordering,
 defaults, limits or page boundaries) and no values: never list the values a field or parameter may take (no enumerations), no examples.
-Every name is a bare identifier (letters, digits, _; "." for a nested field, "[]" for the items of an array).
+Every name is a bare identifier (letters, digits, _; "." for a nested field, "[]" for the items of an array): no spaces and no description in a "fields" key or in a name list.
 Every interface key is optional: leave out a key that does not apply.
 It is given to a separate scenario writer who never sees your spec.
 You cannot ask questions: record every guess in assumptions.`
 
 const SCENARIO_FORMAT = `Reply with ONE JSON object and nothing else:
 {"assumptions": ["<one line each: anything you assumed because the request did not say>"],
- "scenarios": [{"id": "kebab-id", "title": "...", "summary": "<one line, plain words; this is all the builder sees if it fails. It must NOT contain any path, any status code, or any string value (3+ chars) or number (3+ digits) used in that scenario's steps>",
+ "scenarios": [{"id": "kebab-id", "title": "...", "summary": "<one line of AT MOST 200 characters, plain words; this is all the builder sees if it fails. It must NOT contain any path, any status code, or any string value (3+ chars) or number (3+ digits) used in that scenario's steps>",
    "inSpec": <true if the REQUEST states this behaviour, false if it is an unstated but reasonable expectation>, "kind": "<a short kebab-case category>",
    "steps": [{"method": "GET|POST|PUT|PATCH|DELETE", "path": "/...", "body": <json, optional, not on GET>, "headers": {<optional>},
      "expect": {"status": <int or [ints]>, "json": <partial deep subset, optional>, "jsonHas": ["dot.path", ...], "jsonAbsent": ["dot.path", ...], "isArray": <bool>, "length": <int, or {"dot.path": int} for arrays inside the body>},
@@ -103,11 +103,14 @@ or that the request fixes. The summary rule covers ui steps too.`
 // only for a spec that declares a command-line program (program.ts). The interface names its commands, flags and files; every scenario step is a run.
 const RUN_IFACE = `COMMAND-LINE PROGRAM: the app is a command-line program, not an HTTP server. Describe it in the interface with these keys (instead of endpoints):
 "commands": ["<command words>", ...] (e.g. "build plan": the sub-command words, one string per command), "flags": {"<command words>": ["--flag", ...]} (the key "" holds the flags of the program itself, before any sub-command),
-"files": ["<name of a file the program reads or writes>", ...], and "fields" for the names inside the JSON it reads or prints ({"<what it is>": ["name", "nested.name", ...]}).
+"files": ["<name of a file the program reads or writes>", ...], and "fields" for the names inside the JSON it reads or prints ({"<name of the JSON>": ["name", "nested.name", ...]}).
+A "commands" entry is lower-case words only. A "files" entry is a plain path (letters, digits, _ . - and "/"), no spaces. A file whose name changes (one per target, per worker, ...) is written ONCE
+with one "{name}" in place of the changing part (e.g. "out/{target}.json"; the name inside the braces is a bare identifier). Never list alternatives ("a|b"), a description or an example name.
+A "fields" key is a bare identifier too (e.g. "panes_json", not "panes json" or a phrase); the scenario writer sees these names, so keep each one short.
 Names only, as for the other keys: no values, no exit codes, no rules.`
 const RUN_SCENARIO_FORMAT = `Reply with ONE JSON object and nothing else:
 {"assumptions": ["<one line each: anything you assumed because the request did not say>"],
- "scenarios": [{"id": "kebab-id", "title": "...", "summary": "<one line, plain words; this is all the builder sees if it fails. It must NOT contain any argument value, file path or name (3+ chars), string value (3+ chars) or number (3+ digits) used in that scenario's steps>",
+ "scenarios": [{"id": "kebab-id", "title": "...", "summary": "<one line of AT MOST 200 characters, plain words; this is all the builder sees if it fails. It must NOT contain any argument value, file path or name (3+ chars), string value (3+ chars) or number (3+ digits) used in that scenario's steps>",
    "inSpec": <true if the REQUEST states this behaviour, false if it is an unstated but reasonable expectation>, "kind": "<a short kebab-case category>",
    "steps": [{"run": ["<argument>", ...], "stdin": "<optional text>", "files": {"<relative path>": <string, or JSON that is written as text>}, "read": ["<relative path of a file the program writes>"], "env": {"NAME": "value"},
      "expect": {"status": <int or [ints]>, "json": <partial deep subset, optional>, "jsonHas": ["dot.path", ...], "jsonAbsent": ["dot.path", ...], "isArray": <bool>, "length": <int, or {"dot.path": int} for arrays inside the body>},
@@ -116,7 +119,7 @@ const RUN_SCENARIO_FORMAT = `Reply with ONE JSON object and nothing else:
 Every expect needs at least one check. Arrays in "json" match by position (a prefix), so only list items whose order is fixed;
 use "length" to check that a list holds exactly the expected items.
 Use "jsonAbsent" to check that a value is NOT there (a record that must have been removed, a field that must not be returned): it fails when the path exists.
-Use ONLY the command, flag and file names in the INTERFACE. Where the request does not fix an exit code, accept every reasonable one (e.g. [1, 2]).
+Use ONLY the command, flag and file names in the INTERFACE. An interface file written "dir/{name}.json" stands for ONE concrete name in each step: write the concrete file name ("dir/worker-a.json"), never the "{name}" form. Where the request does not fix an exit code, accept every reasonable one (e.g. [1, 2]).
 Each scenario starts from an EMPTY working directory.
 Write 8-15 scenarios, a mix of inSpec true and false. You cannot ask questions: record every guess in assumptions.`
 const RUN_STEPS = `COMMAND-LINE PROGRAM: the app is a program, not an HTTP server. Every step runs it (a step has no "method", "path", "body" or "headers"), except the "service": true steps below when the spec declares an external service.
@@ -167,9 +170,18 @@ const NAME = /^[A-Za-z_]\w*(\[\])?(\.[A-Za-z_]\w*(\[\])?)*$/
 const ENDPOINT = /^(GET|POST|PUT|PATCH|DELETE) \/[\w.:{}\/-]*$/
 const HEADER_NAME = /^[A-Za-z][A-Za-z0-9-]*$/
 const COMMAND = /^[a-z][a-z0-9_-]*( [a-z][a-z0-9_-]*)*$/, FLAG = /^--?[A-Za-z][\w-]*$/, FILE_NAME = /^[\w.-]+(\/[\w.-]+)*$/
+// An interface file may stand for a family of names with ONE `{name}` (name = a bare identifier): `dispatcher/spawn-prompt/{target}.json`.
+const FILE_SLOT = /\{[A-Za-z_]\w*\}/g
+export const fileEntry = (n: unknown): n is string => typeof n === 'string' && ((n.match(FILE_SLOT)?.length ?? 0) <= 1) && FILE_NAME.test(n.replace(FILE_SLOT, 'x')) && !/[{}]/.test(n.replace(FILE_SLOT, ''))
 function checkInterface(raw: unknown): Record<string, unknown> {
   const bad = (what: string) => new Error(`spec drafter: interface ${what} (names and shapes only, no values or enumerations)`)
-  const list = (v: unknown, re: RegExp, what: string) => { if (!Array.isArray(v) || !v.every((n) => typeof n === 'string' && re.test(n))) throw bad(what) }
+  // The error names every offending value, so one repair round can fix them all.
+  const list = (v: unknown, ok: RegExp | ((n: unknown) => boolean), what: string) => {
+    if (!Array.isArray(v)) throw bad(`${what}; got ${JSON.stringify(v)}, not a list`)
+    const test = ok instanceof RegExp ? (n: unknown) => typeof n === 'string' && ok.test(n) : ok
+    const offending = v.filter((n) => !test(n))
+    if (offending.length) throw bad(`${what}; offending value${offending.length === 1 ? '' : 's'}: ${offending.map((n) => JSON.stringify(n)).join(', ')}`)
+  }
   if (!isObj(raw)) throw new Error('spec drafter: interface missing')
   const x = Object.fromEntries(Object.entries(raw).filter(([, v]) => v !== null)) // a key sent as null is a key left out
   if (Object.keys(x).length === 0) throw new Error('spec drafter: interface missing')
@@ -180,11 +192,13 @@ function checkInterface(raw: unknown): Record<string, unknown> {
     const m = x[k]
     if (m === undefined) continue
     if (!isObj(m)) throw bad(`${k} must be an object`)
-    for (const [key, names] of Object.entries(m)) { if (!re.test(key)) throw bad(`${k} key "${key}" is not a name`); list(names, NAME, `${k}["${key}"] must be a list of bare names`) }
+    const badKeys = Object.keys(m).filter((key) => !re.test(key))
+    if (badKeys.length) throw bad(`${k} key${badKeys.length === 1 ? '' : 's'} ${badKeys.map((key) => JSON.stringify(key)).join(', ')} not a bare name (letters, digits, _ only; no spaces, no description)`)
+    for (const [key, names] of Object.entries(m)) list(names, NAME, `${k}["${key}"] must be a list of bare names`)
   }
   if (x.testIds !== undefined) list(x.testIds, TEST_ID, 'testIds must be a list of bare names without "."')
   if (x.commands !== undefined) list(x.commands, COMMAND, 'commands must be lists of bare command words ("a b" for a sub-command)')
-  if (x.files !== undefined) list(x.files, FILE_NAME, 'files must be plain file names')
+  if (x.files !== undefined) list(x.files, fileEntry, 'files must be plain file names (a changing part is one {name} slot, e.g. "dir/{target}.json"; no spaces, no alternatives)')
   if (x.flags !== undefined) {
     if (!isObj(x.flags)) throw bad('flags must be an object')
     for (const [key, names] of Object.entries(x.flags)) { if (key !== '' && !COMMAND.test(key)) throw bad(`flags key "${key}" is not command words`); list(names, FLAG, `flags["${key}"] must be a list of flag names`) }
