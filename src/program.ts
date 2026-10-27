@@ -93,7 +93,15 @@ export async function buildDeps(lockFile: string, wheelhouse: string, python = '
   const bytes = readFileSync(lockFile), id = sha256(bytes), dir = depsDir(id)
   if (!visibleInSandbox(depsRoot())) throw new Error(`${depsRoot()} is hidden from the sandboxes; set FACTORY_DEPS to a dir outside $HOME, /tmp, /mnt, /run and /var/tmp`)
   if (existsSync(join(dir, 'meta.json'))) throw new Error(`${dir} is already built`)
-  const packages = bytes.toString('utf8').split('\n').map((l) => l.trim().match(/^([A-Za-z0-9_.-]+==[^\s\\;]+)/)?.[1]).filter((p): p is string => !!p)
+  // Only pins and their hashes: a URL, an index, a find-links, a nested requirements file or an option would reach for the network or for files the lock does not cover.
+  const packages: string[] = []
+  for (const raw of bytes.toString('utf8').split('\n')) {
+    const l = raw.replace(/\s*\\$/, '').trim()
+    if (!l || l.startsWith('#') || /^--hash=sha256:[0-9a-f]{64}$/.test(l)) continue
+    const pin = l.match(/^([A-Za-z0-9_.-]+==[A-Za-z0-9_.!+-]+)(\s*;[^#]*)?(\s+--hash=sha256:[0-9a-f]{64})*\s*(#.*)?$/)
+    if (!pin) throw new Error(`${lockFile}: "${l.slice(0, 80)}" is not a "name==version" pin or a "--hash=sha256:..." line; a lock for a dependency set holds nothing else`)
+    packages.push(pin[1])
+  }
   if (!packages.length) throw new Error(`${lockFile}: no "name==version" requirement found`)
   removeTree(dir) // a build that stopped half way left no meta.json
   mkdirSync(dir, { recursive: true })

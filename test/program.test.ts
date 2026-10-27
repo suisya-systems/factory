@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import type { Model, Task } from '../src/adapter.ts'
 import { approvalSummary, requestLines } from '../src/cli.ts'
 import { predictInstruction, requestsOnly } from '../src/classify.ts'
-import { checkContract, contractOf, loadDeps, RUN_LIMITS, usesRun, withRun, type Contract } from '../src/program.ts'
+import { buildDeps, checkContract, contractOf, loadDeps, RUN_LIMITS, usesRun, withRun, type Contract } from '../src/program.ts'
 import { draft, runContract } from '../src/roles.ts'
 import { get, judgeOpts, runScenario, validateScenarios, type Scenario } from '../src/scenario.ts'
 import { undecidedItems } from '../src/classify.ts'
@@ -63,6 +63,17 @@ test('contract in the spec: the section declares it, reads back as written, and 
   assert.throws(() => contractOf(spec), /declares no command-line contract/)
   assert.deepEqual(judgeOpts(withIt).run, CONTRACT)
   assert.equal(judgeOpts(spec).run, undefined)
+})
+
+test('a lock file holds pins and hashes only: a URL, an index, a find-links or a nested file is refused before anything is built', async () => {
+  const was = process.env.FACTORY_DEPS
+  const lock = (body: string) => { const f = join(tmp('lock'), 'requirements.lock'); writeFileSync(f, body); return f }
+  const H = 'sha256:' + 'a'.repeat(64)
+  try {
+    process.env.FACTORY_DEPS = '/opt/factory-deps-for-tests-only' // outside the dirs the sandboxes hide; nothing is created: every lock below is refused first
+    for (const bad of [`pkg @ https://example.invalid/pkg-1.0-py3-none-any.whl --hash=${H}\n`, `pkg==1.0 \\\n  --hash=${H}\n--find-links https://example.invalid/\n`, `-r other.txt\n`, `--index-url https://example.invalid/\n`, `pkg==1.0 --hash=${H}\nhttps://example.invalid/x.whl\n`])
+      await assert.rejects(buildDeps(lock(bad), tmp('wheels')), /holds nothing else|no "name==version"/, bad)
+  } finally { if (was === undefined) delete process.env.FACTORY_DEPS; else process.env.FACTORY_DEPS = was }
 })
 
 test('a dependency set that is not built (or hidden from the sandboxes) is named, not guessed', () => {
@@ -122,6 +133,10 @@ test('the summary rule at draft time exempts the interface\'s command words only
   assert.doesNotThrow(one('greeting succeeds', ['greet', 'alice'], { commandWords: new Set(['greet']) }))
   assert.doesNotThrow(one('the dispatcher delegate-plan command prints a plan', ['dispatcher', 'delegate-plan', '--dry-run'], { commandWords: words }))
   assert.throws(one('the pane in the plan is accepted', ['dispatcher', 'delegate-plan', 'pane'], { commandWords: words }), /concrete value/)
+  // a dash-prefixed value is a value: only flag names are interface names
+  assert.throws(one('calc rejects -123', ['calc', '-123'], { commandWords: new Set(['calc']) }), /concrete value from the steps \("-123"/)
+  assert.throws(one('the -x5 form is refused', ['calc', '-x5'], { commandWords: new Set(['calc']) }), /concrete value/)
+  assert.doesNotThrow(one('calc takes a count flag', ['calc', '--count=1', '-v'], { commandWords: new Set(['calc']) })) // "1" is under three characters; the flag names are free
   assert.doesNotThrow(one('greeting alice succeeds', ['greet', 'alice'])) // a set re-read at approval has no interface at hand: the lenient rule, already held at draft
 })
 

@@ -83,6 +83,24 @@ test('each build starts as its own clone of the repo it extends; the repo itself
   assert.deepEqual(again.map((r) => [r.baseSha, r.passed, !!r.rescoredAt]), [[base, { 'rb-ok': 1 }, true], [base, { 'rb-ok': 1 }, true]])
 })
 
+// Codex review: the check ran once before the loop, so a repo that moved on while build 1 ran gave build 2 unapproved code under baseSha.
+test('every build is checked out at the approved commit, even when the repo moved on while earlier ones ran', async () => {
+  const repo = gitTarget(), base = headOf(repo)
+  extending('rb-moved', repo)
+  const heads: string[] = []
+  const builder: Model = async (t: Task) => {
+    heads.push(headOf(t.workdir))
+    writeFileSync(join(t.workdir, 'cli.cjs'), CLI)
+    writeFileSync(join(repo, `later-${heads.length}.txt`), 'x') // the extended repo moves on after the first clone...
+    git(repo, 'add', '-A'); git(repo, 'commit', '-q', '-m', `later ${heads.length}`)
+    return { ok: true, text: '', costUsd: 0 }
+  }
+  const rs = await replicate({ changeId: 'rb-moved', model: builder, stateDir: sd, k: 2, builderModel: 'm1', base: repo })
+  assert.deepEqual(heads, [base, base]) // ...and the second clone still starts at the approved commit
+  assert.ok(!existsSync(join(sd, 'work', 'rb-moved-rep', 'm1-2', 'later-1.txt')))
+  for (const r of rs) assert.equal(git(join(sd, 'work', 'rb-moved-rep', `m1-${r.n}`), 'rev-parse', `${r.sha}~1`), base)
+})
+
 test('a build that did not start from the base fails the scenario that needs its files', async () => {
   const repo = gitTarget()
   extending('rb-bad', repo)

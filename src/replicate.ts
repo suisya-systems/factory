@@ -127,7 +127,8 @@ export async function replicate(o: ReplicateOpts): Promise<Replicate[]> {
       const ws = join(wsRoot, `${prefix}${n}`)
       mkdirSync(ws)
       // empty (no earlier answer to read), or the app being extended, as `run` clones its ship target
-      if (want) execFileSync('git', ['clone', '-q', '--no-hardlinks', o.base!, ws], { stdio: 'pipe' })
+      // (checked out at the approved commit, whatever the repo's HEAD has become while earlier builds ran)
+      if (want) { execFileSync('git', ['clone', '-q', '--no-hardlinks', o.base!, ws], { stdio: 'pipe' }); execFileSync('git', ['-C', ws, 'checkout', '-q', '--detach', want], { stdio: 'pipe' }) }
       else execFileSync('git', ['init', '-q', '-b', 'main', ws], { stdio: 'pipe' })
       const spent = guard.ledger.totalUsd
       last = null

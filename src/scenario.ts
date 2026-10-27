@@ -41,10 +41,16 @@ const numbers = (x: unknown) => leaves(x, Number.isInteger as (v: unknown) => v 
 // with the interface's command words (draft time) only those exact words are exempt, so a value like `greet alice` is data; without them (a
 // set re-read at approval, already checked at draft) a leading lower-case word without digits is taken for a sub-command. "--flag=value" counts its value.
 const SUB = /^[a-z][a-z-]*$/
+// A flag name (`--name`, or a lone `-x`) is an interface name; anything else that starts with a dash (`-123`, `-x5`, `-abc`) is a value.
+const FLAG_ARG = /^(--[A-Za-z][\w-]*|-[A-Za-z])$/
 export const argvData = (run: string[], commandWords?: Set<string>) => {
   let i = 0
   while (i < run.length && (commandWords ? commandWords.has(run[i]) : SUB.test(run[i]))) i++
-  return run.slice(i).flatMap((a) => (a.startsWith('--') ? a.split('=').slice(1).join('=') || [] : a.startsWith('-') ? [] : a))
+  return run.slice(i).flatMap((a) => {
+    if (FLAG_ARG.test(a)) return []
+    const eq = a.match(/^(--[A-Za-z][\w-]*)=(.*)$/)
+    return eq ? (eq[2] ? [eq[2]] : []) : [a]
+  })
 }
 
 // o.commandWords (draft time, a program): the words of the interface's commands, the only leading arguments the summary rule exempts.
