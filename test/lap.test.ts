@@ -119,10 +119,10 @@ test('a failed step stops the lap and is never re-run; always-steps still report
   const model: Model = async () => { calls++; return { ok: true, text: 'sorry', costUsd: 0.5 } }
   writeFileSync(file, JSON.stringify({ name: 'lapf', steps: [{ factory: ['draft', 'f-1', '--request', req] }, { exec: mark(after1) }, { gate: 'g', approve: ['f-1'] }, { exec: mark(rep), always: true }] }))
   assert.equal(await main(['lap', file], model), 1)
-  assert.equal(calls, 2) // the drafter and its one repair
+  assert.equal(calls, 3) // the drafter and its two repairs
   assert.deepEqual([count(after1), count(rep)], [0, 1])
   assert.equal(await main(['lap', file], model), 1)
-  assert.equal(calls, 2) // not retried
+  assert.equal(calls, 3) // not retried
   assert.equal(count(rep), 1)
   const prog = JSON.parse(readFileSync(join(sd, 'laps', 'lapf', 'progress.json'), 'utf8'))
   assert.match(Object.values(prog.steps as Record<string, { reason: string }>)[0].reason, /no parseable JSON/)
@@ -133,7 +133,7 @@ test('a failed step stops the lap and is never re-run; always-steps still report
   mkdirSync(join(sd, 'laps', 'lapi'), { recursive: true })
   writeFileSync(join(sd, 'laps', 'lapi', 'progress.json'), JSON.stringify({ steps: { [JSON.stringify(step)]: { status: 'running', at: '' } }, waiting: null }))
   assert.equal(await main(['lap', file2], model), 1)
-  assert.equal(calls, 2)
+  assert.equal(calls, 3)
 
   // A new lap in a state dir that already spent money is refused.
   writeFileSync(file2, JSON.stringify({ name: 'lapn', steps: [step] }))
@@ -145,7 +145,7 @@ test('a failed step stops the lap and is never re-run; always-steps still report
   writeFileSync(file, JSON.stringify({ name: 'lapf', steps: [...JSON.parse(readFileSync(file, 'utf8')).steps, { exec: mark(rep2), always: true }] }))
   try {
     assert.equal(await main(['lap', file], model), 1)
-    assert.deepEqual([count(rep), count(rep2), calls], [1, 1, 2]) // the report still runs under STOP; nothing else does
+    assert.deepEqual([count(rep), count(rep2), calls], [1, 1, 3]) // the report still runs under STOP; nothing else does
     assert.equal(await main(['lap', file, '--approve', 'g', '--by', 'o', '--version', 'v'], model), 1)
   } finally { unlinkSync(stop) }
 })
@@ -345,7 +345,7 @@ test('a failed draft is drafted again under the next name; later steps and gates
   const SPEC = JSON.stringify({ spec: '# Memo\n\n## Undecided\n- status codes\n', interface: { endpoints: ['POST /notes'] }, assumptions: [] })
   const model: Model = async (t) => {
     spent += 0.25
-    if (t.role === 'spec-drafter') return { ok: true, text: ++specCalls <= 2 ? 'sorry' : SPEC, costUsd: 0.25 } // the first draft and its repair fail
+    if (t.role === 'spec-drafter') return { ok: true, text: ++specCalls <= 3 ? 'sorry' : SPEC, costUsd: 0.25 } // the first draft and its repairs fail
     if (t.role === 'scenario-drafter') return { ok: true, text: JSON.stringify({ scenarios: SCENARIOS, assumptions: [] }), costUsd: 0.25 }
     return { ok: false, text: '', costUsd: 0.25, error: 'down' }
   }
@@ -370,7 +370,7 @@ test('a failed draft is drafted again under the next name; later steps and gates
   await gate('start')
   const text = await gate('entrance') // the start gate is not asked again: the definition did not change
   await gate('screen') // nor the entrance gate, whose version binds the redraft before it
-  assert.equal(specCalls, 3)
+  assert.equal(specCalls, 4)
   assert.ok(!existsSync(join(sd, 'vault', 'rd-a', 'spec.md')))
   assert.ok(existsSync(join(sd, 'runs', 'rd-a', 'draft-cost.json'))) // the failed draft's record stays under its own name
   assert.match(text, /## Redrafts[^\n]*\n- step 2: rd-a failed \([^\n]*no parseable JSON[^\n]*\); drafted again as rd-a-r2\n/)
@@ -399,7 +399,7 @@ test('redraft stops at its limit, never retries a stop or a cap, and never draft
   let calls = 0, sd = ''
   const lap = (name: string, step: Step, m: Model) => { sd = home(); writeFileSync(file, JSON.stringify({ name, steps: [step] })); return main(['lap', file], m) }
   assert.equal(await lap('lapx', { factory: ['draft', 'rx', '--request', req], redraft: 1 }, async () => { calls++; return { ok: true, text: 'sorry', costUsd: 0.1 } }), 1)
-  assert.equal(calls, 4) // two drafts, each with its one repair
+  assert.equal(calls, 6) // two drafts, each with its two repairs
   const prog = JSON.parse(readFileSync(join(sd, 'laps', 'lapx', 'progress.json'), 'utf8'))
   assert.deepEqual(prog.redrafts.map((r: { as: string }) => r.as), ['rx-r2'])
   assert.equal(prog.names, undefined) // nothing stands for rx: no draft of it exists
@@ -416,7 +416,7 @@ test('redraft stops at its limit, never retries a stop or a cap, and never draft
     if (!calls++) mkdirSync(join(sd, 'runs', 'ro-r2'), { recursive: true }) // a name the redraft would take is already in use
     return { ok: true, text: 'sorry', costUsd: 0.1 }
   }), 1)
-  assert.equal(calls, 2)
+  assert.equal(calls, 3)
   assert.match(Object.values(JSON.parse(readFileSync(join(sd, 'laps', 'lapo', 'progress.json'), 'utf8')).steps as Record<string, { reason: string }>)[0].reason, /ro-r2 already exists/)
 })
 
@@ -436,7 +436,7 @@ test('a redraft renames neither the state dir, a command nor an inherited name, 
   writeFileSync(req, 'a memo api')
   let specCalls = 0
   const model: Model = async (t) => t.role === 'spec-drafter'
-    ? { ok: true, text: ++specCalls <= 2 ? 'sorry' : JSON.stringify({ spec: '# Memo\n\n## Undecided\n- x\n', interface: { endpoints: ['POST /notes'] }, assumptions: [] }), costUsd: 0.1 }
+    ? { ok: true, text: ++specCalls <= 3 ? 'sorry' : JSON.stringify({ spec: '# Memo\n\n## Undecided\n- x\n', interface: { endpoints: ['POST /notes'] }, assumptions: [] }), costUsd: 0.1 }
     : t.role === 'scenario-drafter' ? { ok: true, text: JSON.stringify({ scenarios: SCENARIOS, assumptions: [] }), costUsd: 0.1 } : { ok: false, text: '', costUsd: 0.1, error: 'down' }
   delete process.env.FACTORY_HOME
   const sd = join(dir, 'tally') // the state dir's own name, and a command, is the redrafted id
