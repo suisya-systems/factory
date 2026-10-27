@@ -66,8 +66,7 @@ Every expect needs at least one check. Arrays in "json" match by position (a pre
 use "length" to check that a list holds exactly the expected items.
 Use "jsonAbsent" to check that a value is NOT there (a record that must have been removed, a field that must not be returned): it fails when the path exists.
 Use ONLY the endpoint, parameter and field names in the INTERFACE. Where the request does not fix a status code, accept every reasonable one (e.g. [400, 422]).
-Each scenario starts from an EMPTY app.
-Write 8-15 scenarios, a mix of inSpec true and false. You cannot ask questions: record every guess in assumptions.`
+Each scenario starts from an EMPTY app.`
 
 // #17: only for a spec that declares an external service (fake.ts). The fake answers what the scenario sets; never the builder's business.
 const SERVICE_STEPS = `EXTERNAL SERVICE: the app calls the external service the request names. In judging a fake stands in for it, and a step with
@@ -120,8 +119,7 @@ Every expect needs at least one check. Arrays in "json" match by position (a pre
 use "length" to check that a list holds exactly the expected items.
 Use "jsonAbsent" to check that a value is NOT there (a record that must have been removed, a field that must not be returned): it fails when the path exists.
 Use ONLY the command, flag and file names in the INTERFACE. An interface file written "dir/{name}.json" stands for ONE concrete name in each step: write the concrete file name ("dir/worker-a.json"), never the "{name}" form. Where the request does not fix an exit code, accept every reasonable one (e.g. [1, 2]).
-Each scenario starts from an EMPTY working directory.
-Write 8-15 scenarios, a mix of inSpec true and false. You cannot ask questions: record every guess in assumptions.`
+Each scenario starts from an EMPTY working directory.`
 const RUN_STEPS = `COMMAND-LINE PROGRAM: the app is a program, not an HTTP server. Every step runs it (a step has no "method", "path", "body" or "headers"), except the "service": true steps below when the spec declares an external service.
 The factory runs the program's command (given below as COMMAND) followed by the step's "run" arguments, in a working directory that is empty at the start of the scenario and stays the same
 for its later steps: the step's "files" are written there first, and a file one run writes is there for the next run. No network (except the external service, when the spec declares one, below). A run is stopped after 20 seconds; at most 20 files in ("files") and 20 out ("read"),
@@ -160,7 +158,24 @@ function checkMinority(more: string[], scenarios: Scenario[]) {
 }
 
 export const appBlock = (app: string) => (app ? `\nEXISTING APP (the current code; the request extends it):\n${app}\n` : '')
-// Each drafter gets at most $2 (the scenario drafter CAPS.scenarioDrafterUsd = $5) so the classifier calls (CLASSIFIER_BUDGET each, about 15) still fit in the draft cap.
+
+// #71: the number of scenarios follows the request's size (it was a fixed "8-15", and lap 14's 1,658-word, three-part
+// request got 15, the same resolution as a one-part one). One scenario per 35 words of the request: lap 13 (495 words)
+// drafted 14-15 freely, lap 14's preregistration expected 40-50 (factory-notes#47). Clamped to 8..40.
+// Written in calls of at most 12 (perCall): lap 14's largest call wrote 15 command-line scenarios for $4.12 of the $5
+// CAPS.scenarioDrafterUsd, so 12 (~$3.3 plus reading the earlier batches) leaves room. Each later call sees the scenarios
+// and assumptions so far, so the batches stay one consistent set.
+// max 40 is the draft cap (CAPS.maxCostUsd $40, unchanged), at lap 14's rates per scenario (writer $0.27 command-line /
+// $0.07 HTTP, classifier one call ~$0.57): 40 command-line scenarios ~ $11 + $23 + spec drafter <= $2 = ~$36; 50 would be
+// ~$44 (HTTP: ~$34). At the per-call ceilings (classifier $1 each) 40 no longer fits: the guard stops the draft.
+export const SCENARIO_COUNT = { wordsPer: 35, min: 8, max: 40, perCall: 12 }
+export function scenarioBatches(request: string): number[] {
+  const { wordsPer, min, max, perCall } = SCENARIO_COUNT
+  const n = Math.min(max, Math.max(min, Math.round(request.split(/\s+/).filter(Boolean).length / wordsPer)))
+  const k = Math.ceil(n / perCall)
+  return Array.from({ length: k }, (_, i) => Math.floor((n + i) / k)) // k near-equal parts summing to n
+}
+// Each drafter gets at most $2 (the scenario drafter CAPS.scenarioDrafterUsd = $5 per call); see SCENARIO_COUNT for the draft cap.
 const draftTask = (role: string, instruction: string) => ({ ...base, maxCostUsd: role === 'scenario-drafter' ? CAPS.scenarioDrafterUsd : 2, role, instruction, workdir: mkdtempSync(join(tmpdir(), 'factory-draft-')), access: 'none' as const })
 
 // Every entry must be a bare name, so a value cannot be written in the lap-3 form ("action: create|update").
@@ -279,17 +294,28 @@ export async function draft(model: Model, request: string, o: { signals?: string
   if (usesRun(body) && usesUi(body)) throw new Error('a command-line program does not go with browser pages')
   const spec = `${body.trimEnd()}${IFACE_HEAD}${j.iface}\n\`\`\`\n`
 
-  const k = await ask(model, 'scenario-drafter', `You are the scenario writer of a software factory. Write hidden acceptance scenarios (${usesRun(spec) ? 'command-line program' : 'HTTP JSON API'}) for the request. ` +
-    `A builder will implement a spec you do not see; your scenarios judge it.\n\n${req}\nINTERFACE (names and shapes the builder uses; it says nothing about behaviour):\n${j.iface}\n\n${usesRun(spec) ? RUN_SCENARIO_FORMAT : SCENARIO_FORMAT}${usesService(spec) ? `\n\n${SERVICE_STEPS}${usesRun(spec) ? `\n${SERVICE_WITH_RUN}` : ''}` : ''}${usesUi(spec) ? `\n\n${UI_STEPS}` : ''}${usesRun(spec) ? `\n\n${RUN_STEPS}\nCOMMAND (the factory adds it before your "run" arguments; "{app}" is the repository root): ${contractOf(spec).command.join(' ')}` : ''}${o.minority ? minorityPrompt(o.minorityBrief) : ''}`,
-  (k) => {
-    const words = usesRun(spec) ? new Set<string>((JSON.parse(j.iface).commands ?? []).flatMap((c: string) => c.split(' '))) : undefined
-    const scenarios = validateScenarios(k.scenarios, { commandWords: words }), more = k.assumptions === undefined ? [] : strs(k.assumptions, 'scenario drafter')
-    // A program has no server to send requests to, and a server no program to run: a program's steps are "run" steps, and the fake service's ("service": true) when the spec declares one.
-    if (scenarios.some((s) => s.steps.some((st) => !!st.run !== usesRun(spec) && !(usesRun(spec) && usesService(spec) && st.service)))) throw new Error(`scenario drafter: ${usesRun(spec) ? `every step of a command-line program is a "run" step${usesService(spec) ? ' or a "service" step' : ''}` : 'a "run" step needs a spec that declares a command-line program'}`)
-    if (o.minority) checkMinority(more, scenarios)
-    return { scenarios, more }
-  })
-  return { spec, scenarios: k.scenarios, assumptions: [...assumptions, ...(o.minorityBrief ? [`(experimenter) minority brief: ${o.minorityBrief}`] : []), ...k.more.map((x) => `(scenario writer) ${x}`)], classification: await classify(model, spec, o.app ?? '', k.scenarios, extractJson) }
+  const sizes = scenarioBatches(request), total = sizes.reduce((a, b) => a + b, 0)
+  const scenarios: Scenario[] = [], more: string[] = []
+  for (const [i, n] of sizes.entries()) {
+    // #71: the minority points are chosen in the first batch; later batches see them among the assumptions so far.
+    const batch = sizes.length === 1 ? `Write ${n} scenarios` : (i === 0 ? '' : `SCENARIOS SO FAR (earlier batches; do not reuse their ids or repeat what they check, and stay consistent with them and with the assumptions so far):\n${JSON.stringify(scenarios)}\nASSUMPTIONS SO FAR:\n${JSON.stringify(more)}\n`) +
+      `Write ${n} scenarios now: batch ${i + 1} of ${sizes.length} (${total} scenarios in all; ${i === 0 ? 'later batches see yours and write the rest' : 'the batches together cover the whole request'})`
+    const k = await ask(model, 'scenario-drafter', `You are the scenario writer of a software factory. Write hidden acceptance scenarios (${usesRun(spec) ? 'command-line program' : 'HTTP JSON API'}) for the request. ` +
+      `A builder will implement a spec you do not see; your scenarios judge it.\n\n${req}\nINTERFACE (names and shapes the builder uses; it says nothing about behaviour):\n${j.iface}\n\n${usesRun(spec) ? RUN_SCENARIO_FORMAT : SCENARIO_FORMAT}\n${batch}, a mix of inSpec true and false. You cannot ask questions: record every guess in assumptions.${usesService(spec) ? `\n\n${SERVICE_STEPS}${usesRun(spec) ? `\n${SERVICE_WITH_RUN}` : ''}` : ''}${usesUi(spec) ? `\n\n${UI_STEPS}` : ''}${usesRun(spec) ? `\n\n${RUN_STEPS}\nCOMMAND (the factory adds it before your "run" arguments; "{app}" is the repository root): ${contractOf(spec).command.join(' ')}` : ''}${o.minority && i === 0 ? minorityPrompt(o.minorityBrief) : ''}`,
+    (k) => {
+      const words = usesRun(spec) ? new Set<string>((JSON.parse(j.iface).commands ?? []).flatMap((c: string) => c.split(' '))) : undefined
+      const got = validateScenarios(k.scenarios, { commandWords: words }), more = k.assumptions === undefined ? [] : strs(k.assumptions, 'scenario drafter')
+      const reused = got.find((s) => scenarios.some((p) => p.id === s.id))
+      if (reused) throw new Error(`scenario drafter: id "${reused.id}" is already used by an earlier batch`)
+      // A program has no server to send requests to, and a server no program to run: a program's steps are "run" steps, and the fake service's ("service": true) when the spec declares one.
+      if (got.some((s) => s.steps.some((st) => !!st.run !== usesRun(spec) && !(usesRun(spec) && usesService(spec) && st.service)))) throw new Error(`scenario drafter: ${usesRun(spec) ? `every step of a command-line program is a "run" step${usesService(spec) ? ' or a "service" step' : ''}` : 'a "run" step needs a spec that declares a command-line program'}`)
+      if (o.minority && i === 0) checkMinority(more, got)
+      return { scenarios: k.scenarios as Scenario[], more }
+    })
+    scenarios.push(...k.scenarios)
+    more.push(...k.more)
+  }
+  return { spec, scenarios, assumptions: [...assumptions, ...(o.minorityBrief ? [`(experimenter) minority brief: ${o.minorityBrief}`] : []), ...more.map((x) => `(scenario writer) ${x}`)], classification: await classify(model, spec, o.app ?? '', scenarios, extractJson) }
 }
 
 // ---- builder ----
