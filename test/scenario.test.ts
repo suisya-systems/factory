@@ -64,6 +64,9 @@ test('expect.jsonAbsent: fails when the path exists (any value, null included), 
   assert.equal(checkStep(step(['files.out/plan.json']), 0, { files: {} }, {}), null)
   assert.match(checkStep(step(['files.out/plan.json']), 0, { files: { 'out/plan.json': { n: 1 } } }, {})!, /expected it absent/)
   assert.match(checkStep(step(['files.missing.json']), 0, { files: { 'missing.json': '' } }, {})!, /expected it absent/)
+  // a path naming a captured file is looked up as captured, not as the placeholder
+  assert.match(checkStep(step(['files.{{f}}']), 0, { files: { 'a.json': 1 } }, { f: 'a.json' })!, /response has files\.a\.json/)
+  assert.equal(checkStep(step(['files.{{f}}']), 0, { files: { 'a.json': 1 } }, { f: 'b.json' }), null)
 })
 
 test('expect.jsonAbsent is validated: a non-empty list of strings; in a run step a files.* path must be in "read"', () => {

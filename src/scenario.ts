@@ -193,7 +193,7 @@ export function checkStep(st: Step, status: number, json: unknown, vars: Record<
     if (!Array.isArray(v) || v.length !== n) return `expected length ${n}${p ? ` at ${p}` : ''}, got ${Array.isArray(v) ? v.length : 'non-array'}`
   }
   for (const p of e.jsonHas ?? []) if (get(json, p) === undefined) return `response missing ${p}`
-  for (const p of e.jsonAbsent ?? []) if (get(json, p) !== undefined) return `response has ${p}, expected it absent`
+  for (const q of e.jsonAbsent ?? []) { const p = fill(q, vars) as string; if (get(json, p) !== undefined) return `response has ${p}, expected it absent` } // a path may name a captured file
   if (e.json !== undefined && !subset(st.ui ? squash(fill(e.json, vars)) : fill(e.json, vars), json)) return 'response body did not match expected subset'
   for (const [name, p] of Object.entries(st.capture ?? {})) {
     const v = p.startsWith(HEADER) ? (headers?.get(p.slice(HEADER.length)) ?? undefined) : get(json, p)

@@ -162,7 +162,7 @@ export function compareStep(st: Step, p: Prediction, vars: Record<string, unknow
   }
   for (const path of e.jsonHas ?? []) out.push({ check: `has ${path}`, result: get(body, path) === undefined ? 'U' : 'M' })
   // A reply that does not show the value does not establish its absence (U); one that shows it contradicts (X).
-  for (const path of e.jsonAbsent ?? []) out.push({ check: `absent ${path}`, result: get(body, path) === undefined ? 'U' : 'X' })
+  for (const q of e.jsonAbsent ?? []) { const path = fillOpen(q, vars) as string; out.push({ check: `absent ${q}`, result: path === '?' || get(body, path) === undefined ? 'U' : 'X' }) }
   if (expected !== undefined) out.push({ check: 'json', result: tri(expected, body) })
   return out
 }
