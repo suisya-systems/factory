@@ -7,7 +7,7 @@ import type { Model, Task } from '../src/adapter.ts'
 import { main, approvalSummary } from '../src/cli.ts'
 import { classify, classifyReply, compareStep, predictInstruction, undecidedInRequest, withoutUndecided } from '../src/classify.ts'
 import { startGuard, Stop } from '../src/limits.ts'
-import { draft, extractJson } from '../src/roles.ts'
+import { draft, extractJson, SCENARIO_COUNT, scenarioBatches } from '../src/roles.ts'
 import { runScenario, type Scenario } from '../src/scenario.ts'
 import { vaultDir } from '../src/vault.ts'
 import { freshState, gitTarget, SCENARIOS, tmp, writeApp } from './helpers.ts'
@@ -22,10 +22,11 @@ const createGet = SCENARIOS[0] // POST 201 {id} capture id; GET /notes/{{id}} 20
 // A fake model answering per role; records every task it saw.
 function fake(predict: (t: Task) => unknown = () => ({ steps: [{ status: [201], body: { id: '?' }, basis: 'spec', quote: 'returns 201 with its id' }, { status: [200], body: { title: 'alpha' }, basis: 'spec', quote: 'GET /notes/:id returns the note' }] })) {
   const seen: Task[] = []
+  let batch = 0 // a long request is written in several batches (#71): each batch gets its own id
   const model: Model = async (t) => {
     seen.push(t)
     const reply = t.role === 'spec-drafter' ? { spec: SPEC, interface: IFACE, assumptions: ['no auth'] }
-      : t.role === 'scenario-drafter' ? { scenarios: [createGet], assumptions: ['titles are short'] }
+      : t.role === 'scenario-drafter' ? { scenarios: [batch++ ? { ...createGet, id: `create-get-${batch}` } : createGet], assumptions: ['titles are short'] }
         : predict(t)
     return { ok: true, costUsd: 0.1, text: '```json\n' + JSON.stringify(reply) + '\n```' }
   }
@@ -383,4 +384,29 @@ test('compareStep: keys naming captured ids are filled on both sides, as in the 
   assert.equal(res({ '{{a}}': 2 }), 'M')
   assert.equal(res({ m1: 2 }), 'M')
   assert.equal(res({ '{{a}}': 3 }), 'X')
+})
+
+test('#71: the number of scenarios follows the request size, written in batches that see the earlier ones', async () => {
+  const words = (n: number) => Array(n).fill('word').join(' ')
+  assert.deepEqual(scenarioBatches('add a memo'), [8]) // the floor
+  assert.deepEqual(scenarioBatches(words(420)), [12])
+  assert.deepEqual(scenarioBatches(words(495)), [7, 7]) // lap 13: 14
+  assert.deepEqual(scenarioBatches(words(1658)), [10, 10, 10, 10]) // lap 14: capped at 40
+  assert.ok(scenarioBatches(words(1658)).every((n) => n <= SCENARIO_COUNT.perCall))
+  const { model, seen } = fake()
+  const d = await draft(model, words(1658))
+  const calls = seen.filter((t) => t.role === 'scenario-drafter').map((t) => t.instruction)
+  assert.equal(calls.length, 4)
+  assert.doesNotMatch(calls.join('\n'), /8-15/)
+  assert.match(calls[0], /Write 10 scenarios now: batch 1 of 4 \(40 scenarios in all/)
+  assert.doesNotMatch(calls[0], /SCENARIOS SO FAR/)
+  assert.match(calls[3], /SCENARIOS SO FAR[^\n]*\n.*"create-get-3"/) // the last batch sees the earlier ones
+  assert.deepEqual(d.scenarios.map((s) => s.id), ['create-get', 'create-get-2', 'create-get-3', 'create-get-4'])
+  assert.equal(d.classification.length, 4)
+  const small = fake()
+  await draft(small.model, 'add a memo')
+  assert.match(small.seen.find((t) => t.role === 'scenario-drafter')!.instruction, /\nWrite 8 scenarios, a mix of inSpec true and false\./)
+  // a later batch reusing an earlier id is rejected (and gets its repair round)
+  const dup: Model = async (t) => ({ ok: true, costUsd: 0, text: JSON.stringify(t.role === 'spec-drafter' ? { spec: SPEC, interface: IFACE, assumptions: [] } : t.role === 'scenario-drafter' ? { scenarios: [createGet] } : { steps: [] }) })
+  await assert.rejects(draft(dup, words(1658)), /id "create-get" is already used by an earlier batch/)
 })
